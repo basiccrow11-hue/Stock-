@@ -549,6 +549,29 @@ describe('liquidity, partial fills and time in force', () => {
     expect(broker.state.roundTrips.map((t) => [t.closed, t.entryQtyTotal, t.exitQtyTotal])).toEqual([[true, 1000, 1000]]);
   });
 
+  it('shares one bar’s volume cap among every order that fills against it, however many there are', () => {
+    const { broker, next } = setup({ maxParticipation: 0.25 });
+    next(100, 100, 100, 100, 1000);
+    // Filled at once against the last bar: 25% of its 1000 shares, for one order or several.
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000 }).order!.filledQty).toBe(250);
+    for (let i = 0; i < 3; i++) {
+      const r = broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 250 });
+      expect(r.order!.filledQty).toBe(0);
+      expect(r.notes).toEqual(["Fills are capped at 25% of a bar's volume (Data & Settings), so the rest fills from the next bars."]);
+    }
+    expect(broker.position(S).quantity).toBe(250);
+    // The next bar brings 250 more; the orders still working take it in turn.
+    next(100, 100, 100, 100, 1000);
+    expect(broker.position(S).quantity).toBe(500);
+    // A bar's own fills count too: an order placed right after it gets only what they left.
+    const b = setup({ maxParticipation: 0.25 });
+    b.broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 99, quantity: 200, tif: 'day' });
+    b.next(100, 100, 99, 99.5, 1000);
+    expect(b.broker.position(S).quantity).toBe(200);
+    expect(b.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 200 }).order!.filledQty).toBe(50);
+    identity(b.broker);
+  });
+
   it('DAY orders expire at the regular close; GTC orders survive', () => {
     const broker = new SimBroker({ startingBalance: 10_000, config: ZERO_COST_CONFIG });
     broker.onBar(S, bar(et(D, '15:58'), 100, 100, 100, 100));

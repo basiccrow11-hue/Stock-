@@ -1,5 +1,5 @@
 /** Daily practice streak: top-bar chip, full panel, and milestone celebration. */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   FREEZE_EVERY,
   GOAL_OPTIONS,
@@ -100,8 +100,22 @@ function heatmapSummary(weeks: CalendarCell[][]): string {
 }
 
 function Heatmap({ weeks }: { weeks: CalendarCell[][] }) {
+  // Where the calendar is wider than its box (a narrow phone), show its end: this week and today.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const toEnd = () => {
+      el.scrollLeft = el.scrollWidth;
+    };
+    toEnd();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(toEnd);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [weeks.length]);
   return (
-    <div className="heatmap-wrap">
+    <div className="heatmap-wrap" ref={wrapRef}>
       <div className="heatmap" role="img" aria-label={heatmapSummary(weeks)}>
         <div className="heatmap-days" aria-hidden="true">
           <span />

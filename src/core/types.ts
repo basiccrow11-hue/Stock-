@@ -98,6 +98,8 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   commission?: number;
   /** Cancelled at fill time because a position the other way had opened since it was placed. */
   conflict?: boolean;
+  /** Market orders: the price they were checked against when placed (last price plus or minus half the spread). */
+  quotedPrice?: number;
 }
 
 export interface Fill {
@@ -150,8 +152,13 @@ export interface RoundTrip {
   /** Stop loss / take profit in force when the trade was opened (from the entry order). */
   initialStop?: number;
   initialTarget?: number;
-  /** Price the entry order was placed at (its limit, or its stop); absent for market entries and older trades. */
+  /**
+   * Price the entry order was placed at: its limit, its stop, or for a market order the price it was
+   * checked against. Absent on older trades.
+   */
   plannedEntry?: number;
+  /** Price of the trade's first entry fill (later adds move avgEntry, not this). Absent on older trades. */
+  firstEntry?: number;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

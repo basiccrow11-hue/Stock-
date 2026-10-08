@@ -171,7 +171,7 @@ export function OrderTicket() {
         : o.filledQty > 0
           ? `${name}: ${o.filledQty} filled, ${o.quantity - o.filledQty} ${o.status === 'partially_filled' ? 'still working' : o.status}.`
           : `${name} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}`;
-    setResult({ tone: 'success', text });
+    setResult({ tone: 'success', text: [text, ...(r.notes ?? [])].join(' ') });
     // The last warning is shown in the ticket itself; risk warnings were already visible before submitting.
     for (const w of r.warnings.slice(0, -1)) if (!w.startsWith('No stop loss')) toast('warning', w, 6000);
   };

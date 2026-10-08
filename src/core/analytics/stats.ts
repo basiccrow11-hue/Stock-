@@ -38,17 +38,23 @@ export interface PerformanceStats {
 }
 
 /**
- * The entry price and per-share risk to the initial stop that R is measured from: the average entry,
- * or, when that is at or past the stop (a gap through both the entry order and its stop), the price
- * the entry order was placed at, which is the risk that was planned.
+ * The entry price and per-share risk to the initial stop that R is measured from: the average entry;
+ * when that is at or past the stop, the first entry fill (adds past the stop moved the average); and
+ * when that is past it too (a gap through both the entry order and its stop), the price the entry
+ * order was placed at, which is the risk that was planned.
  */
-function riskBasis(t: RoundTrip): { entry: number; risk: number } | null {
+export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;
   const dir = t.direction === 'long' ? 1 : -1;
-  for (const entry of [t.avgEntry, t.plannedEntry]) {
+  const candidates: Array<[number | undefined, 'average' | 'first' | 'planned']> = [
+    [t.avgEntry, 'average'],
+    [t.firstEntry, 'first'],
+    [t.plannedEntry, 'planned'],
+  ];
+  for (const [entry, from] of candidates) {
     if (entry === undefined) continue;
     const risk = (entry - t.initialStop) * dir;
-    if (risk > 0) return { entry, risk };
+    if (risk > 0) return { entry, risk, from };
   }
   return null;
 }
@@ -57,9 +63,12 @@ export function initialRiskPerShare(t: RoundTrip): number | null {
   return riskBasis(t)?.risk ?? null;
 }
 
-/** True when the trade's entry filled at or past its own initial stop (only a gap can do that). */
+/**
+ * True when the trade's first entry filled at or past its own initial stop (only a gap can do that).
+ * Adds made later past the stop do not count: they are a choice, not a gap.
+ */
 export function entryPastStop(t: RoundTrip): boolean {
-  return t.initialStop !== undefined && (t.avgEntry - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
+  return t.initialStop !== undefined && ((t.firstEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
 }
 
 /** Realized R multiple: P/L divided by the dollars at risk to the initial stop. */

@@ -12,7 +12,7 @@ import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResu
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
-import { reviewTrade } from '../../core/learning/review';
+import { reviewTrade, type TradeReview } from '../../core/learning/review';
 import { CHALLENGES, evaluateChallenge } from '../../core/challenges/challenges';
 import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
 import { getProvider } from './dataRegistry';
@@ -70,6 +70,8 @@ export interface TradingSnapshot {
   warnings: string[];
   /** Journal entry id whose learning review should be shown. */
   reviewId: string | null;
+  /** Reviews of other trades that closed in the same step, shown after it in turn. */
+  reviewQueue: string[];
   /** Order-ticket field waiting for a price click on the chart. */
   pickTarget: 'limit' | 'stop' | 'stopLoss' | 'takeProfit' | null;
   pickedPrice: { field: string; price: number; seq: number } | null;
@@ -105,6 +107,8 @@ interface Engines {
   sim: SimulationDataProvider | null;
   simBroker: SimBroker | null;
   processedTrips: Set<string>;
+  /** Journal entries whose review waits for price after the exit, with the timeframe it was made on. */
+  watching: Map<string, Timeframe>;
   /** Orders whose cancellation (a position the other way opened before they filled) was announced. */
   noticedConflicts: Set<string>;
   timer: ReturnType<typeof setInterval> | null;
@@ -120,6 +124,7 @@ const eng: Engines = {
   sim: null,
   simBroker: null,
   processedTrips: new Set(),
+  watching: new Map(),
   noticedConflicts: new Set(),
   timer: null,
   lastTick: 0,
@@ -155,6 +160,7 @@ const EMPTY: TradingSnapshot = {
   error: null,
   warnings: [],
   reviewId: null,
+  reviewQueue: [],
   pickTarget: null,
   pickedPrice: null,
 };
@@ -318,24 +324,16 @@ async function processClosedTrips(): Promise<void> {
   const b = broker();
   const session = useTrading.getState().session;
   if (!b || !session) return;
-  const st = b.state;
-  for (const trip of st.roundTrips) {
-    if (!trip.closed || eng.processedTrips.has(trip.id)) continue;
+  // In the order they closed, so reviews of trades closed in one step come in that order too.
+  const closed = b.state.roundTrips.filter((t) => t.closed && !eng.processedTrips.has(t.id)).sort((x, y) => x.exitTime! - y.exitTime!);
+  for (const trip of closed) {
+    if (eng.processedTrips.has(trip.id)) continue;
     eng.processedTrips.add(trip.id);
     const settings = getSettings();
     const entry: JournalEntry = journalEntryFromTrip(trip, { sessionId: session.id, mode: session.mode, rewound: (eng.replay?.rewinds ?? 0) > 0, blind: session.blind });
+    const timeframe = useTrading.getState().timeframe;
     try {
-      entry.review = reviewTrade({
-        trip,
-        fills: st.fills,
-        orders: st.orders,
-        revealedBars: getBaseBars(trip.symbol),
-        timeframe: useTrading.getState().timeframe,
-        equityCurve: st.equityCurve,
-        startingBalance: st.startingBalance,
-        allTrips: st.roundTrips,
-        rules: settings.rules,
-      });
+      entry.review = reviewOf(trip, timeframe, false);
     } catch (e) {
       console.error('Review failed', e);
     }
@@ -353,12 +351,62 @@ async function processClosedTrips(): Promise<void> {
       }
     }
     await useJournal.getState().add(entry);
+    // Only once the entry is in the journal: settling looks it up there.
+    if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
     recordTradeClosed();
     const tone = trip.pnl >= 0 ? 'success' : 'error';
     toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
     if (settings.learningMode) {
       pause();
-      useTrading.setState({ reviewId: entry.id });
+      // A jump or a gap can close several trades at once: each gets its review, one after another.
+      const { reviewId, reviewQueue } = useTrading.getState();
+      if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
+      else useTrading.setState({ reviewId: entry.id });
+    }
+  }
+  settleWatchedReviews();
+}
+
+/** The learning review of `trip` with what the replay has shown so far. */
+function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean): TradeReview {
+  const st = broker()!.state;
+  return reviewTrade({
+    trip,
+    fills: st.fills,
+    orders: st.orders,
+    revealedBars: getBaseBars(trip.symbol),
+    timeframe,
+    equityCurve: st.equityCurve,
+    startingBalance: st.startingBalance,
+    allTrips: st.roundTrips,
+    rules: getSettings().rules,
+    now: st.clock,
+    ended: ended || (eng.replay?.finished ?? false),
+  });
+}
+
+/**
+ * Finish the reviews waiting on price after their exit once the replay has shown the whole window
+ * (or the session is over: `ended`), so the verdict on a stop is the same at any replay speed.
+ */
+function settleWatchedReviews(ended = false): void {
+  const b = broker();
+  if (!b || !eng.watching.size) return;
+  const journal = useJournal.getState();
+  for (const [id, timeframe] of eng.watching) {
+    const entry = journal.entries.find((e) => e.id === id);
+    const until = entry?.review?.afterExitUntil;
+    if (!entry || until === undefined) {
+      eng.watching.delete(id);
+      continue;
+    }
+    if (!ended && !(eng.replay?.finished ?? false) && b.state.clock < until) continue;
+    eng.watching.delete(id);
+    try {
+      // Rule checks stay as they were when the trade closed, even if the rules changed since.
+      void journal.updateReview(id, { ...reviewOf(entry.trip, timeframe, ended), rules: entry.review!.rules });
+    } catch (e) {
+      console.error('Review failed', e);
     }
   }
 }
@@ -448,6 +496,9 @@ function stopTimer(): void {
 
 function resetEngines(): void {
   stopTimer();
+  // The session ends here: reviews still waiting on price after their exit go by what it showed.
+  settleWatchedReviews(true);
+  eng.watching = new Map();
   eng.replay = null;
   eng.sim = null;
   eng.simBroker = null;
@@ -717,8 +768,11 @@ export function pickPrice(price: number): void {
   useTrading.setState({ pickTarget: null, pickedPrice: { field: t, price, seq: ++pickSeq } });
 }
 
+/** Close the review on screen and show the next waiting one (skipping trades undone since). */
 export function closeReview(): void {
-  useTrading.setState({ reviewId: null });
+  const entries = useJournal.getState().entries;
+  const queue = useTrading.getState().reviewQueue.filter((id) => entries.some((e) => e.id === id));
+  useTrading.setState({ reviewId: queue[0] ?? null, reviewQueue: queue.slice(1) });
 }
 
 export function lastPrice(symbol: string): number | null {

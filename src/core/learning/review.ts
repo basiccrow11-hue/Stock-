@@ -9,7 +9,7 @@
 import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../types';
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
-import { entryPastStop, initialRiskPerShare, plannedRR, rMultiple } from '../analytics/stats';
+import { entryPastStop, initialRiskPerShare, plannedRR, rMultiple, riskBasis } from '../analytics/stats';
 import { exchangeDate, exchangeMinuteOfDay, REGULAR_OPEN } from '../time';
 
 export interface TradingRules {
@@ -62,15 +62,22 @@ export interface TradeReview {
   mae: Excursion;
   /** Share of the best open profit that was kept (null when MFE is 0). */
   capturePct: number | null;
+  /** The planned risk to the initial stop (the R unit). */
   riskDollars: number | null;
   riskPctOfEquity: number | null;
+  /** Adds past the initial stop moved the average entry past it: the trade risked more than planned. */
+  addedPastStop?: boolean;
   equityAtEntry: number;
   atrAtEntry: number | null;
   stopDistanceAtr: number | null;
   targetDistanceAtr: number | null;
+  /** While price after the exit is still being watched: when the window ends (afterExit is null until then). */
+  afterExitUntil?: number;
   afterExit: {
     barsObserved: number;
-    /** Best price move in the trade's direction after the exit, per share (so far). */
+    /** What was watched: the window ("20 minutes") or, when the replay ended first, the bars it showed. */
+    span?: string;
+    /** Best price move in the trade's direction after the exit, per share. */
     favorableMove: number;
     adverseMove: number;
     reachedOriginalTarget: boolean;
@@ -148,6 +155,20 @@ function excursion(dollars: number, trip: RoundTrip, riskPerShare: number | null
 const money = (v: number) => `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`;
 const signed = (v: number) => `${v < -0.005 ? '−' : '+'}$${Math.abs(v).toFixed(2)}`;
 
+/**
+ * How long price is watched after an exit before the review says whether the stop was well placed,
+ * per chart timeframe: a fixed stretch, so the verdict does not depend on how fast the replay moved.
+ */
+export const AFTER_EXIT_WINDOW: Record<Timeframe, { seconds: number; label: string }> = {
+  '1m': { seconds: 20 * 60, label: '20 minutes' },
+  '5m': { seconds: 2 * 3600, label: '2 hours' },
+  '15m': { seconds: 5 * 3600, label: '5 hours' },
+  '30m': { seconds: 10 * 3600, label: '10 hours' },
+  '1h': { seconds: 24 * 3600, label: '24 hours' },
+  '4h': { seconds: 3 * 86400, label: '3 days' },
+  '1D': { seconds: 28 * 86400, label: '4 weeks' },
+};
+
 export interface ReviewInput {
   trip: RoundTrip;
   fills: readonly Fill[];
@@ -159,6 +180,13 @@ export interface ReviewInput {
   startingBalance: number;
   allTrips: readonly RoundTrip[];
   rules: TradingRules;
+  /**
+   * The replay clock. While it is inside the after-exit window the verdict waits (afterExitUntil);
+   * without it the bars given are taken as all there is.
+   */
+  now?: number;
+  /** The session is over: give the verdict on the bars shown, even if the window is not. */
+  ended?: boolean;
 }
 
 export function reviewTrade(input: ReviewInput): TradeReview {
@@ -177,6 +205,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const exitReason = exitReasonOf(trip, input.fills, input.orders);
   // A gap through both the entry order and its stop: R is measured from the order's price instead.
   const pastStop = entryPastStop(trip) && riskPerShare !== null;
+  const basis = riskBasis(trip);
+  const addedPastStop = basis?.from === 'first';
+  const firstEntry = trip.firstEntry ?? trip.avgEntry;
+  const firstFill = trip.fills.length ? input.fills.find((f) => f.id === trip.fills[0]) : undefined;
+  const entryOrder = firstFill && input.orders.find((o) => o.id === firstFill.orderId);
   const equityAtEntry = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
@@ -190,15 +223,22 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const targetDistance = trip.initialTarget !== undefined ? Math.abs(trip.initialTarget - trip.avgEntry) : null;
   const targetDistanceAtr = atrAtEntry && targetDistance ? targetDistance / atrAtEntry : null;
 
-  // After-exit tape, revealed bars only.
+  // After-exit tape over a fixed window, revealed bars only. Until the replay has shown the whole
+  // window the verdict waits, so it does not depend on how far one step or jump went.
   let afterExit: TradeReview['afterExit'] = null;
+  let afterExitUntil: number | undefined;
   if (trip.closed && trip.exitTime !== undefined && trip.avgExit !== undefined) {
-    const post = input.revealedBars.filter((b) => b.time >= trip.exitTime!);
-    if (post.length) {
+    const window = AFTER_EXIT_WINDOW[input.timeframe];
+    const until = trip.exitTime + window.seconds;
+    const post = input.revealedBars.filter((b) => b.time >= trip.exitTime! && b.time < until);
+    const whole = input.now === undefined || input.now >= until;
+    if (!whole && !input.ended) afterExitUntil = until;
+    else if (post.length) {
       const hi = Math.max(...post.map((b) => b.high));
       const lo = Math.min(...post.map((b) => b.low));
       afterExit = {
         barsObserved: post.length,
+        span: whole ? window.label : `${post.length} bar${post.length === 1 ? '' : 's'} the replay showed`,
         favorableMove: Math.max(0, long ? hi - trip.avgExit : trip.avgExit - lo),
         adverseMove: Math.max(0, long ? trip.avgExit - lo : hi - trip.avgExit),
         reachedOriginalTarget: trip.initialTarget !== undefined && (long ? hi >= trip.initialTarget : lo <= trip.initialTarget),
@@ -244,7 +284,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: tight ? 'bad' : 'neutral',
       title: tight ? 'Stop was tight relative to normal movement' : 'Stop distance',
-      detail: `Your stop was ${riskPerShare.toFixed(2)} away${pastStop ? ' from your order’s price' : ''}, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry!.toFixed(2)}).${
+      detail: `Your stop was ${riskPerShare.toFixed(2)} away${
+        basis?.from === 'planned' ? (entryOrder?.type === 'market' ? ' from the price when you placed your order' : ' from your order’s price') : basis?.from === 'first' ? ' from your first entry' : ''
+      }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry!.toFixed(2)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
     });
@@ -265,7 +307,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       findings.push({
         tone: 'neutral',
         title: 'Entry filled past your stop',
-        detail: `Price gapped through both your entry order at ${trip.plannedEntry!.toFixed(2)} and your stop at ${trip.initialStop!.toFixed(2)}, so the entry filled at ${trip.avgEntry.toFixed(2)} and the stop closed the trade at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk. An order left working while the market is closed fills at the next open wherever price is, even past its own stop.`,
+        detail: `${
+          entryOrder?.type === 'market'
+            ? `Your market order was placed${trip.plannedEntry !== undefined ? ` with price at ${trip.plannedEntry.toFixed(2)}` : ''} and filled at the next open, ${firstEntry.toFixed(2)}, already past your stop at ${trip.initialStop!.toFixed(2)}. The stop then closed the trade`
+            : `Price gapped through both your entry order${trip.plannedEntry !== undefined ? ` at ${trip.plannedEntry.toFixed(2)}` : ''} and your stop at ${trip.initialStop!.toFixed(2)}, so the entry filled at ${firstEntry.toFixed(2)} and the stop closed the trade`
+        } at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk. An order left working while the market is closed fills at the next open wherever price is, even past its own stop.`,
       });
     } else if (inR(exitPx) >= 0) {
       findings.push({
@@ -274,7 +320,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         detail: `You had moved your stop from ${trip.initialStop!.toFixed(2)} to ${stopAt.toFixed(2)}, and it filled at ${exitPx.toFixed(2)}${
           filledPast ? `, ${past.toFixed(2)} past it` : ''
         }: ${signed(trip.pnl)} on the trade after costs.${
-          afterExit ? ` Since then price has moved ${afterExit.favorableMove.toFixed(2)} further your way over the ${afterExit.barsObserved} bars revealed (so far).` : ''
+          afterExit ? ` In the ${afterExit.span} after your exit, price moved ${afterExit.favorableMove.toFixed(2)} further your way.` : ''
         }`,
       });
     } else if (filledPast) {
@@ -299,17 +345,23 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       const recovered = afterExit.favorableMove / riskPerShare;
       findings.push({
         tone: 'bad',
-        title: 'Stopped out, then price went your way (so far)',
-        detail: `After your stop filled, price moved ${afterExit.favorableMove.toFixed(2)} (${recovered.toFixed(1)}R) in your trade's direction over the ${afterExit.barsObserved} bars revealed since${
+        title: 'Stopped out, then price went your way',
+        detail: `In the ${afterExit.span} after your stop filled, price moved ${afterExit.favorableMove.toFixed(2)} (${recovered.toFixed(1)}R) in your trade's direction${
           afterExit.reachedOriginalTarget ? ', and reached your original target' : ''
         }. That pattern suggests the stop was placed where normal noise could reach it, not that the idea was wrong. It is one trade, so treat it as a data point, not a rule.`,
+      });
+    } else if (afterExitUntil !== undefined) {
+      findings.push({
+        tone: 'neutral',
+        title: 'What price does next',
+        detail: `Once the replay has shown the ${AFTER_EXIT_WINDOW[input.timeframe].label} after your stop filled, this review adds whether price went on against you or came back your way.`,
       });
     } else if (afterExit) {
       const where = moved ? `at your moved stop (${stopAt.toFixed(2)}; planned at ${trip.initialStop!.toFixed(2)})` : 'where you planned';
       findings.push({
         tone: 'good',
         title: 'Stop did its job',
-        detail: `Since you exited, price has not recovered meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction so far). ${
+        detail: `In the ${afterExit.span} after you exited, price did not recover meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction). ${
           outcome === 'loss' ? `Your loss was capped ${where}.` : `It closed ${parts.length > 1 ? `${main!.qty} of ${trip.exitQtyTotal} shares` : 'the position'} ${where}.`
         }`,
       });
@@ -354,7 +406,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     }
   }
 
-  if (riskPctOfEquity !== null) {
+  if (addedPastStop) {
+    findings.push({
+      tone: 'bad',
+      title: 'Added past your stop',
+      detail: `You added at prices past your original stop at ${trip.initialStop!.toFixed(2)}, which moved your average entry to ${trip.avgEntry.toFixed(2)}. Your plan risked ${riskPerShare!.toFixed(2)} per share from your first entry at ${firstEntry.toFixed(2)} (${money(riskDollars!)} at this size). Shares bought past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
+    });
+  } else if (riskPctOfEquity !== null) {
     findings.push({
       tone: riskPctOfEquity > rules.maxRiskPctPerTrade ? 'bad' : 'good',
       title: `Risked ${riskPctOfEquity.toFixed(2)}% of the account`,
@@ -373,10 +431,12 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     capturePct,
     riskDollars,
     riskPctOfEquity,
+    ...(addedPastStop ? { addedPastStop } : {}),
     equityAtEntry,
     atrAtEntry,
     stopDistanceAtr,
     targetDistanceAtr,
+    ...(afterExitUntil !== undefined ? { afterExitUntil } : {}),
     afterExit,
     findings,
     rules: checkRules(input, riskPctOfEquity, rr),
@@ -388,10 +448,11 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   const out: RuleCheck[] = [];
   const hasStop = trip.initialStop !== undefined;
   if (rules.requireStopLoss) out.push({ rule: 'Use a stop loss', passed: hasStop, detail: hasStop ? `Stop at ${trip.initialStop!.toFixed(2)}` : 'No stop was attached at entry' });
+  const addedPastStop = riskBasis(trip)?.from === 'first';
   out.push({
     rule: `Risk ≤ ${rules.maxRiskPctPerTrade}% per trade`,
-    passed: riskPctOfEquity === null ? (hasStop ? null : false) : riskPctOfEquity <= rules.maxRiskPctPerTrade + 1e-9,
-    detail: riskPctOfEquity === null ? 'Risk undefined without a stop' : `${riskPctOfEquity.toFixed(2)}%`,
+    passed: addedPastStop ? false : riskPctOfEquity === null ? (hasStop ? null : false) : riskPctOfEquity <= rules.maxRiskPctPerTrade + 1e-9,
+    detail: addedPastStop ? 'Added past your stop: more than the planned risk' : riskPctOfEquity === null ? 'Risk undefined without a stop' : `${riskPctOfEquity.toFixed(2)}%`,
   });
   if (rules.minRewardRisk > 0) {
     out.push({

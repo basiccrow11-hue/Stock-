@@ -2,6 +2,7 @@
 import type { HistoricalDataProvider } from '../../core/data/provider';
 import { DemoDataProvider } from '../../core/data/demoProvider';
 import { CsvDataProvider, type CsvDataset } from '../../core/data/csvProvider';
+import { sessionStampDailyBars } from '../../core/data/csv';
 import { AlpacaProvider, PolygonProvider } from '../../core/data/vendorProviders';
 import { getCredentials } from './credentials';
 import { getSettings } from './settingsStore';
@@ -20,7 +21,8 @@ export function getProvider(id: string): HistoricalDataProvider {
 
 export async function loadCsvDatasets(): Promise<CsvDataset[]> {
   try {
-    const list = await idb.all<CsvDataset>('datasets');
+    // Daily files imported before bars were filed under their session day may carry midnight stamps.
+    const list = (await idb.all<CsvDataset>('datasets')).map((d) => (d.baseTimeframe === '1D' ? { ...d, bars: sessionStampDailyBars(d.bars).bars } : d));
     csvProvider.setDatasets(list);
     return list;
   } catch {

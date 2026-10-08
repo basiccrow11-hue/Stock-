@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ReplayEngine } from '../replay/ReplayEngine';
 import { ReplaySession } from '../replay/ReplaySession';
 import { DemoDataProvider } from '../data/demoProvider';
+import { parseCsv } from '../data/csv';
 import { ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import type { BrokerCheckpoint } from '../broker/SimBroker';
 import { ema, rsi, vwap } from '../indicators/indicators';
@@ -411,6 +412,24 @@ describe('Play on coarse base bars', () => {
     // After the close the clock jumps to the next open, and that day's bar again takes its session.
     expect(s.advance(60)).toEqual([]);
     expect(s.now).toBe(et('2025-02-06', '09:30'));
+  });
+
+  it('never shows a daily bar stamped at UTC midnight before its session, and trades on it', () => {
+    const days = ['2024-02-28', '2024-02-29', '2024-03-01', '2024-03-04', '2024-03-05', '2024-03-06'];
+    // Close encodes the session: 301 for March 1.
+    const rows = days.map((d) => {
+      const c = Number(d.slice(5).replace('-', ''));
+      return `${d}T00:00:00Z,${c},${c + 1},${c - 1},${c}`;
+    });
+    const parsed = parseCsv(`time,open,high,low,close\n${rows.join('\n')}\n`);
+    const e = new ReplayEngine({ symbol: 'Z', start: et('2024-03-04', '09:30'), end: et('2024-03-06', '16:00'), baseTimeframe: parsed.baseTimeframe }, parsed.bars);
+    const s = new ReplaySession(e, { symbol: 'Z', date: '2024-03-04', startTime: '09:30', endTime: '16:00', endDate: '2024-03-06', startingBalance: 100_000, lookbackDays: 5 }, ZERO_COST_CONFIG, 'z', 'HISTORICAL');
+    expect(e.lastBar()!.close).toBe(301);
+    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('filled');
+    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'limit', limitPrice: 999, quantity: 10, tif: 'gtc' }).order!.status).toBe('filled');
+    s.stepCandle('1D');
+    expect(s.now).toBe(et('2024-03-04', '16:00'));
+    expect(e.lastBar()!.close).toBe(304);
   });
 
   it('plays an hourly bar over its hour, and never reveals one that ends after the end time', () => {

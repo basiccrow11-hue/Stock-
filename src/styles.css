@@ -463,6 +463,11 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .area-right { overflow: visible; }
   .area-bottom { height: 320px; }
 }
+/* Short screens (a phone in landscape): the replay controls sit at the bottom left of the view, so
+   toasts go to the bottom right, narrower, instead of over Play and Pause. */
+@media (max-width: 1180px) and (max-height: 640px), (max-height: 560px) {
+  .toasts { left: auto; right: 8px; bottom: 8px; max-width: min(280px, calc(100vw - 16px)); }
+}
 @media (max-width: 820px) {
   .two-col { grid-template-columns: minmax(0, 1fr); }
   .appearance-grid { grid-template-columns: minmax(0, 1fr); }

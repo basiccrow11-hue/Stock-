@@ -3,7 +3,7 @@
  * Accepts common column names and time formats, validates every row, and reports what it skipped.
  */
 import type { Bar, Timeframe } from '../types';
-import { REGULAR_OPEN, exchangeTimeToUnix } from '../time';
+import { REGULAR_OPEN, exchangeTimeToUnix, isTradingDay } from '../time';
 
 export interface CsvParseOptions {
   /** How to read timestamps without an explicit offset. Default: exchange time (America/New_York). */
@@ -66,17 +66,23 @@ function parseNumber(s: string): number {
   return Number(s.replace(/[$,\s]/g, ''));
 }
 
-/** Parses many timestamp formats. Returns unix seconds or NaN. `dateOnly` reports daily data. */
-export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: number; dateOnly: boolean } {
+/**
+ * Parses many timestamp formats. Returns unix seconds or NaN. `dateOnly` reports daily data. `date`
+ * is the calendar day the stamp names (YYYY-MM-DD): as written for text, the UTC day for epoch
+ * numbers. Daily bars are filed under it, whatever time of day the vendor stamped them with.
+ */
+export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: number; dateOnly: boolean; date?: string } {
   const s = raw.trim().replace(/^"|"$/g, '');
   if (/^\d{9,13}(\.\d+)?$/.test(s)) {
     const n = Number(s);
-    return { t: Math.floor(n > 1e11 ? n / 1000 : n), dateOnly: false };
+    const t = Math.floor(n > 1e11 ? n / 1000 : n);
+    return { t, dateOnly: false, date: new Date(t * 1000).toISOString().slice(0, 10) };
   }
   // ISO / RFC with explicit zone
-  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) && /\d{4}-\d{2}-\d{2}[T ]\d/.test(s)) {
+  const zoned = s.match(/^(\d{4}-\d{2}-\d{2})[T ]\d/);
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) && zoned) {
     const ms = Date.parse(s.replace(' ', 'T'));
-    return { t: Number.isNaN(ms) ? NaN : Math.floor(ms / 1000), dateOnly: false };
+    return { t: Number.isNaN(ms) ? NaN : Math.floor(ms / 1000), dateOnly: false, date: zoned[1] };
   }
   let y: number, mo: number, d: number;
   let rest = '';
@@ -95,7 +101,7 @@ export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: num
     return { t: NaN, dateOnly: false };
   }
   const date = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  if (!rest) return { t: exchangeTimeToUnix(date, REGULAR_OPEN), dateOnly: true };
+  if (!rest) return { t: exchangeTimeToUnix(date, REGULAR_OPEN), dateOnly: true, date };
   const tm = rest.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*([AaPp][Mm])?$/);
   if (!tm) return { t: NaN, dateOnly: false };
   let hh = Number(tm[1]);
@@ -106,8 +112,35 @@ export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: num
     if (hh === 12) hh = pm ? 12 : 0;
     else if (pm) hh += 12;
   }
-  if (naive === 'utc') return { t: Date.UTC(y, mo - 1, d, hh, mm, ss) / 1000, dateOnly: false };
-  return { t: exchangeTimeToUnix(date, hh * 60 + mm) + ss, dateOnly: false };
+  if (naive === 'utc') return { t: Date.UTC(y, mo - 1, d, hh, mm, ss) / 1000, dateOnly: false, date };
+  return { t: exchangeTimeToUnix(date, hh * 60 + mm) + ss, dateOnly: false, date };
+}
+
+/**
+ * Files daily bars under their session: 09:30 exchange time on the day each one names. Vendors stamp
+ * daily bars at midnight UTC, midnight New York, the open or the close; as instants, midnight UTC
+ * falls on the previous evening in New York, which would date the bar a day early and show it before
+ * its session has traded. `dates` gives the day per bar (the UTC day of the stamp when absent, which
+ * is right for all of those). Bars on weekends and market holidays are dropped and counted.
+ */
+export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, string>): { bars: Bar[]; offDays: number; merged: number } {
+  const out: Bar[] = [];
+  let offDays = 0;
+  for (const b of bars) {
+    const date = dates?.get(b) ?? new Date(b.time * 1000).toISOString().slice(0, 10);
+    if (!isTradingDay(date)) {
+      offDays++;
+      continue;
+    }
+    out.push({ ...b, time: exchangeTimeToUnix(date, REGULAR_OPEN) });
+  }
+  out.sort((a, b) => a.time - b.time);
+  const deduped: Bar[] = [];
+  for (const b of out) {
+    if (deduped.length && deduped[deduped.length - 1].time === b.time) deduped[deduped.length - 1] = b;
+    else deduped.push(b);
+  }
+  return { bars: deduped, offDays, merged: out.length - deduped.length };
 }
 
 function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
@@ -167,12 +200,13 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
 
   const warnings: string[] = [];
   const bars: Bar[] = [];
+  const dates = new Map<Bar, string>();
   let skipped = 0;
   let sawDateOnly = false;
   let sawIntraday = false;
   for (let li = 1; li < lines.length; li++) {
     const cols = splitLine(lines[li], delim);
-    let ts: { t: number; dateOnly: boolean };
+    let ts: { t: number; dateOnly: boolean; date?: string };
     if (iDate >= 0 && iClock >= 0) ts = parseTimestamp(`${cols[iDate]} ${cols[iClock]}`, opts.naiveTimezone);
     else ts = parseTimestamp(cols[iDateTime >= 0 ? iDateTime : iDate] ?? '', opts.naiveTimezone);
     const o = parseNumber(cols[iOpen]);
@@ -190,7 +224,9 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     }
     if (ts.dateOnly) sawDateOnly = true;
     else sawIntraday = true;
-    bars.push({ time: ts.t, open: o, high: h, low: l, close: c, volume: Number.isFinite(v) && v > 0 ? v : 0 });
+    const bar: Bar = { time: ts.t, open: o, high: h, low: l, close: c, volume: Number.isFinite(v) && v > 0 ? v : 0 };
+    bars.push(bar);
+    if (ts.date) dates.set(bar, ts.date);
   }
   if (!bars.length) throw new Error('No valid rows. Check the column format.');
   if (sawDateOnly && sawIntraday) warnings.push('The file mixes daily and intraday rows.');
@@ -203,18 +239,55 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     }
     deduped.push(b);
   }
-  if (deduped.length < bars.length) warnings.push(`${bars.length - deduped.length} duplicate timestamps were merged (last row kept).`);
+  let merged = bars.length - deduped.length;
   const tf = detectTimeframe(deduped, sawDateOnly && !sawIntraday);
-  if (opts.timestampsAreBarClose && tf !== '1D') for (const b of deduped) b.time -= TF_SECONDS[tf];
+  let out = deduped;
+  let offDays = 0;
+  if (tf === '1D') {
+    const daily = sessionStampDailyBars(deduped, dates);
+    out = daily.bars;
+    merged += daily.merged;
+    offDays = daily.offDays;
+    if (daily.offDays) warnings.push(`${daily.offDays} daily bar(s) dated on a weekend or market holiday were skipped.`);
+    if (!out.length) throw new Error('No daily bars fall on trading days. Check the date column.');
+  } else if (opts.timestampsAreBarClose) for (const b of out) b.time -= TF_SECONDS[tf];
+  if (merged) warnings.push(`${merged} duplicate timestamps were merged (last row kept).`);
   if (iVol < 0) warnings.push('No volume column: volume-based features (VWAP, participation limits) will be degraded.');
   if (skipped) warnings.push(`${skipped} invalid row(s) skipped.`);
   return {
-    bars: deduped,
+    bars: out,
     baseTimeframe: tf,
     rowsRead: lines.length - 1,
-    rowsSkipped: skipped,
+    rowsSkipped: skipped + offDays,
     warnings,
-    firstTime: deduped[0].time,
-    lastTime: deduped[deduped.length - 1].time,
+    firstTime: out[0].time,
+    lastTime: out[out.length - 1].time,
   };
+}
+
+/**
+ * Two sets of bars for one ticker as one, in time order. Where both have a bar at the same time,
+ * `incoming` wins. Both must be sorted by time.
+ */
+export function combineBars(existing: readonly Bar[], incoming: readonly Bar[]): { bars: Bar[]; replaced: number } {
+  const bars: Bar[] = [];
+  let replaced = 0;
+  let i = 0;
+  let j = 0;
+  while (i < existing.length || j < incoming.length) {
+    const a = existing[i];
+    const b = incoming[j];
+    if (b === undefined || (a !== undefined && a.time < b.time)) {
+      bars.push(a);
+      i++;
+    } else {
+      if (a !== undefined && a.time === b.time) {
+        replaced++;
+        i++;
+      }
+      bars.push(b);
+      j++;
+    }
+  }
+  return { bars, replaced };
 }

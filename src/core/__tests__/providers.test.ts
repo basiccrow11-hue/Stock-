@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseCsv, parseTimestamp } from '../data/csv';
+import { combineBars, parseCsv, parseTimestamp } from '../data/csv';
 import { CsvDataProvider } from '../data/csvProvider';
 import { AlpacaProvider, PolygonProvider } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
@@ -35,6 +35,43 @@ describe('CSV import', () => {
     expect(r.rowsSkipped).toBe(2);
     expect(r.bars[1].close).toBe(11.5); // uses Close, not Adj Close
     expect(r.warnings.join(' ')).toMatch(/2 invalid/);
+  });
+
+  it('files daily bars under the day they name, whatever time of day they are stamped with', () => {
+    const days = ['2024-03-01', '2024-03-04', '2024-03-05'];
+    const row = (stamp: string, i: number) => `${stamp},${100 + i},${101 + i},${99 + i},${100.5 + i},1000`;
+    const styles: Record<string, (d: string) => string> = {
+      'date only': (d) => d,
+      'UTC midnight': (d) => `${d}T00:00:00Z`,
+      'UTC midnight offset': (d) => `${d} 00:00:00+00:00`,
+      'New York midnight': (d) => `${d} 00:00:00-05:00`,
+      'New York midnight as UTC': (d) => `${d}T05:00:00Z`,
+      'naive midnight': (d) => `${d} 00:00`,
+      'naive close': (d) => `${d} 16:00`,
+      'epoch seconds at UTC midnight': (d) => String(Date.parse(`${d}T00:00:00Z`) / 1000),
+      'epoch ms at New York midnight': (d) => String(Date.parse(`${d}T05:00:00Z`)),
+    };
+    for (const [name, stamp] of Object.entries(styles)) {
+      for (const naiveTimezone of ['exchange', 'utc'] as const) {
+        const r = parseCsv(`date,open,high,low,close,volume\n${days.map((d, i) => row(stamp(d), i)).join('\n')}\n`, { naiveTimezone });
+        expect([name, r.baseTimeframe]).toEqual([name, '1D']);
+        expect([name, r.bars.map((b) => b.time)]).toEqual([name, days.map((d) => et(d, '09:30'))]);
+        expect(r.bars[1].close).toBe(101.5);
+      }
+    }
+    // A weekend day (a vendor's off-by-one, or a stray row) is not a session: dropped with a warning.
+    const weekend = parseCsv('date,open,high,low,close\n2024-03-01,1,1,1,1\n2024-03-02,1,1,1,1\n2024-03-04,1,1,1,1\n');
+    expect(weekend.bars.map((b) => b.time)).toEqual([et('2024-03-01', '09:30'), et('2024-03-04', '09:30')]);
+    expect(weekend.warnings.join(' ')).toMatch(/1 daily bar\(s\) dated on a weekend or market holiday were skipped/);
+  });
+
+  it('adds a second file for a ticker to the first, the newer file winning where they overlap', () => {
+    const b = (t: number, c: number) => ({ time: t, open: c, high: c, low: c, close: c, volume: 1 });
+    const r = combineBars([b(1, 1), b(3, 1), b(5, 1)], [b(2, 2), b(3, 2), b(6, 2)]);
+    expect(r.bars.map((x) => [x.time, x.close])).toEqual([[1, 1], [2, 2], [3, 2], [5, 1], [6, 2]]);
+    expect(r.replaced).toBe(1);
+    expect(combineBars([], [b(1, 1)]).bars).toHaveLength(1);
+    expect(combineBars([b(1, 1)], []).bars).toHaveLength(1);
   });
 
   it('can shift close-stamped bars to open time', () => {

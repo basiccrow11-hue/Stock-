@@ -60,6 +60,11 @@ export interface BrokerState {
   openTripBySymbol: Record<string, string>;
   lastPrice: Record<string, number>;
   lastBar: Record<string, Bar>;
+  /**
+   * Shares already traded against each symbol's last bar: its own fills, then orders filled at once
+   * before the next bar. maxParticipation caps their total, not each order.
+   */
+  barVolumeUsed?: Record<string, number>;
   /** End time of the most recent processed bar (the broker's "now"). */
   clock: UnixSeconds;
   sessionDate: string;
@@ -156,6 +161,7 @@ export class SimBroker {
         openTripBySymbol: {},
         lastPrice: {},
         lastBar: {},
+        barVolumeUsed: {},
         clock: 0,
         sessionDate: '',
         dayStartEquity: opts.startingBalance,
@@ -424,6 +430,7 @@ export class SimBroker {
       updatedAt: now,
       triggered: false,
       sessionDate: this.orderSessionDate(now),
+      ...(req.type === 'market' ? { quotedPrice: marketRef } : {}),
     };
     const session = this.currentSession();
     if (!this.eligible(order, session)) {
@@ -439,9 +446,14 @@ export class SimBroker {
     this.s.orders.push(order);
     this.log('accepted', `${describe(order)} accepted`, order.id);
 
-    if (this.cfg.marketOrderFill === 'last_price' && order.status === 'working') this.tryImmediate(order);
+    const notes: string[] = [];
+    if (this.cfg.marketOrderFill === 'last_price' && order.status === 'working') {
+      this.tryImmediate(order);
+      // Only the volume cap keeps a market order from filling at once here.
+      if (order.type === 'market' && isOpen(order)) notes.push(`Fills are capped at ${Math.round(this.cfg.maxParticipation * 100)}% of a bar's volume (Data & Settings), so the rest fills from the next bars.`);
+    }
     this.touch();
-    return { ok: true, order: { ...order }, warnings };
+    return { ok: true, order: { ...order }, warnings, ...(notes.length ? { notes } : {}) };
   }
 
   cancel(orderId: string, reason = 'Cancelled by user'): boolean {
@@ -502,7 +514,7 @@ export class SimBroker {
       }
     }
     const r = this.submit({ symbol, action: pos.quantity > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(pos.quantity), tif: 'day' });
-    return notes.length ? { ...r, notes } : r;
+    return notes.length ? { ...r, notes: [...(r.notes ?? []), ...notes] } : r;
   }
 
   /** Qty already committed to working exit orders; an OCO group counts once. */
@@ -588,6 +600,7 @@ export class SimBroker {
 
     const path = this.intrabarPath(symbol, bar);
     let capacity = this.cfg.maxParticipation > 0 ? Math.floor(bar.volume * this.cfg.maxParticipation) : Infinity;
+    let traded = 0;
     const ext = session !== 'regular';
 
     // Excursions (MFE/MAE): every price the path passes while a trade is open, including the part of
@@ -618,6 +631,7 @@ export class SimBroker {
         reach(pos);
         const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, skip);
         capacity -= used;
+        traded += used;
         // A trade opened (or reversed into) here starts at this level.
         tripId = this.s.openTripBySymbol[symbol];
         reach(pos);
@@ -629,6 +643,7 @@ export class SimBroker {
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };
+    (this.s.barVolumeUsed ??= {})[symbol] = traded;
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
 
     this.recordEquity(bar.time + barSeconds);
@@ -748,9 +763,12 @@ export class SimBroker {
     if (!this.eligible(o, session)) return;
     const level = this.triggerLevel(o, last, last, session !== 'regular');
     if (level === null) return;
-    const capacity = this.cfg.maxParticipation > 0 ? Math.floor(bar.volume * this.cfg.maxParticipation) : Infinity;
+    // The last bar's volume is shared by everything that trades against it, however many orders.
+    const used = this.s.barVolumeUsed?.[o.symbol] ?? 0;
+    const capacity = this.cfg.maxParticipation > 0 ? Math.max(0, Math.floor(bar.volume * this.cfg.maxParticipation) - used) : Infinity;
     const skip = new Set<string>();
-    this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip);
+    const filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip);
+    if (filled > 0) (this.s.barVolumeUsed ??= {})[o.symbol] = used + filled;
     // A stop-limit may have triggered without filling; that's fine, it now rests as a limit.
   }
 
@@ -904,7 +922,8 @@ export class SimBroker {
         commission: 0,
         initialStop: o.stopLoss,
         initialTarget: o.takeProfit,
-        plannedEntry: o.type === 'limit' ? o.limitPrice : o.type === 'market' ? undefined : o.stopPrice,
+        plannedEntry: o.type === 'limit' ? o.limitPrice : o.type === 'market' ? o.quotedPrice : o.stopPrice,
+        firstEntry: fill.price,
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,

@@ -202,8 +202,9 @@ export class ReplayEngine {
 
 export function barEndTime(bar: Bar, tf: Timeframe): UnixSeconds {
   if (tf === '1D') {
+    // Daily bars are stamped at their session's open (csv.ts files them so); a bar never ends before it starts.
     const d = exchangeDate(bar.time);
-    return exchangeTimeToUnix(d, regularCloseMinute(d));
+    return Math.max(exchangeTimeToUnix(d, regularCloseMinute(d)), bar.time + 60);
   }
   return bar.time + TIMEFRAME_MINUTES[tf] * 60;
 }

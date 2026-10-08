@@ -219,11 +219,21 @@ export function Stat({ k, v, cls }: { k: string; v: ReactNode; cls?: string }) {
   );
 }
 
+/** True when `el` got focus from the keyboard (or a script after keyboard use), not from a click or tap. */
+function keyboardFocused(el: HTMLElement): boolean {
+  try {
+    return el.matches(':focus-visible');
+  } catch {
+    return true; // browsers without :focus-visible
+  }
+}
+
 /**
  * Keeps keyboard focus in a part of the page when the focused control there is disabled or removed
  * by what happened (Restart at the start, Close position, Remove rule, Play at the end): focus goes to
  * `home(root)` instead of dropping to the page body, where screen-reader users lose their place. Put
- * the returned ref on the part's root element.
+ * the returned ref on the part's root element. A control clicked or tapped is left alone, and the
+ * rescue never scrolls, so what the action showed (a result line, the next rule) stays in view.
  */
 export function useFocusRescue<T extends HTMLElement>(home: (root: T) => HTMLElement | null | undefined): (root: T | null) => (() => void) | undefined {
   const rootRef = useRef<T | null>(null);
@@ -236,7 +246,7 @@ export function useFocusRescue<T extends HTMLElement>(home: (root: T) => HTMLEle
     const active = document.activeElement;
     if (active && active !== document.body && active !== el) return;
     last.current = null;
-    if (rootRef.current) homeRef.current(rootRef.current)?.focus();
+    if (rootRef.current) homeRef.current(rootRef.current)?.focus({ preventScroll: true });
   }).current;
   // A callback ref, so it also works on a root that is rendered later (or again).
   const ref = useCallback(
@@ -244,7 +254,8 @@ export function useFocusRescue<T extends HTMLElement>(home: (root: T) => HTMLEle
       if (!root) return;
       rootRef.current = root;
       const onIn = (e: FocusEvent) => {
-        last.current = e.target as HTMLElement;
+        const el = e.target as HTMLElement;
+        last.current = keyboardFocused(el) ? el : null;
       };
       // Chromium reports a disabled or removed control as a blur; a real move away (a click on the
       // chart, Tab out) leaves it usable, and then there is nothing to rescue.

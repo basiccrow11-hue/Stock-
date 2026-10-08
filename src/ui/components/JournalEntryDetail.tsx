@@ -197,7 +197,11 @@ function ReviewView({ review: r }: { review: TradeReview }) {
         <Stat k="Max favorable (MFE)" v={`${signedMoney(r.mfe.dollars)}${r.mfe.r !== null ? ` · ${r.mfe.r.toFixed(2)}R` : ''}`} cls="pos" />
         <Stat k="Max adverse (MAE)" v={`${signedMoney(-Math.abs(r.mae.dollars))}${r.mae.r !== null ? ` · ${r.mae.r.toFixed(2)}R` : ''}`} cls="neg" />
         <Stat k="Kept of best open profit" v={r.capturePct !== null ? `${r.capturePct.toFixed(0)}%` : '—'} />
-        <Stat k="Risk taken" v={r.riskDollars !== null ? `${money(r.riskDollars)} · ${r.riskPctOfEquity?.toFixed(2)}%` : 'No stop'} cls={r.riskDollars === null ? 'warn' : ''} />
+        <Stat
+          k="Risk taken"
+          v={r.riskDollars === null ? 'No stop' : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)} · ${r.riskPctOfEquity?.toFixed(2)}%`}
+          cls={r.riskDollars === null || r.addedPastStop ? 'warn' : ''}
+        />
         <Stat k="Planned R:R" v={r.plannedRR !== null ? `${r.plannedRR.toFixed(2)}:1` : '—'} />
         <Stat k="Stop distance" v={r.stopDistanceAtr !== null ? `${r.stopDistanceAtr.toFixed(2)} ATR` : '—'} />
         <Stat k="ATR at entry" v={r.atrAtEntry !== null ? price(r.atrAtEntry) : '—'} />

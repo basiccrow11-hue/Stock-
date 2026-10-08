@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
+import type { TradeReview } from '../../core/learning/review';
 import { dayKey } from '../../core/streak/streak';
 
 const hasNotes = (n: JournalNotes) => Object.values(n).some((v) => typeof v === 'string' && v.trim() !== '');
@@ -164,6 +165,8 @@ interface JournalStore {
   updateNotes: (id: string, notes: Partial<JournalNotes>, tag?: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   removeWhere: (pred: (e: JournalEntry) => boolean) => Promise<number>;
+  /** Replace the trade review (the notes and everything else stay as stored). */
+  updateReview: (id: string, review: TradeReview) => Promise<void>;
 }
 
 export const useJournal = create<JournalStore>()((set, get) => ({
@@ -229,6 +232,11 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     const doomed = get().entries.filter(pred);
     for (const e of doomed) await get().remove(e.id);
     return doomed.length;
+  },
+  updateReview: async (id, review) => {
+    const entry = get().entries.find((e) => e.id === id);
+    if (!entry) return;
+    await write(id, entry, { ...entry, review }, (stored) => ({ ...stored, review }));
   },
 }));
 

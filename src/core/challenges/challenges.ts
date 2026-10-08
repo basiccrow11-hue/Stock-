@@ -4,7 +4,7 @@
  * marked unofficial: you have seen the future, so the result cannot count as a blind result.
  */
 import type { EquityPoint, RoundTrip } from '../types';
-import { plannedRR, initialRiskPerShare } from '../analytics/stats';
+import { plannedRR, initialRiskPerShare, riskBasis } from '../analytics/stats';
 import { equityAt, followedAllRules, checkRules, type TradingRules } from '../learning/review';
 
 export interface ChallengeContext {
@@ -55,6 +55,7 @@ export const CHALLENGES: ChallengeDefinition[] = [
       for (const t of ctx.trips) {
         const r = riskPct(t, ctx);
         if (r === null) return { status: 'failed', progress: 0, detail: `Trade on ${t.symbol} had no stop loss.` };
+        if (riskBasis(t)?.from === 'first') return { status: 'failed', progress: 0, detail: `A trade on ${t.symbol} added past its stop, so it risked more than planned.` };
         if (r > 1 + 1e-6) return { status: 'failed', progress: 0, detail: `A trade risked ${r.toFixed(2)}% (limit 1%).` };
       }
       const target = ctx.startingBalance * 1.2;

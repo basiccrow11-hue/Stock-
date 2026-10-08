@@ -134,12 +134,49 @@ describe('learning review', () => {
     // Worst price while in the trade was the stop fill (99.80); the 99.70 low came after the exit.
     expect(review.mae.perShare).toBeCloseTo(0.2, 6);
     expect(review.afterExit!.reachedOriginalTarget).toBe(true);
-    expect(review.findings.map((f) => f.title)).toContain('Stopped out, then price went your way (so far)');
+    expect(review.findings.map((f) => f.title)).toContain('Stopped out, then price went your way');
     expect(review.rules.find((r) => r.rule.startsWith('Risk'))!.passed).toBe(true);
 
     // With only the bars revealed up to the exit, the review cannot know what happened later.
     const early = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars.slice(0, 4), timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
     expect(early.afterExit!.reachedOriginalTarget).toBe(false);
+  });
+
+  it('waits for a fixed stretch after a stop before judging it, so the verdict does not depend on replay speed', () => {
+    const t0 = et('2025-01-15', '10:00');
+    const b = new SimBroker({ startingBalance: 10_000, config: ZERO_COST_CONFIG });
+    const bars = [bar(t0, 100, 100, 100, 100)];
+    b.onBar('T', bars[0]);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 10, stopLoss: 99.5, takeProfit: 101 });
+    // Stopped out in the first bar; then flat for 20 minutes, then a rally the window does not reach.
+    const path: [number, number, number, number][] = [[100, 100.1, 99.4, 99.5], ...Array.from({ length: 21 }, () => [99.5, 99.6, 99.4, 99.5] as [number, number, number, number]), ...Array.from({ length: 10 }, () => [101, 101.5, 100.9, 101.2] as [number, number, number, number])];
+    path.forEach(([o, h, l, c], i) => {
+      const nb = bar(t0 + 60 * (i + 1), o, h, l, c);
+      bars.push(nb);
+      b.onBar('T', nb);
+    });
+    const st = b.state;
+    const trip = st.roundTrips[0];
+    const at = (shown: number, now: number, ended = false) =>
+      reviewTrade({ trip, fills: st.fills, orders: st.orders, revealedBars: bars.slice(0, shown), timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES, now, ended });
+    const exit = trip.exitTime!;
+    // Right after the stop (one step): nothing to judge yet, and the review says what it waits for.
+    const waiting = at(2, exit + 60);
+    expect(waiting.afterExit).toBeNull();
+    expect(waiting.afterExitUntil).toBe(exit + 20 * 60);
+    expect(waiting.findings.map((f) => f.title)).toContain('What price does next');
+    expect(waiting.findings.map((f) => f.title)).not.toContain('Stop did its job');
+    // A slow step-through and a jump far past the window give the same verdict, on the same 20 minutes.
+    const stepped = at(23, exit + 20 * 60);
+    const jumped = at(bars.length, exit + 3 * 3600);
+    for (const r of [stepped, jumped]) {
+      expect(r.afterExitUntil).toBeUndefined();
+      expect(r.findings.find((f) => f.title === 'Stop did its job')!.detail).toContain('In the 20 minutes after you exited, price did not recover meaningfully (best 0.10 in your direction).');
+    }
+    expect(stepped.afterExit).toEqual(jumped.afterExit);
+    // The replay ended inside the window: judged on what it showed, and said so.
+    const ended = at(6, exit + 4 * 60, true);
+    expect(ended.findings.find((f) => f.title === 'Stop did its job')!.detail).toContain('In the 4 bars the replay showed after you exited');
   });
 
   it('measures MFE/MAE as the best and worst open P/L, through partial exits and adds', () => {
@@ -341,6 +378,68 @@ describe('learning review', () => {
       expect(titles).not.toContain('No stop loss');
       expect(review.rules.filter((r) => r.passed === false)).toEqual([]);
       expect(evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
+    });
+
+    it('measures risk from the price a market order was placed at when it fills at the next open past its stop', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const bars = [bar(et('2025-01-15', '15:59'), 101, 101.2, 100.8, 101), bar(et('2025-01-15', '16:05'), 101, 101, 101, 101, 5000)];
+      for (const x of bars) b.onBar('T', x);
+      // After the close: the market order waits for the next open.
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 100.5, takeProfit: 102.5 }).order!.status).toBe('pending');
+      for (let i = 0; i < 5; i++) {
+        bars.push(bar(et('2025-01-16', '09:30') + 60 * i, 100, 100.2, 99.8, 100));
+        b.onBar('T', bars[bars.length - 1]);
+      }
+      const st = b.state;
+      const t = st.roundTrips[0];
+      expect([t.closed, t.firstEntry, t.plannedEntry]).toEqual([true, 100, 101]);
+      const ctx = { equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES };
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', ...ctx });
+      expect(review.plannedRR).toBe(3);
+      expect(review.riskDollars).toBe(50);
+      expect(review.rMultiple).not.toBeNull();
+      const text = review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+      expect(text).toContain('Entry filled past your stop: Your market order was placed with price at 101.00 and filled at the next open, 100.00, already past your stop at 100.50');
+      expect(text).not.toContain('No stop loss');
+      expect(review.rules.filter((r) => r.passed === false)).toEqual([]);
+      for (const id of ['grow-20-1pct', 'avg-rr-2', 'rules-20']) {
+        const c = CHALLENGES.find((x) => x.id === id)!;
+        expect(evaluateChallenge(c, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
+      }
+    });
+
+    it('calls adding past the stop what it is, not a gap, and still measures R', () => {
+      for (const firstType of ['limit', 'market'] as const) {
+        const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+        const t0 = et('2025-01-15', '10:00');
+        const bars = [bar(t0, 100, 100, 100, 100)];
+        const next = (o: number, h: number, l: number, c: number) => {
+          bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+          b.onBar('T', bars[bars.length - 1]);
+        };
+        b.onBar('T', bars[0]);
+        b.submit({ symbol: 'T', action: 'buy', type: firstType, limitPrice: firstType === 'limit' ? 100 : undefined, quantity: 100, stopLoss: 99, takeProfit: 103 });
+        if (firstType === 'limit') next(100, 100, 100, 100);
+        // Widen the stop, then buy more below the original stop.
+        b.modify(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id, { stopPrice: 97.5 });
+        next(98.5, 98.5, 98.5, 98.5);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 300, stopLoss: 97.5 });
+        next(98.5, 98.5, 97, 97.2);
+        const st = b.state;
+        const t = st.roundTrips[0];
+        expect([t.closed, t.firstEntry, t.avgEntry]).toEqual([true, 100, 98.875]);
+        const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+        const titles = review.findings.map((f) => f.title);
+        expect(titles).not.toContain('Entry filled past your stop');
+        expect(titles).not.toContain('No stop loss');
+        expect(titles).toContain('You widened your stop');
+        expect(titles).toContain('Added past your stop');
+        expect(review.addedPastStop).toBe(true);
+        expect(review.rMultiple).toBeCloseTo(-1.375, 9);
+        expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: 'Added past your stop: more than the planned risk' });
+        const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+        expect(grow).toMatchObject({ status: 'failed', detail: 'A trade on T added past its stop, so it risked more than planned.' });
+      }
     });
   });
 

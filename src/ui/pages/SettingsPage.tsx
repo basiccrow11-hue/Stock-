@@ -1,9 +1,9 @@
 /** Data sources, CSV import, API keys, execution assumptions, risk and trading rules. */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegistry';
-import { parseCsv, type CsvParseResult } from '../../core/data/csv';
+import { combineBars, parseCsv, type CsvParseResult } from '../../core/data/csv';
 import type { CsvDataset } from '../../core/data/csvProvider';
 import { deleteEncrypted, hasEncrypted, loadEncrypted, saveEncrypted } from '../services/secureStore';
 import { NumberField, SourceBadge, useFocusRescue } from '../components/common';
@@ -73,6 +73,12 @@ function CsvImportCard() {
   const [closeStamped, setCloseStamped] = useState(false);
   const [parsed, setParsed] = useState<CsvParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A second file for a ticker adds to its data by default (data split by year stays one history).
+  const [replace, setReplace] = useState(false);
+  const ticker = symbol.trim().toUpperCase();
+  const existing = datasets.find((d) => d.symbol === ticker);
+  const canAdd = !!existing && !!parsed && existing.baseTimeframe === parsed.baseTimeframe;
+  const combined = useMemo(() => (canAdd && !replace ? combineBars(existing!.bars, parsed!.bars) : null), [canAdd, replace, existing, parsed]);
   // A deleted dataset takes its Delete button with it: focus goes to another dataset's, else the file box.
   const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('tbody button') ?? card.querySelector<HTMLElement>('input[type=file]'));
 
@@ -100,15 +106,24 @@ function CsvImportCard() {
   };
 
   const save = async () => {
-    if (!parsed || !symbol.trim() || !file) return;
-    const d: CsvDataset = { symbol: symbol.trim().toUpperCase(), name: symbol.trim().toUpperCase(), baseTimeframe: parsed.baseTimeframe, bars: parsed.bars, importedAt: Date.now(), fileName: file.name };
+    if (!parsed || !ticker || !file) return;
+    if (existing && !combined && !window.confirm(`Replace the ${existing.bars.length.toLocaleString('en-US')} imported ${existing.baseTimeframe} bars for ${ticker} with this file?`)) return;
+    const d: CsvDataset = combined
+      ? { ...existing!, bars: combined.bars, importedAt: Date.now(), fileName: `${existing!.fileName} + ${file.name}` }
+      : { symbol: ticker, name: ticker, baseTimeframe: parsed.baseTimeframe, bars: parsed.bars, importedAt: Date.now(), fileName: file.name };
     try {
       await saveCsvDataset(d);
       setDatasets(csvProvider.list());
-      toast('success', `Imported ${parsed.bars.length.toLocaleString('en-US')} ${parsed.baseTimeframe} bars for ${d.symbol}.`);
+      toast(
+        'success',
+        combined
+          ? `Added ${parsed.bars.length.toLocaleString('en-US')} ${parsed.baseTimeframe} bars to ${ticker}: ${d.bars.length.toLocaleString('en-US')} in all.`
+          : `Imported ${parsed.bars.length.toLocaleString('en-US')} ${parsed.baseTimeframe} bars for ${ticker}.`,
+      );
       setFile(null);
       setParsed(null);
       setSymbol('');
+      setReplace(false);
     } catch (e) {
       setError(`Could not save: ${(e as Error).message}`);
     }
@@ -151,10 +166,32 @@ function CsvImportCard() {
           ))}
         </div>
       )}
+      {parsed && existing && (
+        <fieldset className="stack" style={{ gap: 4, border: 0, padding: 0, margin: 0 }}>
+          <legend className="small">
+            {ticker} already has {existing.bars.length.toLocaleString('en-US')} {existing.baseTimeframe} bars ({dateTime(existing.bars[0].time)} → {dateTime(existing.bars[existing.bars.length - 1].time)}).
+          </legend>
+          {canAdd ? (
+            <>
+              <label className="check">
+                <input type="radio" name="csv-existing" checked={!replace} onChange={() => setReplace(false)} /> Add these bars to it
+                {combined ? ` (${combined.bars.length.toLocaleString('en-US')} in all${combined.replaced ? `; ${combined.replaced.toLocaleString('en-US')} at the same times take this file's values` : ''})` : ''}
+              </label>
+              <label className="check">
+                <input type="radio" name="csv-existing" checked={replace} onChange={() => setReplace(true)} /> Replace it with this file
+              </label>
+            </>
+          ) : (
+            <div className="small warn">
+              This file has {parsed.baseTimeframe} bars, not {existing.baseTimeframe}, so saving replaces the {existing.baseTimeframe} data. Import it under another ticker to keep both.
+            </div>
+          )}
+        </fieldset>
+      )}
       <div className="row">
         <div className="spacer" />
-        <button className="btn primary" disabled={!parsed || !parsed.bars.length || !symbol.trim()} onClick={() => void save()}>
-          Save dataset
+        <button className="btn primary" disabled={!parsed || !parsed.bars.length || !ticker} onClick={() => void save()}>
+          {existing && parsed ? (combined ? `Add to ${ticker}` : `Replace ${ticker} data`) : 'Save dataset'}
         </button>
       </div>
       {datasets.length > 0 && (
@@ -384,7 +421,7 @@ function ExecutionCard() {
             <option value="worst_case">Worst case for my position first</option>
           </select>
         </label>
-        <NumberField label="Max share of bar volume" suffix="% · 0 = no cap" value={Math.round(exec.maxParticipation * 100)} step={5} min={0} max={100} onChange={num((v) => upd({ maxParticipation: v / 100 }))} />
+        <NumberField label="Max share of bar volume" suffix="% · 0 = no cap" value={Math.round(exec.maxParticipation * 100)} step={5} min={0} max={100} onChange={num((v) => upd({ maxParticipation: Math.round(v) / 100 }))} />
         <label className="field">
           <span>Account type</span>
           <select value={exec.marginMultiplier} onChange={(e) => upd({ marginMultiplier: Number(e.target.value) })}>
