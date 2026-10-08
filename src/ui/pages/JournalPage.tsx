@@ -76,6 +76,11 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
   }, [entries, query, outcome, noteless]);
 
   const current = entries.find((e) => e.id === selected) ?? list[0];
+  // Pin the entry shown by default. Otherwise saving its notes can drop it from a "Needs notes" or
+  // notes-search list, the next entry would slide into the editor, and typing would continue there.
+  useEffect(() => {
+    if (current && current.id !== selected) setSelected(current.id);
+  }, [current, selected]);
 
   if (!loaded) return <div className="page"><div className="page-inner">Loading journal…</div></div>;
 
@@ -136,7 +141,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
             <div className="card">
               {current ? (
                 <>
-                  <JournalEntryDetail entry={current} />
+                  <JournalEntryDetail key={current.id} entry={current} />
                   <div className="row" style={{ marginTop: 14 }}>
                     <div className="spacer" />
                     <button

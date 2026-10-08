@@ -5,7 +5,7 @@
  * concrete values every surface needs: CSS variables for the app chrome and a palette for the
  * canvas charts, with text colours adjusted to stay readable whatever colours were picked.
  */
-import { contrast, distance, fillFor, isDark, isHex, mix, normHex, readable, saturation, withAlpha } from './color';
+import { chartLabelFill, contrast, distance, fillFor, isDark, isHex, mix, normHex, readable, saturation, withAlpha } from './color';
 
 export type ThemeId = 'midnight' | 'graphite' | 'light';
 export type ChartStyle = 'candles' | 'hollow' | 'bars' | 'line' | 'area';
@@ -301,6 +301,9 @@ export interface PanelChartPalette {
   benchmark: string;
   up: string;
   down: string;
+  /** Fill markers (their text is drawn in the marker colour, so 4.5:1 on the panel). */
+  markerUp: string;
+  markerDown: string;
   wickUp: string;
   wickDown: string;
   borderUp: string;
@@ -330,6 +333,13 @@ function toneText(hue: string, panel: string, min = 4.5): string {
   return c;
 }
 
+/** Readable at `min` on every one of `surfaces` (all lighter or all darker than the text). */
+function readableOnAll(fg: string, surfaces: string[], min = 4.5): string {
+  let c = fg;
+  for (let i = 0; i < 3; i++) for (const s of surfaces) c = readable(c, s, min);
+  return c;
+}
+
 /** Colour for a line drawn on the chart: kept as picked unless it would be hard to see (below 3:1). */
 export function onChart(color: string, background: string): string {
   return readable(color, background, 3);
@@ -340,11 +350,17 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const ui = t.ui;
   const dark = t.scheme === 'dark';
   const c = a.colors;
-  const text = (hue: string) => toneText(hue, ui.panel);
-  // Candle colours only work as P/L colours when they are clearly coloured, different from each
-  // other and from body text. Monochrome candles fall back to the standard green and red.
-  const distinct = (hue: string) => saturation(hue) >= 0.25 && distance(text(hue), ui.text) >= 60;
-  const pnlUsesCandles = a.pnlFollowsCandles && distinct(c.up) && distinct(c.down) && distance(c.up, c.down) >= 60;
+  // Coloured text sits on the panel, the raised panels and the tint badges use.
+  const text = (hue: string) => toneText(readableOnAll(hue, [ui.panel2, ui.panel3]), ui.panel);
+  const muted = readableOnAll(ui.muted, [ui.panel, ui.panel2, ui.panel3, ui.hover]);
+  const bg = c.background;
+  // Candle colours only work as P/L colours when the text actually drawn with them (darkened or
+  // lightened for contrast) is clearly coloured, different from each other and from body text, on
+  // the panels and on the chart. Monochrome or pastel candles fall back to the standard green and red.
+  const tellApart = (x: string, y: string, body: string) =>
+    saturation(x) >= 0.25 && saturation(y) >= 0.25 && distance(x, y) >= 60 && distance(x, body) >= 60 && distance(y, body) >= 60;
+  const pnlUsesCandles =
+    a.pnlFollowsCandles && tellApart(text(c.up), text(c.down), ui.text) && tellApart(readable(c.up, bg, 4.5), readable(c.down, bg, 4.5), readable(ui.text, bg, 7));
   const posHue = pnlUsesCandles ? c.up : LABEL_HUES.pos;
   const negHue = pnlUsesCandles ? c.down : LABEL_HUES.neg;
   const buyBg = fillFor('#ffffff', posHue, 4.5);
@@ -352,8 +368,9 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const accentUi = readable(a.accent, ui.panel, 3);
   const accentFill = fillFor('#ffffff', a.accent, 4.5);
   const selected = mix(ui.panel, a.accent, dark ? 0.18 : 0.12);
-  const bg = c.background;
   const axisText = readable(c.text, bg, 4.5);
+  // Hover fills darken, so white text stays at 4.5:1 or better.
+  const hoverFill = (fill: string) => mix(fill, '#000000', 0.12);
 
   const vars: Record<string, string> = {
     '--bg': ui.bg,
@@ -364,7 +381,7 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--border-2': ui.border2,
     '--text': ui.text,
     '--text-2': ui.text2,
-    '--muted': readable(ui.muted, ui.panel, 4.5),
+    '--muted': muted,
     '--hover': ui.hover,
     '--hover-border': ui.hoverBorder,
     '--row-line': ui.rowLine,
@@ -373,7 +390,7 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--accent': accentUi,
     '--accent-text': readable(a.accent, ui.panel, 4.5),
     '--accent-2': accentFill,
-    '--accent-hover': mix(accentFill, dark ? '#ffffff' : '#000000', 0.1),
+    '--accent-hover': hoverFill(accentFill),
     '--on-accent': '#ffffff',
     '--selected': selected,
     '--on-selected': dark ? '#ffffff' : ui.text,
@@ -384,8 +401,10 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--success': text(LABEL_HUES.pos),
     '--error': text(LABEL_HUES.neg),
     '--buy-bg': buyBg,
+    '--buy-hover': hoverFill(buyBg),
     '--buy-border': mix(buyBg, posHue, 0.5),
     '--sell-bg': sellBg,
+    '--sell-hover': hoverFill(sellBg),
     '--sell-border': mix(sellBg, negHue, 0.5),
     '--warn': text(LABEL_HUES.warn),
     '--demo': text(LABEL_HUES.demo),
@@ -410,7 +429,7 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     style: a.chartStyle,
     scheme: t.scheme,
     scaleBorder: mix(bg, c.text, 0.18),
-    crosshairLabel: mix(c.crosshair, '#000000', chartDark ? 0.45 : 0.3),
+    crosshairLabel: chartLabelFill(mix(c.crosshair, '#000000', chartDark ? 0.45 : 0.3)),
     axisText,
     accent: onChart(a.accent, bg),
     warn: onChart(LABEL_HUES.warn, bg),
@@ -437,13 +456,15 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   };
 
   const panel: PanelChartPalette = {
-    text: readable(ui.muted, ui.panel, 4.5),
+    text: muted,
     grid: mix(ui.panel, ui.border, 0.7),
     border: ui.border,
     accent: readable(a.accent, ui.panel, 3),
     benchmark: readable(ui.muted, ui.panel, 3),
     up: c.up,
     down: c.down,
+    markerUp: readable(c.up, ui.panel, 4.5),
+    markerDown: readable(c.down, ui.panel, 4.5),
     wickUp: c.wickUp,
     wickDown: c.wickDown,
     borderUp: c.borderUp,

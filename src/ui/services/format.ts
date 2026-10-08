@@ -16,7 +16,7 @@ export function signedMoney(v: number | null | undefined): string {
 
 export function price(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
-  return v >= 1 ? v.toFixed(2) : v.toFixed(4);
+  return Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(4);
 }
 
 export function pct(v: number | null | undefined, digits = 2, signed = false): string {

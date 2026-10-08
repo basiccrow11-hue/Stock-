@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { contrast, fillFor, isHex, mix, normHex, parseHex, readable, saturation, toHex, withAlpha } from './color';
+import { chartLabelFill, chartLabelText, contrast, distance, fillFor, isHex, mix, normHex, parseHex, readable, saturation, toHex, withAlpha } from './color';
 import { BADGE_TINT, DEFAULT_APPEARANCE, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
+import { lastPriceColor } from '../chart/chartTheme';
 
 describe('colour helpers', () => {
   it('parses and formats hex', () => {
@@ -85,11 +86,24 @@ describe('appearance', () => {
           const a: Appearance = sanitizeAppearance({ theme, accent, colors: { up: p.up, down: p.down } });
           const r = resolveTheme(a);
           const panel = r.vars['--panel'];
-          for (const v of ['--text', '--muted', '--pos', '--neg', '--warn', '--demo', '--hist', '--sim', '--live', '--accent-text', '--streak', '--freeze'])
-            expect(contrast(r.vars[v], panel), `${theme}/${p.id}/${accent} ${v}`).toBeGreaterThanOrEqual(4.5);
-          expect(contrast('#ffffff', r.vars['--accent-2'])).toBeGreaterThanOrEqual(4.5);
-          expect(contrast('#ffffff', r.vars['--buy-bg'])).toBeGreaterThanOrEqual(4.5);
-          expect(contrast('#ffffff', r.vars['--sell-bg'])).toBeGreaterThanOrEqual(4.5);
+          // Text appears on the panel and on the raised panels (risk box, toasts, streak chip).
+          for (const surface of ['--panel', '--panel-2', '--panel-3'])
+            for (const v of ['--text', '--muted', '--pos', '--neg', '--success', '--error', '--warn', '--demo', '--hist', '--sim', '--live', '--streak', '--freeze'])
+              expect(contrast(r.vars[v], r.vars[surface]), `${theme}/${p.id}/${accent} ${v} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+          expect(contrast(r.vars['--accent-text'], panel), `${theme}/${p.id}/${accent} --accent-text`).toBeGreaterThanOrEqual(4.5);
+          // The streak chip turns --hover under the pointer and keeps its muted count.
+          expect(contrast(r.vars['--muted'], r.vars['--hover']), `${theme} muted on hover`).toBeGreaterThanOrEqual(4.5);
+          // White button text, at rest and hovered.
+          for (const v of ['--accent-2', '--accent-hover', '--buy-bg', '--buy-hover', '--sell-bg', '--sell-hover'])
+            expect(contrast('#ffffff', r.vars[v]), `${theme}/${p.id}/${accent} white on ${v}`).toBeGreaterThanOrEqual(4.5);
+          // Backtest chart markers on the panel.
+          for (const k of ['markerUp', 'markerDown'] as const) expect(contrast(r.panel[k], panel), `${theme}/${p.id} panel ${k}`).toBeGreaterThanOrEqual(4.5);
+          // Axis labels lightweight-charts draws itself (black or white text on a coloured box).
+          for (const style of ['candles', 'hollow', 'bars', 'line', 'area'] as const)
+            for (const up of [true, false]) {
+              const fill = lastPriceColor({ ...r.chart, style }, up);
+              expect(contrast(chartLabelText(fill), fill), `${theme}/${p.id} ${style} last price`).toBeGreaterThanOrEqual(4.5);
+            }
           expect(contrast(r.vars['--chart-text'], a.colors.background)).toBeGreaterThanOrEqual(4.5);
           // Badges and alerts draw their text on an 11% tint of the same colour (styles.css).
           for (const v of ['--pos', '--neg', '--success', '--error', '--warn', '--demo', '--hist', '--sim', '--live']) {
@@ -142,6 +156,39 @@ describe('appearance', () => {
     expect(resolveTheme(sanitizeAppearance({ colors: { up: '#2962ff', down: '#2962ff' } })).pnlUsesCandles).toBe(false);
     // Clearly coloured, distinct candles are used.
     expect(resolveTheme(sanitizeAppearance({ colors: { up: '#2962ff', down: '#ff9800' } })).pnlUsesCandles).toBe(true);
+  });
+
+  it('falls back to green and red when pastel candles would give grey P/L text', () => {
+    // Darkened for a white panel, these pastels lose their colour (#5b706f vs #7f6669).
+    for (const [up, down] of [
+      ['#b2dfdb', '#ffcdd2'],
+      ['#c8e6c9', '#ffcdd2'],
+      ['#a5d6a7', '#ef9a9a'],
+    ]) {
+      for (const theme of THEME_IDS) {
+        const r = resolveTheme(sanitizeAppearance({ theme, colors: { up, down } }));
+        if (r.pnlUsesCandles) {
+          expect(saturation(r.vars['--pos']), `${theme} ${up}`).toBeGreaterThanOrEqual(0.25);
+          expect(distance(r.vars['--pos'], r.vars['--neg']), `${theme} ${up}`).toBeGreaterThanOrEqual(60);
+        }
+      }
+      expect(resolveTheme(sanitizeAppearance({ theme: 'light', colors: { up, down } })).pnlUsesCandles, up).toBe(false);
+    }
+  });
+
+  it('keeps crosshair labels readable whatever the crosshair colour', () => {
+    // lightweight-charts picks black or white label text itself; the label box must suit that choice.
+    const colours = ['#ffffff', '#ffeb3b', '#e0e0e0', '#000000', '#758696', '#26a69a', '#ff00ff', '#808080', '#00ffff', '#3a3a3a'];
+    for (const crosshair of colours)
+      for (const background of ['#0d1117', '#ffffff', '#808080']) {
+        const label = resolveTheme(sanitizeAppearance({ colors: { crosshair, background } })).chart.crosshairLabel;
+        expect(contrast(chartLabelText(label), label), `${crosshair} on ${background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    for (let i = 0; i < 200; i++) {
+      const c = toHex([(i * 97) % 256, (i * 57 + 31) % 256, (i * 151 + 7) % 256]);
+      const fill = chartLabelFill(c);
+      expect(contrast(chartLabelText(fill), fill), c).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   it('never lets errors follow the candle colours', () => {

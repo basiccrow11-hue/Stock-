@@ -31,8 +31,10 @@
   --on-selected: #fff;
   --row-selected: #142035;
   --buy-bg: #0f6b62;
+  --buy-hover: #0d5e56;
   --buy-border: #17907f;
   --sell-bg: #8f2b2a;
+  --sell-hover: #7e2625;
   --sell-border: #b83b39;
   --chart-bg: #0d1117;
   --legend-bg: rgba(13, 17, 23, 0.82);
@@ -91,9 +93,9 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: var(--on-accent); }
 .btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn.buy { background: var(--buy-bg); border-color: var(--buy-border); color: #fff; }
-.btn.buy:hover:not(:disabled) { background: var(--buy-bg); border-color: var(--buy-border); filter: brightness(1.12); }
+.btn.buy:hover:not(:disabled) { background: var(--buy-hover); border-color: var(--buy-border); }
 .btn.sell { background: var(--sell-bg); border-color: var(--sell-border); color: #fff; }
-.btn.sell:hover:not(:disabled) { background: var(--sell-bg); border-color: var(--sell-border); filter: brightness(1.12); }
+.btn.sell:hover:not(:disabled) { background: var(--sell-hover); border-color: var(--sell-border); }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.ghost:hover:not(:disabled) { background: var(--panel-3); }
 .btn.sm { padding: 3px 7px; font-size: 12px; }
@@ -269,7 +271,7 @@ table.grid tr.clickable:hover td { background: var(--panel-2); }
 .modal-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border); }
 
 /* ---------- toasts ---------- */
-.toasts { position: fixed; left: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; z-index: 60; max-width: min(420px, calc(100vw - 28px)); }
+.toasts { position: fixed; left: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; z-index: 100; max-width: min(420px, calc(100vw - 28px)); }
 .toast { --tone: var(--accent-text); padding: 9px 12px; border-radius: var(--radius); border: 1px solid color-mix(in srgb, var(--tone) 50%, var(--panel)); border-left-width: 3px; border-left-color: var(--tone); background: var(--panel-2); color: var(--text); font-size: 12px; box-shadow: 0 6px 24px var(--shadow); cursor: pointer; }
 .toast.info { --tone: var(--accent-text); }
 .toast.success { --tone: var(--success); }
@@ -357,7 +359,7 @@ table.grid tr.clickable:hover td { background: var(--panel-2); }
 .theme-swatch i { width: 5px; border-radius: 1px; display: block; }
 .swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--border-2); cursor: pointer; padding: 0; }
 .swatch.on { box-shadow: 0 0 0 2px var(--text); }
-.modal:focus { outline: none; }
+.modal:focus, main.terminal:focus { outline: none; }
 .swatch.custom { position: relative; overflow: hidden; background: conic-gradient(#ef5350, #f5a623, #9ccc65, #26a69a, #4f8cff, #7e57c2, #ef5350); }
 .swatch.custom input { position: absolute; inset: -6px; opacity: 0; cursor: pointer; width: 40px; height: 40px; }
 .preset { display: inline-flex; align-items: center; gap: 4px; }
@@ -397,4 +399,8 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .two-col { grid-template-columns: 1fr; }
   .appearance-grid { grid-template-columns: 1fr; }
   .metrics { gap: 10px; }
+  /* Phones: the page tabs get a row of their own and every group wraps, so nothing runs off screen. */
+  .topbar .nav { order: 10; flex-basis: 100%; flex-wrap: wrap; }
+  .topbar .integrity { flex-wrap: wrap; min-width: 0; }
+  .topbar-right { flex-wrap: wrap; row-gap: 6px; }
 }

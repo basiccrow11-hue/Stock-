@@ -193,7 +193,7 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
       .map((f) => ({
         time: toChartTime(bucketFor(f.time, timeframe).start) as Time,
         position: f.side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
-        color: f.side === 'buy' ? panel.up : panel.down,
+        color: f.side === 'buy' ? panel.markerUp : panel.markerDown,
         shape: f.side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
         text: f.action === 'buy' ? 'B' : f.action === 'sell' ? 'S' : f.action === 'short' ? 'SH' : 'CV',
       }))

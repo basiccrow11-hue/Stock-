@@ -24,7 +24,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         <strong style={{ marginRight: 4 }}>{symbol}</strong>
         <div className="seg" role="group" aria-label="Timeframe">
           {TIMEFRAMES.map((tf) => (
-            <button key={tf} className={tf === timeframe ? 'on' : ''} onClick={() => setTimeframe(tf)} disabled={isSim && tf === '1D'} title={isSim && tf === '1D' ? 'The simulated market has only a few sessions of history' : undefined}>
+            <button key={tf} className={tf === timeframe ? 'on' : ''} aria-pressed={tf === timeframe} onClick={() => setTimeframe(tf)} disabled={isSim && tf === '1D'} title={isSim && tf === '1D' ? 'The simulated market has only a few sessions of history' : undefined}>
               {tf}
             </button>
           ))}
@@ -33,12 +33,12 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         <ChartSettingsMenu onOpenSettings={onOpenSettings} />
         <div className="seg" role="group" aria-label="Drawing tools">
           {(Object.keys(TOOL_LABELS) as DrawingTool[]).map((t) => (
-            <button key={t} className={tool === t ? 'on' : ''} onClick={() => setTool(t)} title={TOOL_LABELS[t]}>
-              {TOOL_ICONS[t]}
+            <button key={t} className={tool === t ? 'on' : ''} aria-pressed={tool === t} aria-label={TOOL_LABELS[t]} onClick={() => setTool(t)} title={TOOL_LABELS[t]}>
+              <span aria-hidden="true">{TOOL_ICONS[t]}</span>
             </button>
           ))}
         </div>
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Drawing color" style={{ width: 26, height: 24, padding: 0, border: 0, background: 'none' }} />
+        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Drawing color" aria-label="Drawing color" style={{ width: 26, height: 24, padding: 0, border: 0, background: 'none' }} />
         {selectedId && (
           <button className="btn sm danger" onClick={() => remove(selectedId)} title="Delete selected drawing (Del)">
             Delete

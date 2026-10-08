@@ -10,7 +10,6 @@ import {
   MAX_FREEZES,
   dayKey,
   emptyStreak,
-  milestoneLine,
   recordActivity,
   sanitizeStreak,
   setGoal,
@@ -75,16 +74,19 @@ interface StreakStore {
   data: StreakData;
   today: DayKey;
   panelOpen: boolean;
-  /** Milestone to celebrate (shown once, then cleared). */
-  celebrate: { streak: number; line: string } | null;
 }
 
 export const useStreak = create<StreakStore>()(() => ({
   data: load(),
   today: dayKey(new Date()),
   panelOpen: false,
-  celebrate: null,
 }));
+
+/**
+ * Credits the running tracker's not-yet-counted seconds. Called before any other change on a new
+ * day, so the seconds just before midnight reach yesterday before a freeze is spent on it.
+ */
+let flushTracker: (() => void) | null = null;
 
 function fmtDay(k: DayKey): string {
   const [y, m, d] = k.split('-').map(Number);
@@ -101,9 +103,10 @@ function announceFreezes(used: DayKey[], streak: number): void {
 function announce(r: RecordResult): void {
   announceFreezes(r.usedFreezes, r.streak);
   if (!r.completedNow) return;
-  if (r.milestone) useStreak.setState({ celebrate: { streak: r.milestone, line: milestoneLine(r.milestone) } });
-  else toast('success', `Daily goal reached. ${r.streak}-day streak${r.newBest ? ', a new personal best' : ''}. See you tomorrow.`, 6000);
-  if (r.earnedFreeze) toast('info', `You earned a streak freeze (${r.data.freezes} of ${MAX_FREEZES} banked). It covers a missed day automatically.`, 8000);
+  // A milestone gets the celebration dialog (StreakCelebration) instead of the goal toast.
+  if (!r.milestone) toast('success', `Daily goal reached. ${r.streak}-day streak${r.newBest ? ', a new personal best' : ''}. See you tomorrow.`, 6000);
+  if (r.refundedFreeze) toast('info', `That day's goal was met after all, so its streak freeze is back (${r.data.freezes} of ${MAX_FREEZES} banked).`, 8000);
+  else if (r.earnedFreeze) toast('info', `You earned a streak freeze (${r.data.freezes} of ${MAX_FREEZES} banked). It covers a missed day automatically.`, 8000);
 }
 
 function commit(fn: (d: StreakData, today: DayKey) => RecordResult, day: DayKey = dayKey(new Date())): void {
@@ -119,14 +122,17 @@ export function recordPractice(delta: ActivityDelta, day?: DayKey): void {
 }
 
 export function recordTradeClosed(): void {
+  flushTracker?.();
   recordPractice({ tradesClosed: 1 });
 }
 
 export function recordReview(): void {
+  flushTracker?.();
   recordPractice({ reviews: 1 });
 }
 
 export function setStreakGoal(minutes: number): void {
+  flushTracker?.();
   commit((d, today) => setGoal(d, today, minutes));
 }
 
@@ -134,8 +140,11 @@ export function openStreakPanel(open = true): void {
   useStreak.setState({ panelOpen: open });
 }
 
+/** Clear the pending milestone (in every open window, through storage). */
 export function dismissCelebration(): void {
-  useStreak.setState({ celebrate: null });
+  const d = { ...load(), celebrate: null };
+  save(d);
+  useStreak.setState({ data: d });
 }
 
 /** Spend freezes for missed days and roll the calendar over (on load and at midnight). */
@@ -188,7 +197,7 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
   window.addEventListener('storage', onStorage);
 
   settleNow();
-  const timer = setInterval(() => {
+  const tick = () => {
     const now = performance.now();
     const wall = Date.now();
     // Cap a tick's credit so a sleeping laptop or a throttled timer cannot add a burst of time.
@@ -209,10 +218,17 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
     }
     if (dayKey(new Date(wall)) !== useStreak.getState().today) settleNow();
     if (active && dt > 0) recordPractice({ activeSeconds: dt, at: wall });
-  }, TICK_MS);
+  };
+  const timer = setInterval(tick, TICK_MS);
+  // Only a change on a new day needs the pending seconds first; flushing more often is harmless.
+  const flush = () => {
+    if (dayKey(new Date()) !== useStreak.getState().today) tick();
+  };
+  flushTracker = flush;
 
   return () => {
     clearInterval(timer);
+    if (flushTracker === flush) flushTracker = null;
     for (const ev of events) window.removeEventListener(ev, onInput);
     document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('storage', onStorage);

@@ -79,6 +79,17 @@ describe('vendor providers (mocked HTTP)', () => {
     await expect(p.getBars({ symbol: 'AAPL', from: 0, to: 60 })).rejects.toThrow(/rejected the API key/);
   });
 
+  it('tells a missing data proxy apart from an unknown symbol', async () => {
+    const req = { symbol: 'AAPL', from: 1736935200, to: 1736958600 };
+    // A static host answers /api/... with its HTML 404 page.
+    const html = (async () => new Response('<!doctype html><title>404</title>', { status: 404, headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', html).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringMatching(/no market-data proxy/) });
+    await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', html).getBars(req)).rejects.toMatchObject({ kind: 'network' });
+    // The vendor's own 404 is JSON.
+    const json = (async () => new Response('{"message":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', json).getBars(req)).rejects.toMatchObject({ kind: 'not_found' });
+  });
+
   it('Alpaca: sends key headers and pages with next_page_token', async () => {
     const calls: [string, RequestInit][] = [];
     const fetchFn = async (url: string, init: RequestInit) => {

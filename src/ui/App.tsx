@@ -8,6 +8,7 @@ import { SessionSetup, type SetupMode } from "./components/SessionSetup";
 import { TradeReviewModal } from "./components/TradeReviewModal";
 import { Toasts } from "./components/common";
 import { StreakCelebration, StreakModal } from "./components/Streak";
+import { requestAppearanceFocus } from "./components/Appearance";
 // Secondary pages load on first visit to keep the trading screen's initial bundle small.
 const BacktestPage = lazy(() =>
   import("./pages/BacktestPage").then((m) => ({ default: m.BacktestPage })),
@@ -48,19 +49,11 @@ export function App() {
     void useCredentials.getState().checkServer();
   }, []);
 
-  // "Theme and all colours…" in the chart toolbar: open settings at the Appearance card (the page
-  // loads lazily, so wait for it) and move focus there, so keyboard users are not left on <body>.
+  // "Theme and all colours…" in the chart toolbar: open settings at the Appearance card, which
+  // takes focus when it mounts, so keyboard users are not left on <body>.
   const openAppearance = () => {
+    requestAppearanceFocus();
     setView("settings");
-    let tries = 0;
-    const focusCard = () => {
-      const el = document.getElementById("appearance");
-      if (el) {
-        el.scrollIntoView({ block: "start" });
-        el.focus({ preventScroll: true });
-      } else if (++tries < 60) requestAnimationFrame(focusCard);
-    };
-    requestAnimationFrame(focusCard);
   };
 
   // Practice time for the daily streak: every screen except settings counts.
@@ -77,7 +70,13 @@ export function App() {
     <div className="app">
       <TopBar view={view} onView={setView} />
       {/* The terminal stays mounted so the chart and drawings survive page switches. */}
-      <main className={`terminal${view === "trade" ? "" : " hidden"}`}>
+      {/* Focusable so a closing dialog whose opener is gone can return focus here, not to <body>. */}
+      <main
+        className={`terminal${view === "trade" ? "" : " hidden"}`}
+        tabIndex={-1}
+        data-focus-home=""
+        aria-label="Trading terminal"
+      >
         <Watchlist />
         <ChartPanel
           onNewSession={(mode) => setSetup({ mode })}

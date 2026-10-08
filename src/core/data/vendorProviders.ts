@@ -29,9 +29,13 @@ const COMMON_SYMBOLS: SymbolInfo[] = DEMO_TICKERS.map((t) => ({ symbol: t.symbol
 /** True on the hosted site and locally alike, so it never sends anyone to a command they cannot run. */
 const PROXY_HINT = "the vendor or this app's data proxy did not answer. Check your connection and try again. If you run the app yourself, start it with npm run dev or npm run preview so the proxy is available.";
 
-function httpError(status: number, body: string, vendor: string): DataProviderError {
+function httpError(status: number, body: string, vendor: string, contentType: string | null = null): DataProviderError {
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
+  // The vendors answer in JSON. A 404 page in HTML comes from the web host: there is no data proxy
+  // at this address (a plain static host, or a deployment without its api/ function).
+  if (status === 404 && !/json/i.test(contentType ?? ''))
+    return new DataProviderError(`${vendor}: this site has no market-data proxy, so vendor data cannot be fetched here. Run the app with npm run dev or npm run preview, or deploy it with its api/ function (see the README).`, 'network');
   if (status === 404) return new DataProviderError(`${vendor}: symbol or data not found.`, 'not_found');
   if (status === 502 || status === 503 || status === 504)
     return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}): ${PROXY_HINT}`, 'network');
@@ -82,7 +86,7 @@ export class PolygonProvider implements HistoricalDataProvider {
         throw new DataProviderError(`Could not reach Polygon (${(e as Error).message}): ${PROXY_HINT}`, 'network');
       }
       const text = await res.text();
-      if (!res.ok) throw httpError(res.status, text, 'Polygon');
+      if (!res.ok) throw httpError(res.status, text, 'Polygon', res.headers.get('content-type'));
       let json: { results?: { t: number; o: number; h: number; l: number; c: number; v: number }[]; next_url?: string; status?: string; error?: string };
       try {
         json = JSON.parse(text);
@@ -158,7 +162,7 @@ export class AlpacaProvider implements HistoricalDataProvider {
         throw new DataProviderError(`Could not reach Alpaca (${(e as Error).message}): ${PROXY_HINT}`, 'network');
       }
       const text = await res.text();
-      if (!res.ok) throw httpError(res.status, text, 'Alpaca');
+      if (!res.ok) throw httpError(res.status, text, 'Alpaca', res.headers.get('content-type'));
       let json: { bars?: { t: string; o: number; h: number; l: number; c: number; v: number }[] | null; next_page_token?: string | null };
       try {
         json = JSON.parse(text);

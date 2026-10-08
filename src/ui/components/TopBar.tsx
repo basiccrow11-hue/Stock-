@@ -33,7 +33,7 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
       </div>
       <nav className="nav">
         {VIEWS.map(([v, label]) => (
-          <button key={v} className={view === v ? 'on' : ''} onClick={() => onView(v)}>
+          <button key={v} className={view === v ? 'on' : ''} aria-current={view === v ? 'page' : undefined} onClick={() => onView(v)}>
             {label}
           </button>
         ))}

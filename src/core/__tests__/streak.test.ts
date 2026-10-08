@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addDays,
   calendarWeeks,
+  celebrationLine,
   dayKey,
   dayNumber,
   emptyStreak,
@@ -179,6 +180,36 @@ describe('milestones and bests across freezes', () => {
     expect(r.usedFreezes).toEqual(['2026-01-14']);
     expect(r.streak).toBe(15);
     expect(r.milestone).toBe(14);
+    // The celebration states the real streak and explains the freeze, rather than claiming 14.
+    expect(r.data.celebrate).toEqual({ milestone: 14, streak: 15 });
+    expect(celebrationLine(r.data.celebrate!)).toMatch(/^You passed the 14-day mark/);
+    expect(celebrationLine({ milestone: 7, streak: 7 })).not.toMatch(/passed/);
+  });
+
+  it('keeps a milestone waiting until it is dismissed, including across a reload', () => {
+    const d = practise(emptyStreak(), run('2026-01-01', 3));
+    expect(d.celebrate).toEqual({ milestone: 3, streak: 3 });
+    expect(sanitizeStreak(JSON.parse(JSON.stringify(d))).celebrate).toEqual({ milestone: 3, streak: 3 });
+    // Junk is dropped.
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 4, streak: 4 } }).celebrate).toBeNull();
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 7, streak: 5 } }).celebrate).toBeNull();
+  });
+
+  it('returns a freeze when late practice completes the day it covered', () => {
+    // 7 practised days earn a freeze. 10-08 has 588 s when midnight passes; a trade closed at 00:00:01
+    // settles 10-09 first and spends the freeze on 10-08. Then the pre-midnight seconds arrive.
+    let d = practise(emptyStreak(), run('2026-10-01', 7));
+    d = recordActivity(d, '2026-10-08', { activeSeconds: 588 }).data;
+    d = recordActivity(d, '2026-10-09', { tradesClosed: 1 }).data;
+    expect(d.frozen).toEqual(['2026-10-08']);
+    expect(d.freezes).toBe(0);
+    const r = recordActivity(d, '2026-10-08', { activeSeconds: 13 });
+    expect(r.completedNow).toBe(true);
+    expect(r.refundedFreeze).toBe(true);
+    expect(r.data.frozen).toEqual([]);
+    expect(r.data.freezes).toBe(1);
+    expect(streakStatus(r.data, '2026-10-09').frozenYesterday).toBe(false);
+    expect(streakStatus(r.data, '2026-10-09').current).toBe(8);
   });
 
   it('does not repeat a milestone already celebrated', () => {

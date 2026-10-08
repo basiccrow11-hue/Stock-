@@ -310,13 +310,29 @@ export function ChartPreview({ height = 200 }: { height?: number }) {
 // ------------------------------------------------------------------ containers
 
 /** Full appearance card for the settings page. */
+/** Set by "Theme and all colours…": the card scrolls into view and takes focus when it mounts. */
+let focusRequestedAt = 0;
+
+export function requestAppearanceFocus(): void {
+  focusRequestedAt = Date.now();
+}
+
 export function AppearanceCard() {
   const a = useSettings((s) => s.appearance);
   const update = useSettings((s) => s.updateAppearance);
   const reset = useSettings((s) => s.resetAppearance);
   const pnlUsesCandles = useTheme().pnlUsesCandles;
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // The settings page loads lazily, so this runs whenever it arrives, however slow the network.
+    // A request older than a minute is stale (the user went elsewhere before the page loaded).
+    if (Date.now() - focusRequestedAt > 60_000) return;
+    focusRequestedAt = 0;
+    cardRef.current?.scrollIntoView({ block: 'start' });
+    cardRef.current?.focus({ preventScroll: true });
+  }, []);
   return (
-    <div className="card stack" id="appearance" tabIndex={-1} aria-labelledby="appearance-title">
+    <div ref={cardRef} className="card stack" id="appearance" tabIndex={-1} aria-labelledby="appearance-title">
       <div className="row">
         <h2 id="appearance-title">Appearance</h2>
         <div className="spacer" />

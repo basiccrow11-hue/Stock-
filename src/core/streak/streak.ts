@@ -42,6 +42,17 @@ export interface StreakData {
    * same stretch of real time only once.
    */
   creditedUntil: number;
+  /**
+   * Milestone waiting to be celebrated. It is kept until the user dismisses it, so a celebration
+   * held back during playback is not lost when the tab is closed or reloaded.
+   */
+  celebrate: Celebration | null;
+}
+
+export interface Celebration {
+  milestone: number;
+  /** Streak length when it was reached (larger than the milestone when a freeze carried past it). */
+  streak: number;
 }
 
 export const GOAL_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
@@ -53,7 +64,7 @@ export const MILESTONES = [3, 7, 14, 30, 50, 100, 150, 200, 365, 500, 750, 1000]
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function emptyStreak(): StreakData {
-  return { version: 1, goalMinutes: DEFAULT_GOAL_MINUTES, days: {}, frozen: [], freezes: 0, best: 0, creditedUntil: 0 };
+  return { version: 1, goalMinutes: DEFAULT_GOAL_MINUTES, days: {}, frozen: [], freezes: 0, best: 0, creditedUntil: 0, celebrate: null };
 }
 
 function emptyDay(): DayActivity {
@@ -113,6 +124,8 @@ export function sanitizeStreak(raw: unknown): StreakData {
   out.freezes = Math.min(MAX_FREEZES, Math.floor(nonNeg(r.freezes)));
   out.best = Math.floor(nonNeg(r.best));
   out.creditedUntil = nonNeg(r.creditedUntil);
+  const c = r.celebrate;
+  if (c && typeof c === 'object' && (MILESTONES as readonly number[]).includes(c.milestone) && Number.isInteger(c.streak) && c.streak >= c.milestone) out.celebrate = { milestone: c.milestone, streak: c.streak };
   return out;
 }
 
@@ -262,6 +275,8 @@ export interface RecordResult extends SettleResult {
   milestone: number | null;
   newBest: boolean;
   earnedFreeze: boolean;
+  /** The day had been covered by a freeze, then its goal was met after all: the freeze is returned. */
+  refundedFreeze: boolean;
 }
 
 /** Add activity to today (settling missed days first) and evaluate the goal. */
@@ -290,6 +305,13 @@ export function recordActivity(input: StreakData, today: DayKey, delta: Activity
   let milestone: number | null = null;
   let newBest = false;
   let earnedFreeze = false;
+  let refundedFreeze = false;
+  if (completedNow && data.frozen.includes(today)) {
+    // Practice credited late (the seconds just before midnight, or another window) completed a day
+    // that a freeze had already covered. The day counts as practised and the freeze goes back.
+    refundedFreeze = true;
+    data = { ...data, frozen: data.frozen.filter((k) => k !== today), freezes: Math.min(MAX_FREEZES, data.freezes + 1) };
+  }
   if (completedNow) {
     // A freeze can carry the count past a milestone between two practice days (13 practised, day 14
     // frozen, day 15 practised): celebrate the highest milestone passed since the last practice.
@@ -303,8 +325,9 @@ export function recordActivity(input: StreakData, today: DayKey, delta: Activity
       data = { ...data, freezes: data.freezes + 1 };
     }
     data = { ...data, best: Math.max(data.best, streak) };
+    if (milestone) data = { ...data, celebrate: { milestone, streak } };
   }
-  return { data, usedFreezes, completedNow, streak, milestone, newBest, earnedFreeze };
+  return { data, usedFreezes, completedNow, streak, milestone, newBest, earnedFreeze, refundedFreeze };
 }
 
 /** Change the daily goal. If today's practice already meets the new goal, today completes. */
@@ -357,6 +380,11 @@ const MILESTONE_LINES: Record<number, string> = {
 
 export function milestoneLine(n: number): string {
   return MILESTONE_LINES[n] ?? `${n} days in a row. Keep stacking reps.`;
+}
+
+/** Celebration text. When a freeze carried the streak past the milestone, say so instead of misstating the length. */
+export function celebrationLine(c: Celebration): string {
+  return c.streak === c.milestone ? milestoneLine(c.milestone) : `You passed the ${c.milestone}-day mark, with a streak freeze covering a missed day. ${milestoneLine(c.milestone)}`;
 }
 
 export function minutesText(seconds: number): string {

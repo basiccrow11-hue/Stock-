@@ -1,11 +1,12 @@
 /** Daily practice streak: top-bar chip, full panel, and milestone celebration. */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   FREEZE_EVERY,
   GOAL_OPTIONS,
   MAX_FREEZES,
   MILESTONES,
   calendarWeeks,
+  celebrationLine,
   minutesText,
   streakMessage,
   streakStatus,
@@ -14,7 +15,8 @@ import {
 } from '../../core/streak/streak';
 import { dismissCelebration, openStreakPanel, setStreakGoal, useStreak } from '../state/streakStore';
 import { useTrading } from '../state/tradingStore';
-import { Modal } from './common';
+import { Modal, modalOpen, useModalCount } from './common';
+import { toast } from '../state/toasts';
 import type { View } from './TopBar';
 
 const FREEZE_RULE = `Every ${FREEZE_EVERY}th day you meet your goal within a running streak earns a streak freeze (you can hold ${MAX_FREEZES}). Freezes cover missed days automatically, but only when you have enough for the whole gap.`;
@@ -243,11 +245,34 @@ export function StreakModal() {
   );
 }
 
-/** Milestone celebration. It waits while a replay is playing on the trade screen, so it never covers live orders. */
+/**
+ * Milestone celebration. It waits while a replay is playing on the trade screen (so it never covers
+ * live orders) and while another dialog is open, such as the trade review, then stays until dismissed.
+ * The pending milestone is stored with the streak, so closing the tab before a pause does not lose it.
+ */
 export function StreakCelebration({ view }: { view: View }) {
-  const c = useStreak((s) => s.celebrate);
+  const c = useStreak((s) => s.data.celebrate);
   const playing = useTrading((s) => s.playing);
-  if (!c || (view === 'trade' && playing)) return null;
+  const dialogs = useModalCount();
+  const [showing, setShowing] = useState(false);
+  const held = view === 'trade' && playing;
+  useEffect(() => {
+    if (!c) setShowing(false);
+    // modalOpen() is read here, not during render: a trade review that opens in this same update
+    // (a trade closing pauses playback and opens its review at once) has registered by now.
+    else if (!held && !modalOpen()) setShowing(true);
+  }, [c, held, dialogs]);
+  // Held back by playback: say so at once, so reaching the goal mid-session is not silent.
+  const toldRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = c ? `${c.milestone}:${c.streak}` : null;
+    if (c && held && !showing && toldRef.current !== key) {
+      toldRef.current = key;
+      const what = c.streak === c.milestone ? 'a milestone' : `past the ${c.milestone}-day milestone`;
+      toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration waits until you pause.`, 6000);
+    }
+  }, [c, held, showing]);
+  if (!c || !showing) return null;
   return (
     <Modal
       title="Milestone reached"
@@ -264,7 +289,7 @@ export function StreakCelebration({ view }: { view: View }) {
         </span>
         <div className="streak-big num">{c.streak}</div>
         <div className="streak-title">day streak</div>
-        <p className="muted">{c.line}</p>
+        <p className="muted">{celebrationLine(c)}</p>
       </div>
     </Modal>
   );

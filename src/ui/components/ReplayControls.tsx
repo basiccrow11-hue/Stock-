@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   REPLAY_SPEEDS,
   SIM_SPEEDS,
@@ -37,15 +37,17 @@ function confirmRewind(target: number): boolean {
 
 /**
  * Whether a key press belongs to the replay shortcuts (Space, arrows) rather than to the control
- * that has focus. Text fields, dialogs, popovers and option groups keep their keys; a button keeps
- * Space (which activates it) unless it is one of the replay bar's own controls.
+ * that has focus. Text fields, dialogs, popovers and option groups keep their keys, and so do
+ * controls that Space toggles (checkboxes, switches, disclosure summaries). On a plain button Space
+ * still plays or pauses, and the button is not pressed: after a click on BUY, Space must never
+ * place a second order. Enter presses a focused button as usual.
  */
 function isReplayShortcut(e: KeyboardEvent): boolean {
   if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
   const el = e.target instanceof Element ? e.target : null;
   if (!el) return true;
-  if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"]')) return false;
-  if (e.code === 'Space' && el.closest('button, a[href], summary, label, [role="button"], [role="checkbox"], [role="switch"]') && !el.closest('.replay-bar')) return false;
+  if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"], [role="combobox"]')) return false;
+  if (e.code === 'Space' && el.closest('summary, [role="checkbox"], [role="switch"], [role="option"]')) return false;
   return true;
 }
 
@@ -59,6 +61,9 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const quote = useTrading((s) => s.quotes[s.activeSymbol]);
   const timeframe = useTrading((s) => s.timeframe);
   const [jumpDate, setJumpDate] = useState('');
+  // Set when Space was used for play/pause, so its keyup cannot press the focused button either
+  // (some browsers press buttons on keyup). A ref: the key listeners are re-registered as time moves.
+  const spaceTaken = useRef(false);
   const [jumpTime, setJumpTime] = useState('');
   const isReplay = session?.mode === 'replay';
 
@@ -77,7 +82,8 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       if (!session || !isReplayShortcut(e)) return;
       if (e.code === 'Space') {
         e.preventDefault();
-        togglePlay();
+        spaceTaken.current = true;
+        if (!e.repeat) togglePlay();
       } else if (e.key === 'ArrowRight' && isReplay) {
         e.preventDefault();
         if (e.shiftKey) stepCandle();
@@ -88,8 +94,17 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
         if (confirmRewind(last)) stepBack();
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || !spaceTaken.current) return;
+      spaceTaken.current = false;
+      e.preventDefault();
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, [session, isReplay, now, active]);
 
   if (!session) return null;

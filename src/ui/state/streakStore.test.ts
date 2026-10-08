@@ -106,6 +106,47 @@ describe('practice tracker', () => {
     stop();
   });
 
+  it('credits the seconds before midnight before a trade close can spend a freeze', async () => {
+    // Seven practised days bank a freeze; 10-08 is 12 s short of its goal at 23:59:47.
+    let d = emptyStreak();
+    for (let i = 0; i < 7; i++) d = recordActivity(d, addDays('2026-10-01', i), { activeSeconds: 600 }).data;
+    d = recordActivity(d, '2026-10-08', { activeSeconds: 588 }).data;
+    localStorage.setItem('stock-replay-streak', JSON.stringify(d));
+    vi.setSystemTime(new Date(2026, 9, 8, 23, 59, 47));
+    const m = await freshStore();
+    const toasts = (await import('./toasts')).useToasts;
+    const stop = m.startPracticeTracker(() => true, () => false);
+    window.dispatchEvent(new Event('keydown'));
+    vi.advanceTimersByTime(10_000); // ticks at 23:59:52 and 23:59:57: 598 s
+    vi.advanceTimersByTime(4_000); // 00:00:01, before the next tick
+    m.recordTradeClosed();
+    const after = m.useStreak.getState().data;
+    expect(after.days['2026-10-08'].done).toBe(true);
+    expect(after.frozen).toEqual([]);
+    expect(after.freezes).toBe(1);
+    expect(after.days['2026-10-09'].tradesClosed).toBe(1);
+    expect(toasts.getState().toasts.map((t) => t.text).join(' | ')).not.toMatch(/freeze covered/);
+    stop();
+  });
+
+  it('keeps a milestone reached during playback until it is dismissed, across a reload', async () => {
+    seed(['2026-10-06', '2026-10-07']);
+    vi.setSystemTime(new Date(2026, 9, 8, 12, 0, 0));
+    let m = await freshStore();
+    let stop = m.startPracticeTracker(() => true, () => true);
+    practise(10);
+    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3 });
+    stop();
+    // The tab is closed before playback pauses.
+    m = await freshStore();
+    stop = m.startPracticeTracker(() => true, () => false);
+    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3 });
+    m.dismissCelebration();
+    expect(m.useStreak.getState().data.celebrate).toBeNull();
+    expect(JSON.parse(localStorage.getItem('stock-replay-streak')!).celebrate).toBeNull();
+    stop();
+  });
+
   it('spends a freeze for a missed day when the app opens', async () => {
     seed(Array.from({ length: 7 }, (_, i) => addDays('2026-10-01', i))); // earns one freeze
     vi.setSystemTime(new Date(2026, 9, 9, 10, 0, 0)); // 10-08 was missed

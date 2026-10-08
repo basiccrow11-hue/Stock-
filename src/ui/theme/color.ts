@@ -116,3 +116,17 @@ export function fillFor(text: string, base: string, min = 4.5): string {
   }
   return mix(base, target, hi);
 }
+
+/**
+ * lightweight-charts picks black or white text for its axis labels (last price, price lines,
+ * crosshair) with this grayscale rule, so label backgrounds are chosen to suit it.
+ */
+export function chartLabelText(bg: string): string {
+  const [r, g, b] = parseHex(bg);
+  return 0.199 * r + 0.687 * g + 0.114 * b > 160 ? '#000000' : '#ffffff';
+}
+
+/** `color` adjusted just enough that lightweight-charts' own label text on it reaches 4.5:1. */
+export function chartLabelFill(color: string): string {
+  return fillFor(chartLabelText(color), color, 4.5);
+}
