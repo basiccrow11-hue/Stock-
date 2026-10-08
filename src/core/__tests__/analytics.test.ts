@@ -216,6 +216,18 @@ describe('learning review', () => {
       expect(gapped.titles).toContain('Stop filled well past its price');
       expect(gapped.text).toContain('Your stop at 99.00 filled at 96.00, 3.00 past it, so this exit was -4.00R per share instead of the planned -1.00R.');
       expect(gapped.text).not.toContain('capped');
+      expect(gapped.text).toContain('A stop turns into a market order');
+
+      // The same gap through a stop-limit put in place of the bracket stop: a limit, not a market order.
+      const stopLimit = run((b, next) => {
+        b.cancel(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id);
+        b.submit({ symbol: 'T', action: 'sell', type: 'stop_limit', stopPrice: 99, limitPrice: 95, quantity: 100 });
+        next(96.5, 97, 96, 96.2);
+        flat(next, 96);
+      }, { stopLoss: 99 });
+      expect(stopLimit.titles).toContain('Stop filled well past its price');
+      expect(stopLimit.text).toContain('A stop-limit becomes a limit order at 95.00 when price reaches its stop');
+      expect(stopLimit.text).not.toContain('market order');
     });
 
     it('describes a stop moved into profit or widened for what it was', () => {

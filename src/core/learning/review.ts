@@ -283,7 +283,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         title: 'Stop filled well past its price',
         detail: `Your stop at ${stopAt.toFixed(2)} filled at ${exitPx.toFixed(2)}, ${past.toFixed(2)} past it, so this exit was ${fmtR(inR(exitPx))} per share instead of ${
           moved ? `the ${fmtR(inR(stopAt))} your moved stop allowed` : `the planned ${fmtR(-1)}`
-        }. A stop turns into a market order when price reaches it and fills at the next price available, which can be far away after a gap or for a large order in a thin bar.`,
+        }. ${
+          main!.order.type === 'stop_limit'
+            ? `A stop-limit becomes a limit order at ${main!.order.limitPrice!.toFixed(2)} when price reaches its stop and fills at any price up to that limit, which can be well past the stop after a gap.`
+            : 'A stop turns into a market order when price reaches it and fills at the next price available, which can be far away after a gap or for a large order in a thin bar.'
+        }`,
       });
     } else if (inR(stopAt) < -1 - 1e-9) {
       findings.push({

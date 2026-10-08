@@ -125,8 +125,9 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     if (validation) return;
     setError(null);
     // A blind replay's dates are not saved as the next default: the next form, here or in another
-    // tab, would show them while the replay is still hiding them.
-    settings.updateReplay({ providerId, symbol: symbol.toUpperCase(), ...(blind ? {} : { date, endDate }), startTime, endTime, multiDay, timeframe, speed, includeWatchlist, blind });
+    // tab, would show them while the replay is still hiding them. A blind multi-day replay clears the
+    // saved end date, so the next form asks for one instead of pairing an older start and end.
+    settings.updateReplay({ providerId, symbol: symbol.toUpperCase(), ...(blind ? (multiDay ? { endDate: '' } : {}) : { date, endDate }), startTime, endTime, multiDay, timeframe, speed, includeWatchlist, blind });
     const ok = await startReplay({
       providerId,
       symbol: symbol.toUpperCase(),
