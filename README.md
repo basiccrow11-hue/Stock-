@@ -1,0 +1,141 @@
+# Stock Replay
+
+A trading simulator for practising when the market is closed. Replay a past trading day bar by bar without seeing what comes next, paper trade it with realistic orders, journal every trade, review your execution, backtest rule-based strategies, or trade a fictional market that never closes.
+
+Everything runs in your browser. Nothing touches a real brokerage account.
+
+## Quick start
+
+```bash
+npm install
+npm run dev        # http://localhost:5173
+```
+
+Other scripts:
+
+| Command | What it does |
+| --- | --- |
+| `npm test` | Unit tests (Vitest): orders, fills, positions, P/L, shorts, indicators, backtests, risk, replay and look-ahead prevention |
+| `npm run typecheck` | TypeScript, strict mode |
+| `npm run build` | Production build into `dist/` |
+| `npm run preview` | Serve the production build (keeps the data proxy for Polygon/Alpaca) |
+
+Requires Node 20 or newer.
+
+## Read this first: what the data is
+
+Every chart, trade and journal entry carries a badge saying where its prices came from.
+
+| Badge | Meaning |
+| --- | --- |
+| **DEMO · SYNTHETIC** | Bundled offline bars for SPY, QQQ, IWM, AAPL, MSFT, NVDA, TSLA, AMZN, META, GOOGL and AMD from 2019 onward. They are **generated**, not recorded. They behave like real tape (opening volatility, lunch lull, trend and range days, gaps, earnings days, correlation with the index) but they are **not the real prices** of those tickers on those dates. Good for practising mechanics; useless for studying what actually happened. |
+| **HISTORICAL** | Real recorded bars: a CSV you import, or Polygon / Alpaca with your own API key. |
+| **SIMULATED · FICTIONAL** | The fictional market: six made-up companies, generated prices, generated news. |
+| **LIVE** | Not available. There is no live feed and no real-money trading. |
+
+To practise on real price action, import a CSV or add a vendor key (see below).
+
+## Features
+
+**Historical replay.** Pick a ticker, date, start and end time (ET), single or multi-day, chart timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D), starting balance and speed. Play, pause, step one minute, step one candle, step back, restart, change speed, jump to a time. Watchlist symbols can replay on the same clock. **Blind mode** hides the calendar date everywhere (clock, chart axis, crosshair, journal) until the session ends; **Random date** picks a day for you.
+
+**No look-ahead.** Future bars live in private fields of the replay engine and are only handed out once their bar has *completed* on the replay clock. Higher-timeframe candles are built from revealed 1-minute bars, so a forming 15m candle only shows what has happened so far. Indicators are causal (value at bar *i* uses bars 0..*i* only). Tests prove that two datasets with identical pasts and different futures produce identical charts, indicators, fills and backtest results up to the present.
+
+**Paper trading.** Buy, sell, short, cover. Cash, buying power (cash, 2× Reg T or 4× intraday margin), positions with average entry, unrealized and realized P/L, total value, day P/L, win rate and trade count. Every order, fill and event is logged.
+
+**Orders.** Market, limit, stop and stop-limit; DAY or GTC; optional extended hours for limits. Stop loss and take profit attach as a one-cancels-other bracket. The ticket shows estimated entry (including half-spread), position value, stop distance, dollar and % risk, potential reward and R:R before you submit, and can size a position from a risk %. Working orders can be modified (click the price) or cancelled.
+
+**Fill model** (all configurable in Data & Settings):
+- Market orders fill at the last price plus half the spread and slippage, or at the next bar open (conservative mode).
+- Inside a bar the engine walks an assumed path (open → nearer extreme → other extreme → close, or worst case for your position). Stops and limits trigger at their price level when the path crosses them; gaps fill at the open.
+- Spread in bps or cents, wider outside regular hours; slippage in bps plus market impact by share of bar volume; per-share, per-order and minimum commissions; a cap on the share of a bar's volume you can trade (larger orders fill partially).
+- Market hours follow the NYSE calendar (holidays, early closes). Orders placed while closed wait for the session.
+
+**Risk management.** Warnings such as "WARNING: This trade risks 4.7% of your account." never block a trade unless **strict mode** is on, which rejects orders that exceed your risk, daily loss or position limits or lack a stop.
+
+**Chart.** Candles, volume, crosshair legend, zoom and pan, ET time axis. Indicators: SMA, EMA, VWAP, Bollinger Bands, RSI, MACD, ATR and volume; add, remove, recolour and change periods. Drawing tools: trend line, horizontal and vertical line, rectangle, support/resistance zone and Fibonacci retracement, saved per symbol. Your fills, open orders, stop and target lines are drawn on the chart. Click the ⌖ buttons on the ticket to pick a price from the chart.
+
+**Journal.** Each closed trade creates an entry automatically: symbol, direction, entry and exit, size, average prices, stop, target, P/L, return, R multiple, holding time, commission, a chart snapshot, a tag and notes (why I entered, my setup, what I did well, what I did wrong, what I would change). Search, filter, export to CSV or JSON.
+
+**Learning Mode.** When a trade closes, playback pauses and a review opens: exit reason, MFE and MAE (best and worst open P/L, also in R), how much of the best open profit you kept, risk taken, planned R:R, stop distance in ATR, what price did after you exited *so far* (revealed bars only), and a check against your own trading rules. It explains what happened; it never suggests a trade.
+
+**Analytics.** Net P/L, return, win rate, profit factor, expectancy, average R, planned R:R, average win and loss, payoff ratio, largest win and loss, max drawdown, losing streak, holding time and commissions, plus an equity curve and an R-multiple distribution. Breakdowns by symbol, tag, direction, entry hour, weekday and exit reason. Filter by data source, replay vs simulated market and tag; rewound sessions are excluded by default.
+
+**Backtester.** IF/THEN rules over price, EMA, SMA, VWAP, RSI, MACD (line, signal, histogram), Bollinger Bands, ATR or a number, with crosses above/below and is above/below, combined with ALL or ANY; actions buy, sell, short, cover. Stop loss %, take profit %, sizing by shares, % of equity or % risk, commission, slippage and spread, optional flatten before the close. Signals are evaluated on **closed** candles and filled at the **next bar's open**. Results: stats, equity vs buy and hold, trades on the chart, trade and signal lists. Runs in a Web Worker; a year of 1-minute data takes well under a second.
+
+**Simulated market.** Start Market launches six fictional stocks with different personalities (growth, large-cap tech, small cap, blue chip, volatile momentum, index ETF). Hidden bull, bear and sideways phases, trends, consolidation, overnight gaps, intraday volatility patterns and news events (earnings, analyst calls, lawsuits, economic data) that move prices. Every headline is labelled SIMULATED. Volatility, news frequency, trend strength, regime and seed are configurable.
+
+**Challenges.** Grow $10k to $12k risking ≤1% per trade; trade a day without a 5% drawdown; average 2:1 planned R:R over 10 trades; 20 trades following your rules; positive expectancy over 15 trades. A result is *official* only if you never rewound the session.
+
+## Using real data
+
+### CSV import (works offline)
+
+Data & Settings → Import historical data. Needs columns for time, open, high, low, close and ideally volume. Header names are matched loosely (`timestamp`, `datetime`, `date` + `time`, `o`/`h`/`l`/`c`/`v`, ...). Timestamps may be Unix seconds or milliseconds, ISO 8601 with or without offset, or US dates. Times without a zone are read as New York time by default (switchable to UTC), and there is an option for vendors that stamp bars with their close time. 1-minute bars give the most realistic fills; daily bars work for daily replays and backtests. Imports are stored in your browser (IndexedDB).
+
+### Polygon or Alpaca
+
+The browser cannot call these APIs directly (CORS), so the dev and preview servers include a small proxy at `/api/polygon` and `/api/alpaca`. Use `npm run dev` or `npm run preview`; a static host without the proxy will not work for vendor data.
+
+Keys, three options:
+1. **Session only (default):** paste them in Data & Settings. They live in memory and are gone on reload.
+2. **Encrypted in the browser:** save them with a passphrase (AES-GCM, key derived with PBKDF2). You unlock them each session.
+3. **Server side:** put them in `.env.local` next to `package.json`. The browser never sees them; the proxy adds them.
+
+```bash
+# .env.local  (git-ignored)
+POLYGON_API_KEY=...
+ALPACA_KEY_ID=...
+ALPACA_SECRET=...
+```
+
+Keys are never hard-coded and never logged. `/api/server-keys` reports only whether a key is configured.
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| Space | Play / pause |
+| → | Step one minute |
+| Shift + → | Step one chart candle |
+| ← | Step back one minute (marks the session as rewound) |
+| Esc | Cancel chart price picking or the current drawing |
+| Delete | Delete the selected drawing |
+
+## Honest limits
+
+- **Demo data is synthetic.** See above. Do not draw conclusions about real tickers from it.
+- **Fills are modelled from bars, not an order book.** The engine knows each bar's open, high, low, close and volume, not the order in which prices traded inside it, so it assumes a path. Queue position for limit orders is not modelled ("touch" fills as soon as price reaches your limit; choose "trade through" for a stricter rule). Spreads are a configurable model, not historical quotes.
+- **Price level can hint at the era in blind mode.** Blind mode hides dates, but a real ticker's price level (for example SPY near 590) still narrows down when it was.
+- **Sessions do not survive a page reload.** The journal, analytics, imported data, settings and drawings persist; an in-progress replay or simulated market does not.
+- **Rewinding rewrites history.** Stepping back past a closed trade undoes it and removes its journal entry (you are asked first), and the session is flagged as not blind.
+- **Vendor data needs the proxy and a network.** Polygon and Alpaca were implemented against their documented APIs and are tested with mocked responses; plan limits (history depth, rate limits, IEX vs SIP volume) are the vendor's.
+- **Single user, single browser.** Data is stored locally; there is no account or sync.
+
+## Architecture
+
+```
+src/core/            framework-free engine (fully unit tested)
+  time.ts            NYSE calendar, sessions, ET conversion (DST-safe)
+  data/              MarketDataProvider / HistoricalDataProvider / StreamingDataProvider interfaces,
+                     demo generator, CSV parser + provider, Polygon + Alpaca providers,
+                     SimulationDataProvider, bar aggregation
+  replay/            ReplayEngine (one symbol, hides the future) and ReplaySession (multi-symbol clock,
+                     broker, step-back snapshots)
+  broker/            SimBroker (orders, fills, positions, brackets, P/L) and execution config
+  indicators/        causal SMA, EMA, RSI, MACD, Bollinger, ATR, VWAP
+  risk/              pre-trade risk assessment, position sizing, strict mode
+  backtest/          rule definitions and the backtester
+  sim/               fictional market generator and news
+  analytics/         performance statistics
+  learning/          post-trade review
+  challenges/        challenge definitions and evaluation
+src/ui/              React UI
+  state/             zustand stores; tradingStore runs the play loop and bridges engine → UI
+  chart/             lightweight-charts wrapper, drawing layer, line charts
+  components/        terminal panels, order ticket, dialogs
+  pages/             backtest, journal, analytics, challenges, settings
+vite.config.ts       dev/preview proxy for vendor APIs, server-side key injection
+```
+
+The engine has no browser dependencies, so new data sources plug in by implementing `HistoricalDataProvider` (see `src/core/data/provider.ts`) and registering it in `src/ui/state/dataRegistry.ts`.

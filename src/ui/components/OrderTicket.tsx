@@ -1,0 +1,317 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
+import { assessRisk, positionSizeForRisk } from '../../core/risk/risk';
+import { commissionFor, halfSpread } from '../../core/broker/config';
+import { marketSession } from '../../core/time';
+import { closePosition, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
+import { useSettings } from '../state/settingsStore';
+import { toast } from '../state/toasts';
+import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
+
+const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
+  { a: 'buy', label: 'Buy', cls: 'buy' },
+  { a: 'sell', label: 'Sell', cls: 'sell' },
+  { a: 'short', label: 'Short', cls: 'sell' },
+  { a: 'cover', label: 'Cover', cls: 'buy' },
+];
+
+const TYPES: { t: OrderType; label: string }[] = [
+  { t: 'market', label: 'Market' },
+  { t: 'limit', label: 'Limit' },
+  { t: 'stop', label: 'Stop' },
+  { t: 'stop_limit', label: 'Stop limit' },
+];
+
+type PriceField = 'limit' | 'stop' | 'stopLoss' | 'takeProfit';
+
+function parse(v: string): number | undefined {
+  const n = Number(v);
+  return v.trim() !== '' && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+export function OrderTicket() {
+  const session = useTrading((s) => s.session);
+  const symbol = useTrading((s) => s.activeSymbol);
+  const quote = useTrading((s) => s.quotes[s.activeSymbol]);
+  const account = useTrading((s) => s.account);
+  const positions = useTrading((s) => s.positions);
+  const picked = useTrading((s) => s.pickedPrice);
+  const pickTarget = useTrading((s) => s.pickTarget);
+  const now = useTrading((s) => s.now);
+  const exec = useSettings((s) => s.execution);
+  const rules = useSettings((s) => s.rules);
+
+  const [action, setAction] = useState<OrderAction>('buy');
+  const [type, setType] = useState<OrderType>('market');
+  const [quantity, setQuantity] = useState('100');
+  const [limit, setLimit] = useState('');
+  const [stop, setStop] = useState('');
+  const [sl, setSl] = useState('');
+  const [tp, setTp] = useState('');
+  const [tif, setTif] = useState<TimeInForce>('day');
+  const [ext, setExt] = useState(false);
+  const [tag, setTag] = useState('');
+  const [riskPct, setRiskPct] = useState(String(rules.maxRiskPctPerTrade));
+  const [result, setResult] = useState<{ tone: 'error' | 'success'; text: string } | null>(null);
+
+  const position = positions.find((p) => p.symbol === symbol);
+  const last = quote?.last;
+  const opening = action === 'buy' || action === 'short';
+
+  useEffect(() => {
+    if (!picked) return;
+    const v = picked.price.toFixed(2);
+    if (picked.field === 'limit') setLimit(v);
+    if (picked.field === 'stop') setStop(v);
+    if (picked.field === 'stopLoss') setSl(v);
+    if (picked.field === 'takeProfit') setTp(v);
+  }, [picked]);
+
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === 'Escape' && setPickTarget(null);
+    window.addEventListener('keydown', k);
+    return () => window.removeEventListener('keydown', k);
+  }, []);
+
+  useEffect(() => setResult(null), [symbol, action, type]);
+
+  // Stop and target prices only make sense for one direction and one symbol: clear them when either changes.
+  const direction = action === 'buy' || action === 'sell' ? 'long' : 'short';
+  useEffect(() => {
+    setSl('');
+    setTp('');
+  }, [symbol, direction]);
+
+  // Estimated fill price used for risk math.
+  const entry = useMemo(() => {
+    if (type === 'limit' || type === 'stop_limit') return parse(limit);
+    if (type === 'stop') return parse(stop);
+    if (last === undefined) return undefined;
+    const ext = now ? marketSession(now) !== 'regular' : false;
+    const hs = halfSpread(exec, last, ext);
+    return action === 'buy' || action === 'cover' ? last + hs : last - hs;
+  }, [type, limit, stop, last, action, exec, now]);
+
+  const q = Math.floor(Number(quantity) || 0);
+  const risk = useMemo(() => {
+    if (!entry || !account || q <= 0) return null;
+    return assessRisk({ action, quantity: q, entryPrice: entry, stopLoss: opening ? parse(sl) : undefined, takeProfit: opening ? parse(tp) : undefined, equity: account.equity, commissionEstimate: commissionFor(exec, q, entry) });
+  }, [entry, account, q, action, opening, sl, tp, exec]);
+
+  if (!session) return null;
+
+  const sizeByRisk = () => {
+    const stopPx = parse(sl);
+    const r = Number(riskPct);
+    if (!entry || !stopPx || !account || !(r > 0)) {
+      toast('warning', 'Set a stop loss (and entry price for non-market orders) first. Position size = risk ÷ stop distance.');
+      return;
+    }
+    const n = positionSizeForRisk(account.equity, r, entry, stopPx);
+    if (n <= 0) {
+      toast('warning', 'Stop is on the wrong side or too close to the entry.');
+      return;
+    }
+    // A tight stop can imply more shares than the account can hold; cap at buying power (with a small buffer for spread and slippage).
+    const affordable = Math.floor((account.buyingPower * 0.995) / entry);
+    if (affordable < n) toast('info', `${r}% risk would need ${n} shares, but buying power covers ${affordable}. Sized to ${affordable}; actual risk is lower.`, 6000);
+    setQuantity(String(Math.max(0, Math.min(n, affordable))));
+  };
+
+  const targetFromR = (mult: number) => {
+    const stopPx = parse(sl);
+    if (!entry || !stopPx) return;
+    const d = Math.abs(entry - stopPx);
+    const long = action === 'buy';
+    setTp((long ? entry + d * mult : entry - d * mult).toFixed(2));
+  };
+
+  const submit = () => {
+    const r = submitOrder({
+      symbol,
+      action,
+      type,
+      quantity: q,
+      limitPrice: type === 'limit' || type === 'stop_limit' ? parse(limit) : undefined,
+      stopPrice: type === 'stop' || type === 'stop_limit' ? parse(stop) : undefined,
+      stopLoss: opening ? parse(sl) : undefined,
+      takeProfit: opening ? parse(tp) : undefined,
+      tif,
+      extendedHours: ext && type === 'limit',
+      tag: tag.trim() || undefined,
+    });
+    if (!r.ok) {
+      setResult({ tone: 'error', text: r.error ?? 'Rejected' });
+      return;
+    }
+    const o = r.order!;
+    const filled = useTrading.getState().fills.some((f) => f.orderId === o.id);
+    setResult({ tone: 'success', text: filled ? `${action.toUpperCase()} ${q} ${symbol} filled.` : `${action.toUpperCase()} ${q} ${symbol} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}` });
+    // The last warning is shown in the ticket itself; risk warnings were already visible before submitting.
+    for (const w of r.warnings.slice(0, -1)) if (!w.startsWith('No stop loss')) toast('warning', w, 6000);
+  };
+
+  const pickBtn = (field: PriceField) => (
+    <button className={`btn sm${pickTarget === field ? ' active' : ''}`} title="Pick price from chart" onClick={() => setPickTarget(pickTarget === field ? null : field)}>
+      ⌖
+    </button>
+  );
+
+  const actCls = ACTIONS.find((x) => x.a === action)!.cls;
+  const label = `${action.toUpperCase()} ${q || 0} ${symbol} ${type === 'market' ? 'MKT' : type === 'limit' ? `LMT ${limit || '—'}` : type === 'stop' ? `STP ${stop || '—'}` : `STP ${stop || '—'} LMT ${limit || '—'}`}`;
+  const strict = exec.strictRisk.enabled;
+
+  return (
+    <div className="ticket">
+      <div className="row">
+        <h3>Order ticket</h3>
+        <div className="spacer" />
+        <span className="mono">{fmtPrice(last)}</span>
+      </div>
+      <div className="actions">
+        {ACTIONS.map((x) => (
+          <button key={x.a} className={`btn sm ${action === x.a ? `${x.cls} sel` : ''}`} onClick={() => setAction(x.a)}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+      <div className="seg" style={{ width: '100%' }}>
+        {TYPES.map((x) => (
+          <button key={x.t} className={type === x.t ? 'on' : ''} style={{ flex: 1 }} onClick={() => setType(x.t)}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+      <div className="grid2">
+        <label className="field">
+          Quantity (shares)
+          <input type="number" min={1} step={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+        </label>
+        <label className="field">
+          Time in force
+          <select value={tif} onChange={(e) => setTif(e.target.value as TimeInForce)}>
+            <option value="day">Day</option>
+            <option value="gtc">GTC</option>
+          </select>
+        </label>
+        {(type === 'stop' || type === 'stop_limit') && (
+          <label className="field">
+            Stop (trigger) price
+            <span className="price-input">
+              <input type="number" step={0.01} value={stop} onChange={(e) => setStop(e.target.value)} placeholder={fmtPrice(last)} />
+              {pickBtn('stop')}
+            </span>
+          </label>
+        )}
+        {(type === 'limit' || type === 'stop_limit') && (
+          <label className="field">
+            Limit price
+            <span className="price-input">
+              <input type="number" step={0.01} value={limit} onChange={(e) => setLimit(e.target.value)} placeholder={fmtPrice(last)} />
+              {pickBtn('limit')}
+            </span>
+          </label>
+        )}
+        {opening && (
+          <>
+            <label className="field">
+              Stop loss
+              <span className="price-input">
+                <input type="number" step={0.01} value={sl} onChange={(e) => setSl(e.target.value)} placeholder="optional" />
+                {pickBtn('stopLoss')}
+              </span>
+            </label>
+            <label className="field">
+              Take profit
+              <span className="price-input">
+                <input type="number" step={0.01} value={tp} onChange={(e) => setTp(e.target.value)} placeholder="optional" />
+                {pickBtn('takeProfit')}
+              </span>
+            </label>
+          </>
+        )}
+      </div>
+      {opening && (
+        <div className="row" style={{ gap: 4 }}>
+          <span className="muted small">Size for</span>
+          <input type="number" step={0.25} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} />
+          <span className="muted small">% risk</span>
+          <button className="btn sm" onClick={sizeByRisk}>
+            Size
+          </button>
+          <span className="spacer" />
+          <span className="muted small">TP</span>
+          {[1, 2, 3].map((m) => (
+            <button key={m} className="btn sm" onClick={() => targetFromR(m)} title={`Set take profit at ${m}× the stop distance`}>
+              {m}R
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="row wrap" style={{ gap: 10 }}>
+        <label className="check small" title="Limit orders only. Fills use wider pre/post-market spreads.">
+          <input type="checkbox" checked={ext} disabled={type !== 'limit'} onChange={(e) => setExt(e.target.checked)} />
+          Extended hours
+        </label>
+        <input type="text" placeholder="Strategy / setup tag" value={tag} onChange={(e) => setTag(e.target.value)} style={{ flex: 1 }} />
+      </div>
+
+      <div className="risk-box">
+        <span className="muted">Est. entry</span>
+        <span className="num">{fmtPrice(entry)}</span>
+        <span className="muted">Position value</span>
+        <span className="num">{money(risk?.positionValue)}</span>
+        {opening && (
+          <>
+            <span className="muted">Stop distance</span>
+            <span className="num">{risk?.stopDistance !== null && risk ? `${risk.stopDistance.toFixed(2)} (${pct(risk.stopDistancePct)})` : '—'}</span>
+            <span className="muted">Dollar risk</span>
+            <span className="num">{money(risk?.dollarRisk)}</span>
+            <span className="muted">% of account</span>
+            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade ? 'neg' : ''}`}>{pct(risk?.pctRisk)}</span>
+            <span className="muted">Potential reward</span>
+            <span className="num">{money(risk?.reward)}</span>
+            <span className="muted">Reward : risk</span>
+            <span className="num">{risk?.rewardRiskRatio ? `${risk.rewardRiskRatio.toFixed(2)} : 1` : '—'}</span>
+          </>
+        )}
+        <span className="muted">Est. commission</span>
+        <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
+      </div>
+      {risk?.errors.map((e) => (
+        <div key={e} className="alert error">
+          {e}
+        </div>
+      ))}
+      {risk?.warnings.map((w) => (
+        <div key={w} className="alert warn">
+          {w}
+        </div>
+      ))}
+      {strict && opening && <div className="alert info">Strict risk controls are ON: max {exec.strictRisk.maxRiskPctPerTrade}% risk per trade{exec.strictRisk.requireStopLoss ? ', stop required' : ''}.</div>}
+      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || !!risk?.errors.length}>
+        {label}
+      </button>
+      {result && <div className={`alert ${result.tone}`}>{result.text}</div>}
+
+      {position && (
+        <div className="risk-box" style={{ gridTemplateColumns: '1fr auto' }}>
+          <span className="muted">Position</span>
+          <span className={`num ${position.quantity > 0 ? 'pos' : 'neg'}`}>
+            {position.quantity > 0 ? 'LONG' : 'SHORT'} {fmtQty(Math.abs(position.quantity))}
+          </span>
+          <span className="muted">Avg entry</span>
+          <span className="num">{fmtPrice(position.avgPrice)}</span>
+          <span className="muted">Unrealized P/L</span>
+          <span className={`num ${pnlClass(last !== undefined ? (last - position.avgPrice) * position.quantity : 0)}`}>
+            {last !== undefined ? signedMoney((last - position.avgPrice) * position.quantity) : '—'}
+          </span>
+          <span />
+          <button className="btn sm" onClick={() => closePosition(symbol)}>
+            Close position (market)
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
