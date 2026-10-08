@@ -250,11 +250,43 @@ export class ReplaySession {
     return [];
   }
 
+  /** Where Step back goes: the open of the primary symbol's last revealed bar (null before the start). */
+  stepBackTarget(): UnixSeconds | null {
+    const last = this.engine.lastBar();
+    return last && this.engine.started ? last.time : null;
+  }
+
   /** Step back one base bar of the primary symbol. */
   stepBack(): void {
-    const last = this.engine.lastBar();
-    if (!last || !this.engine.started) return;
-    this.rewindTo(last.time);
+    const target = this.stepBackTarget();
+    if (target !== null) this.rewindTo(target);
+  }
+
+  /**
+   * What a rewind to `time` would undo, read from the snapshot it would restore: trades opened
+   * since (`open`: still open now) and trades closed since (`closed`: their journal entries go).
+   */
+  undoneBy(time: UnixSeconds): { open: number; closed: number } {
+    let revealed = 0;
+    for (const e of this.engines.values()) revealed += e.revealedCountAt(time);
+    const then = new Map(this.snapshotAt(revealed).state.roundTrips.map((t) => [t.id, t.closed]));
+    let open = 0;
+    let closed = 0;
+    for (const t of this.broker.state.roundTrips) {
+      if (t.closed && then.get(t.id) !== true) closed++;
+      else if (!t.closed && !then.has(t.id)) open++;
+    }
+    return { open, closed };
+  }
+
+  /** The newest snapshot taken with at most `revealed` bars revealed: the state a rewind restores. */
+  private snapshotAt(revealed: number): Snapshot {
+    let snap = this.snapshots[0];
+    for (const s of this.snapshots) {
+      if (s.revealed <= revealed) snap = s;
+      else break;
+    }
+    return snap;
   }
 
   restart(): void {
@@ -263,12 +295,7 @@ export class ReplaySession {
 
   private rewindTo(time: UnixSeconds): void {
     for (const e of this.engines.values()) e.rewindTo(time);
-    const revealed = this.totalRevealed();
-    let snap = this.snapshots[0];
-    for (const s of this.snapshots) {
-      if (s.revealed <= revealed) snap = s;
-      else break;
-    }
+    const snap = this.snapshotAt(this.totalRevealed());
     this.snapshots = this.snapshots.filter((s) => s.revealed <= snap.revealed);
     const cutoff = snap.state.clock;
     const curve = this.broker.state.equityCurve.filter((p) => p.time <= cutoff);

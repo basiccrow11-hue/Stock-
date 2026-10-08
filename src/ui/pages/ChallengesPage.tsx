@@ -57,31 +57,33 @@ export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mod
         {!attempts.length ? (
           <EmptyState title="No attempts yet" />
         ) : (
-          <table className="grid">
-            <thead>
-              <tr>
-                <th>Started</th>
-                <th>Challenge</th>
-                <th>Session</th>
-                <th>Result</th>
-                <th>Detail</th>
-              </tr>
-            </thead>
-            <tbody>
-              {attempts.map((a) => (
-                <tr key={a.id}>
-                  <td className="mono small">{new Date(a.startedAt).toLocaleString('en-US')}</td>
-                  <td>{CHALLENGES.find((c) => c.id === a.challengeId)?.title ?? a.challengeId}</td>
-                  <td className="small">{a.label}</td>
-                  <td>
-                    <span className={`badge ${a.result.status === 'passed' ? 'success' : a.result.status === 'failed' ? 'error' : 'neutral'}`}>{a.result.status === 'in_progress' ? 'abandoned' : a.result.status}</span>
-                    {!a.result.official && <span className="badge warn" style={{ marginLeft: 4 }}>unofficial</span>}
-                  </td>
-                  <td className="small muted">{a.result.detail}</td>
+          <div className="table-scroll">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Started</th>
+                  <th>Challenge</th>
+                  <th>Session</th>
+                  <th>Result</th>
+                  <th>Detail</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {attempts.map((a) => (
+                  <tr key={a.id}>
+                    <td className="mono small">{new Date(a.startedAt).toLocaleString('en-US')}</td>
+                    <td>{CHALLENGES.find((c) => c.id === a.challengeId)?.title ?? a.challengeId}</td>
+                    <td className="small">{a.label}</td>
+                    <td>
+                      <span className={`badge ${a.result.status === 'passed' ? 'success' : a.result.status === 'failed' ? 'error' : 'neutral'}`}>{a.result.status === 'in_progress' ? 'abandoned' : a.result.status}</span>
+                      {!a.result.official && <span className="badge warn" style={{ marginLeft: 4 }}>unofficial</span>}
+                    </td>
+                    <td className="small muted">{a.result.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

@@ -14,9 +14,9 @@ import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
 import { reviewTrade } from '../../core/learning/review';
 import { CHALLENGES, evaluateChallenge } from '../../core/challenges/challenges';
-import { exchangeDate, isTradingDay, nextTradingDay, prevTradingDay } from '../../core/time';
+import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
 import { getProvider } from './dataRegistry';
-import { getSettings } from './settingsStore';
+import { getSettings, useSettings } from './settingsStore';
 import { useJournal, saveSnapshot } from './journalStore';
 import { useChallenges } from './challengeStore';
 import { toast } from './toasts';
@@ -76,7 +76,11 @@ export interface TradingSnapshot {
 
 // ------------------------------------------------------------------ chart bus
 
-export type ChartEvent = { type: 'reset' } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bar: Bar };
+/**
+ * `tick` carries the simulated 1m bars a step touched, oldest first, each in its latest state: the
+ * forming bar is re-sent with cumulative values, and a fast step can finish several minutes at once.
+ */
+export type ChartEvent = { type: 'reset' } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bars: Bar[] };
 type ChartListener = (e: ChartEvent) => void;
 const chartListeners = new Set<ChartListener>();
 export function onChartEvent(fn: ChartListener): () => void {
@@ -205,12 +209,15 @@ function computeQuotes(): Record<string, Quote> {
     let prev = eng.prevClose[`${sym}|${today}`];
     if (prev === undefined) {
       const all = eng.replay ? eng.replay.engineFor(sym)!.visibleBaseBars() : bars!;
-      // Previous session's last regular-hours close, if visible.
-      for (let i = all.length - 1; i >= 0; i--) {
-        if (exchangeDate(all[i].time) < today) {
-          prev = all[i].close;
-          break;
-        }
+      // The previous trading day's regular-session close, if visible (its last bar if it has no
+      // regular-hours bars): with extended-hours data its last bar is an after-hours print.
+      let i = all.length - 1;
+      while (i >= 0 && exchangeDate(all[i].time) >= today) i--;
+      if (i >= 0) {
+        const day = exchangeDate(all[i].time);
+        let j = i;
+        while (j >= 0 && exchangeDate(all[j].time) === day && marketSession(all[j].time) !== 'regular') j--;
+        prev = (j >= 0 && exchangeDate(all[j].time) === day ? all[j] : all[i]).close;
       }
       if (prev !== undefined) eng.prevClose[`${sym}|${today}`] = prev;
     }
@@ -370,12 +377,15 @@ function loop(): void {
     if (steps <= 0) return;
     eng.simCarry -= steps * tickSecs;
     const updates = eng.sim.advance(steps * tickSecs);
-    const latest = new Map<string, Bar>();
+    // Per symbol, every minute this step touched in its final state (Maps keep first-insert order: oldest first).
+    const touched = new Map<string, Map<number, Bar>>();
     for (const u of updates) {
       eng.simBroker.onBar(u.symbol, u.tick, tickSecs);
-      latest.set(u.symbol, u.bar);
+      let bars = touched.get(u.symbol);
+      if (!bars) touched.set(u.symbol, (bars = new Map()));
+      bars.set(u.bar.time, u.bar);
     }
-    for (const [symbol, bar] of latest) emitChart({ type: 'tick', symbol, bar });
+    for (const [symbol, bars] of touched) emitChart({ type: 'tick', symbol, bars: [...bars.values()] });
     publish();
     void processClosedTrips();
   }
@@ -416,7 +426,10 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
   }
   const id = newId('replay');
   try {
-    const { session, warnings } = await ReplaySession.load(provider, setup, getSettings().execution, id);
+    const loaded = await ReplaySession.load(provider, setup, getSettings().execution, id);
+    const session = loaded.session;
+    // Blind mode hides the date, and a skipped symbol's message can carry it (ours or the vendor's).
+    const warnings = setup.blind ? loaded.warnings.map(withoutDates) : loaded.warnings;
     eng.replay = session;
     const meta: SessionMeta = {
       id,
@@ -541,11 +554,14 @@ export function stepCandle(): void {
   afterChange(eng.replay.stepCandle(s.timeframe, s.activeSymbol));
 }
 
-/** Number of journaled trades that a rewind to `time` would undo. */
-export function tradesUndoneBy(time: UnixSeconds): number {
-  const b = broker();
-  if (!b) return 0;
-  return b.state.roundTrips.filter((t) => t.closed && (t.exitTime ?? 0) > time).length + b.state.roundTrips.filter((t) => !t.closed && t.entryTime > time).length;
+/** Trades a rewind to `time` would undo: still open, and closed (whose journal entries it deletes). */
+export function tradesUndoneBy(time: UnixSeconds): { open: number; closed: number } {
+  return eng.replay?.undoneBy(time) ?? { open: 0, closed: 0 };
+}
+
+/** Where Step back goes (the open of the last revealed bar), or null when there is nothing to step back over. */
+export function stepBackTarget(): UnixSeconds | null {
+  return eng.replay?.stepBackTarget() ?? null;
 }
 
 async function afterRewind(): Promise<void> {
@@ -630,10 +646,15 @@ export function closePosition(symbol: string): SubmitResult {
 }
 
 /** Apply changed execution settings to the running session. */
-export function applyExecutionConfig(): void {
+function applyExecutionConfig(): void {
   const b = broker();
   if (b) b.cfg = getSettings().execution;
 }
+// The running session trades under the current execution settings, however they changed (the
+// settings page, a reset, another tab).
+useSettings.subscribe((s, prev) => {
+  if (s.execution !== prev.execution) applyExecutionConfig();
+});
 
 export function setPickTarget(t: TradingSnapshot['pickTarget']): void {
   useTrading.setState({ pickTarget: t });

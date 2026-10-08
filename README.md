@@ -20,7 +20,7 @@ Other scripts:
 | `npm run build` | Production build into `dist/` |
 | `npm run preview` | Serve the production build (keeps the data proxy for Polygon/Alpaca) |
 
-Requires Node 20 or newer.
+Requires Node 20.19+ or 22.12+ (the test runner needs 22.12+). Node 21 and 22.0 to 22.11 are not supported by the build tools.
 
 ## Read this first: what the data is
 

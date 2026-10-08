@@ -7,6 +7,7 @@ import { computeStats, rMultiple, type PerformanceStats } from '../../core/analy
 import type { EquityPoint, RoundTrip } from '../../core/types';
 import type { JournalEntry } from '../../core/journal';
 import { EmptyState, Stat } from '../components/common';
+import { useDateHidden } from '../components/useEntryTime';
 import { LineChart, type LineSpec } from '../chart/LineChart';
 import { useTheme } from '../theme/useTheme';
 import { money, pnlClass, signedMoney } from '../services/format';
@@ -144,6 +145,7 @@ export function AnalyticsPage() {
   // Adjusted to 3:1 on the panel, like every other chart line on app panels.
   const accent = useTheme().panel.accent;
   const session = useTrading((s) => s.session);
+  const dateHidden = useDateHidden();
   const sessionCurve = useTrading((s) => s.equityCurve);
   const sessionTrips = useTrading((s) => s.trips);
   const account = useTrading((s) => s.account);
@@ -171,18 +173,18 @@ export function AnalyticsPage() {
         <div className="row wrap">
           <h1>Analytics</h1>
           <div className="spacer" />
-          <select value={source} onChange={(e) => setSource(e.target.value as SourceFilter)}>
+          <select aria-label="Data source" value={source} onChange={(e) => setSource(e.target.value as SourceFilter)}>
             <option value="all">All data sources</option>
             <option value="HISTORICAL">Historical (real) only</option>
             <option value="DEMO">Demo (synthetic) only</option>
             <option value="SIMULATED">Simulated market only</option>
           </select>
-          <select value={mode} onChange={(e) => setMode(e.target.value as 'all' | 'replay' | 'sim')}>
+          <select aria-label="Session type" value={mode} onChange={(e) => setMode(e.target.value as 'all' | 'replay' | 'sim')}>
             <option value="all">Replay and sim</option>
             <option value="replay">Replay only</option>
             <option value="sim">Simulated market only</option>
           </select>
-          <select value={tag} onChange={(e) => setTag(e.target.value)}>
+          <select aria-label="Setup tag" value={tag} onChange={(e) => setTag(e.target.value)}>
             <option value="">All tags</option>
             {tags.map((t) => (
               <option key={t} value={t}>
@@ -240,7 +242,7 @@ export function AnalyticsPage() {
                   return `${String(h).padStart(2, '0')}:00–${String(h + 1).padStart(2, '0')}:00`;
                 }).sort((a, b) => a.key.localeCompare(b.key))}
               />
-              <Breakdown title="By weekday" groups={groupBy(filtered, (e) => WEEKDAYS[weekdayOf(exchangeDate(e.entryTime))])} />
+              <Breakdown title="By weekday" groups={groupBy(filtered, (e) => (dateHidden(e) ? 'Blind session (hidden)' : WEEKDAYS[weekdayOf(exchangeDate(e.entryTime))]))} />
               <Breakdown title="By exit reason" groups={groupBy(filtered, (e) => ({ stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual', other: 'Other' })[e.review?.exitReason ?? 'other'])} />
             </div>
           </>

@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegistry';
-import { applyExecutionConfig } from '../state/tradingStore';
 import { parseCsv, type CsvParseResult } from '../../core/data/csv';
 import type { CsvDataset } from '../../core/data/csvProvider';
 import { deleteEncrypted, hasEncrypted, loadEncrypted, saveEncrypted } from '../services/secureStore';
@@ -157,45 +156,47 @@ function CsvImportCard() {
         </button>
       </div>
       {datasets.length > 0 && (
-        <table className="grid">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Bars</th>
-              <th>Timeframe</th>
-              <th>Range</th>
-              <th>File</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {datasets.map((d) => (
-              <tr key={d.symbol}>
-                <td>
-                  <b>{d.symbol}</b>
-                </td>
-                <td>{d.bars.length.toLocaleString('en-US')}</td>
-                <td>{d.baseTimeframe}</td>
-                <td className="mono small">
-                  {d.bars.length ? `${dateTime(d.bars[0].time)} → ${dateTime(d.bars[d.bars.length - 1].time)}` : '—'}
-                </td>
-                <td className="muted small">{d.fileName}</td>
-                <td className="num">
-                  <button
-                    className="btn sm danger"
-                    onClick={async () => {
-                      if (!window.confirm(`Delete the imported data for ${d.symbol}?`)) return;
-                      await deleteCsvDataset(d.symbol);
-                      setDatasets(csvProvider.list());
-                    }}
-                  >
-                    Delete
-                  </button>
-                </td>
+        <div className="table-scroll">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Bars</th>
+                <th>Timeframe</th>
+                <th>Range</th>
+                <th>File</th>
+                <th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {datasets.map((d) => (
+                <tr key={d.symbol}>
+                  <td>
+                    <b>{d.symbol}</b>
+                  </td>
+                  <td>{d.bars.length.toLocaleString('en-US')}</td>
+                  <td>{d.baseTimeframe}</td>
+                  <td className="mono small">
+                    {d.bars.length ? `${dateTime(d.bars[0].time)} → ${dateTime(d.bars[d.bars.length - 1].time)}` : '—'}
+                  </td>
+                  <td className="muted small">{d.fileName}</td>
+                  <td className="num">
+                    <button
+                      className="btn sm danger"
+                      onClick={async () => {
+                        if (!window.confirm(`Delete the imported data for ${d.symbol}?`)) return;
+                        await deleteCsvDataset(d.symbol);
+                        setDatasets(csvProvider.list());
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -335,11 +336,7 @@ function ApiKeysCard() {
 
 function ExecutionCard() {
   const exec = useSettings((s) => s.execution);
-  const updateExecution = useSettings((s) => s.updateExecution);
-  const upd = (patch: Parameters<typeof updateExecution>[0]) => {
-    updateExecution(patch);
-    applyExecutionConfig();
-  };
+  const upd = useSettings((s) => s.updateExecution);
   return (
     <div className="card stack">
       <h2>Execution model</h2>
@@ -411,10 +408,7 @@ function RiskCard() {
   const rules = useSettings((s) => s.rules);
   const updateRules = useSettings((s) => s.updateRules);
   const sr = exec.strictRisk;
-  const setStrict = (patch: Partial<typeof sr>) => {
-    updateExecution({ strictRisk: { ...sr, ...patch } });
-    applyExecutionConfig();
-  };
+  const setStrict = (patch: Partial<typeof sr>) => updateExecution({ strictRisk: { ...sr, ...patch } });
   return (
     <div className="card stack">
       <h2>Risk management</h2>
@@ -491,7 +485,6 @@ function GeneralCard() {
             if (!window.confirm('Reset all settings, including theme and chart colours, to their defaults? Your journal, streak, imported data and keys are kept.')) return;
             s.reset();
             setWatch(useSettings.getState().watchlist.join(', '));
-            applyExecutionConfig();
           }}
         >
           Reset settings

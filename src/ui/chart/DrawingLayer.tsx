@@ -14,7 +14,7 @@ import { FIB_LEVELS, POINTS_NEEDED, useDrawings, type DrawPoint, type Drawing, t
 import { newId } from '../../core/util/ids';
 import { price as fmtPrice } from '../services/format';
 import { useSettings } from '../state/settingsStore';
-import { keyBelongsElsewhere } from '../components/common';
+import { isShown, keyBelongsElsewhere } from '../components/common';
 import { readable } from '../theme/color';
 import { useTrading } from '../state/tradingStore';
 
@@ -182,7 +182,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       // Never delete a drawing hidden behind a dialog, or reset the tool with the Escape that closed one.
       if (keyBelongsElsewhere(e)) return;
       // The terminal stays mounted on other pages; a drawing that is not on screen is never deleted.
-      if (!svgRef.current?.getClientRects().length) return;
+      if (!svgRef.current || !isShown(svgRef.current)) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         remove(selectedId);
         e.preventDefault();

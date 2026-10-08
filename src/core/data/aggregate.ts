@@ -94,3 +94,20 @@ export class BarAggregator {
 export function regularSessionOnly(bars: readonly Bar[]): Bar[] {
   return bars.filter((b) => marketSession(b.time) === 'regular');
 }
+
+/**
+ * Adds bars that continue `base` (oldest first) in place: one with the last bar's time is that bar
+ * in a later state and replaces it, later ones are appended, older ones are already held and
+ * skipped. Returns the index of the first bar changed, or -1 when nothing changed.
+ */
+export function mergeBars(base: Bar[], bars: readonly Bar[]): number {
+  let from = -1;
+  for (const b of bars) {
+    const last = base[base.length - 1];
+    if (last && b.time < last.time) continue;
+    if (last && b.time === last.time) base[base.length - 1] = { ...b };
+    else base.push({ ...b });
+    if (from < 0) from = base.length - 1;
+  }
+  return from;
+}

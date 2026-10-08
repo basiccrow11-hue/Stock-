@@ -70,48 +70,52 @@ export function App() {
   return (
     <div className="app">
       <TopBar view={view} onView={setView} />
-      {/* The terminal stays mounted so the chart and drawings survive page switches. */}
-      {/* Focusable so a closing dialog whose opener is gone can return focus here, not to <body>. */}
-      <main
-        className={`terminal${view === "trade" ? "" : " hidden"}`}
-        tabIndex={-1}
-        data-focus-home=""
-        aria-label="Trading terminal"
-      >
-        <Watchlist />
-        <ChartPanel
-          onNewSession={(mode) => setSetup({ mode })}
-          onOpenSettings={openAppearance}
-          active={view === "trade"}
-        />
-        <RightPanel />
-        <BottomPanel
-          onOpenJournal={(id) => {
-            // The terminal hides; the journal takes focus on that trade's row.
-            requestFocus("journal");
-            setJournalFocus(id);
-            setView("journal");
-          }}
-        />
-      </main>
-      <Suspense
-        fallback={
-          view === "trade" ? null : <div className="page muted">Loading…</div>
-        }
-      >
-        {view === "backtest" && <BacktestPage />}
-        {view === "journal" && <JournalPage focusId={journalFocus} />}
-        {view === "analytics" && <AnalyticsPage />}
-        {view === "challenges" && (
-          <ChallengesPage
-            onStart={(challengeId, mode) => {
-              setView("trade");
-              setSetup({ mode, challengeId });
+      {/* Pages cover the terminal instead of replacing it. */}
+      <div className="views">
+        {/* The terminal stays mounted so the chart and drawings survive page switches, and laid out */}
+        {/* (only hidden) so a chart snapshot taken while a page covers it still has the chart's size. */}
+        {/* Focusable so a closing dialog whose opener is gone can return focus here, not to <body>. */}
+        <main
+          className={`terminal${view === "trade" ? "" : " offstage"}`}
+          tabIndex={-1}
+          data-focus-home=""
+          aria-label="Trading terminal"
+        >
+          <Watchlist />
+          <ChartPanel
+            onNewSession={(mode) => setSetup({ mode })}
+            onOpenSettings={openAppearance}
+            active={view === "trade"}
+          />
+          <RightPanel />
+          <BottomPanel
+            onOpenJournal={(id) => {
+              // The terminal hides; the journal takes focus on that trade's row.
+              requestFocus("journal");
+              setJournalFocus(id);
+              setView("journal");
             }}
           />
-        )}
-        {view === "settings" && <SettingsPage />}
-      </Suspense>
+        </main>
+        <Suspense
+          fallback={
+            view === "trade" ? null : <div className="page muted">Loading…</div>
+          }
+        >
+          {view === "backtest" && <BacktestPage />}
+          {view === "journal" && <JournalPage focusId={journalFocus} />}
+          {view === "analytics" && <AnalyticsPage />}
+          {view === "challenges" && (
+            <ChallengesPage
+              onStart={(challengeId, mode) => {
+                setView("trade");
+                setSetup({ mode, challengeId });
+              }}
+            />
+          )}
+          {view === "settings" && <SettingsPage />}
+        </Suspense>
+      </div>
       {setup && (
         <SessionSetup
           mode={setup.mode}

@@ -361,6 +361,30 @@ describe('brackets (stop loss / take profit)', () => {
     expect(b.broker.state.roundTrips[0].pnl).toBe(-20);
   });
 
+  it('counts the part of the exit bar a trade was open for in its excursions', () => {
+    // Down bar O -> H -> L: the long ran to 101.5, then the stop filled at 98. The 97.5 low came after.
+    const a = setup();
+    a.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10, stopLoss: 98 });
+    a.next(100, 101.5, 97.5, 97.8);
+    const stopped = a.broker.state.roundTrips[0];
+    expect(stopped.closed).toBe(true);
+    expect([stopped.highWhileOpen, stopped.lowWhileOpen]).toEqual([101.5, 98]);
+    // Up bar O -> L -> H: the dip to 98.5 came before the target filled at 102.
+    const b = setup();
+    b.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10, takeProfit: 102 });
+    b.next(100, 102.5, 98.5, 102.2);
+    const target = b.broker.state.roundTrips[0];
+    expect(target.closed).toBe(true);
+    expect([target.highWhileOpen, target.lowWhileOpen]).toEqual([102, 98.5]);
+    // Opened and closed in one bar: in at 99 on the way down to 98, out at the 101 target.
+    const c = setup();
+    c.broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 10, limitPrice: 99, takeProfit: 101, tif: 'day' });
+    c.next(100, 101.5, 98, 101.2);
+    const inOut = c.broker.state.roundTrips[0];
+    expect(inOut.closed).toBe(true);
+    expect([inOut.highWhileOpen, inOut.lowWhileOpen]).toEqual([101, 98]);
+  });
+
   it('closing manually cancels the bracket exits', () => {
     const { broker } = setup();
     broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10, stopLoss: 98, takeProfit: 103 });

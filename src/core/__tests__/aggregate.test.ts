@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BarAggregator, aggregateBars } from '../data/aggregate';
+import { BarAggregator, aggregateBars, mergeBars } from '../data/aggregate';
 import { bar, et, randomBars } from './helpers';
 
 describe('bar aggregation', () => {
@@ -39,5 +39,19 @@ describe('bar aggregation', () => {
       }
       expect(inc).toEqual(aggregateBars(bars, tf));
     }
+  });
+});
+
+describe('merging bars into a chart', () => {
+  it('replaces the forming bar, appends later ones and skips older ones', () => {
+    const t = et('2025-01-15', '09:30');
+    const base = [bar(t, 100, 101, 99, 100, 1), bar(t + 60, 100, 100, 100, 100, 1)];
+    const from = mergeBars(base, [bar(t, 1, 1, 1, 1, 1), bar(t + 60, 100, 102, 99, 101, 5), bar(t + 120, 101, 101, 101, 101, 1), bar(t + 180, 101, 103, 101, 102, 2)]);
+    expect(from).toBe(1);
+    expect(base.map((b) => b.time)).toEqual([t, t + 60, t + 120, t + 180]);
+    expect(base[0].close).toBe(100);
+    expect(base[1]).toEqual(bar(t + 60, 100, 102, 99, 101, 5));
+    expect(mergeBars(base, [bar(t + 60, 1, 1, 1, 1, 1)])).toBe(-1);
+    expect(mergeBars([], [bar(t, 1, 1, 1, 1, 1)])).toBe(0);
   });
 });

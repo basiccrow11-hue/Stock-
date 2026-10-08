@@ -78,11 +78,12 @@ function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
 }
 
-function SmallNum({ value, onChange, step = 1, min = 1, title }: { value: number; onChange: (n: number) => void; step?: number; min?: number; title: string }) {
+function SmallNum({ value, onChange, step = 1, min = 1, title, label }: { value: number; onChange: (n: number) => void; step?: number; min?: number; title: string; label?: string }) {
   return (
     <input
       type="number"
       title={title}
+      aria-label={label ?? title}
       value={value}
       step={step}
       min={min}
@@ -95,26 +96,28 @@ function SmallNum({ value, onChange, step = 1, min = 1, title }: { value: number
   );
 }
 
-function SeriesEditor({ value, onChange }: { value: SeriesRef; onChange: (s: SeriesRef) => void }) {
+/** One side of a condition; `side` names its controls for screen readers ("Left value period"). */
+function SeriesEditor({ value, onChange, side }: { value: SeriesRef; onChange: (s: SeriesRef) => void; side: string }) {
+  const num = (title: string) => ({ title, label: `${side} ${title.toLowerCase()}` });
   return (
     <span className="row" style={{ gap: 4 }}>
-      <select value={value.kind} onChange={(e) => onChange(defaultRef(e.target.value as SeriesRef['kind']))}>
+      <select aria-label={side} value={value.kind} onChange={(e) => onChange(defaultRef(e.target.value as SeriesRef['kind']))}>
         {SERIES_KINDS.map((k) => (
           <option key={k.kind} value={k.kind}>
             {k.label}
           </option>
         ))}
       </select>
-      {'period' in value && <SmallNum title="Period" value={value.period} onChange={(n) => onChange({ ...value, period: Math.max(1, Math.round(n)) })} />}
-      {'mult' in value && <SmallNum title="Std devs" value={value.mult} step={0.5} min={0.5} onChange={(n) => onChange({ ...value, mult: n })} />}
+      {'period' in value && <SmallNum {...num('Period')} value={value.period} onChange={(n) => onChange({ ...value, period: Math.max(1, Math.round(n)) })} />}
+      {'mult' in value && <SmallNum {...num('Std devs')} value={value.mult} step={0.5} min={0.5} onChange={(n) => onChange({ ...value, mult: n })} />}
       {'fast' in value && (
         <>
-          <SmallNum title="Fast" value={value.fast} onChange={(n) => onChange({ ...value, fast: Math.max(1, Math.round(n)) })} />
-          <SmallNum title="Slow" value={value.slow} onChange={(n) => onChange({ ...value, slow: Math.max(2, Math.round(n)) })} />
-          <SmallNum title="Signal" value={value.signal} onChange={(n) => onChange({ ...value, signal: Math.max(1, Math.round(n)) })} />
+          <SmallNum {...num('Fast')} value={value.fast} onChange={(n) => onChange({ ...value, fast: Math.max(1, Math.round(n)) })} />
+          <SmallNum {...num('Slow')} value={value.slow} onChange={(n) => onChange({ ...value, slow: Math.max(2, Math.round(n)) })} />
+          <SmallNum {...num('Signal')} value={value.signal} onChange={(n) => onChange({ ...value, signal: Math.max(1, Math.round(n)) })} />
         </>
       )}
-      {value.kind === 'value' && <SmallNum title="Value" value={value.value} step={1} min={-1e9} onChange={(n) => onChange({ kind: 'value', value: n })} />}
+      {value.kind === 'value' && <SmallNum {...num('Value')} value={value.value} step={1} min={-1e9} onChange={(n) => onChange({ kind: 'value', value: n })} />}
     </span>
   );
 }
@@ -125,7 +128,7 @@ function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Ru
     <div className="rule card" style={{ padding: 10, background: 'var(--panel-2)' }}>
       <div className="row wrap">
         <b>IF</b>
-        <select value={rule.logic} onChange={(e) => onChange({ ...rule, logic: e.target.value as 'all' | 'any' })}>
+        <select aria-label="Condition logic" value={rule.logic} onChange={(e) => onChange({ ...rule, logic: e.target.value as 'all' | 'any' })}>
           <option value="all">ALL of these are true</option>
           <option value="any">ANY of these is true</option>
         </select>
@@ -136,18 +139,18 @@ function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Ru
       </div>
       {rule.conditions.map((c, i) => (
         <div key={i} className="cond row wrap" style={{ margin: '6px 0 6px 16px' }}>
-          <SeriesEditor value={c.left} onChange={(s) => setCond(i, { ...c, left: s })} />
-          <select value={c.op} onChange={(e) => setCond(i, { ...c, op: e.target.value as Operator })}>
+          <SeriesEditor side="Left value" value={c.left} onChange={(s) => setCond(i, { ...c, left: s })} />
+          <select aria-label="Comparison" value={c.op} onChange={(e) => setCond(i, { ...c, op: e.target.value as Operator })}>
             {(Object.keys(OPERATOR_LABELS) as Operator[]).map((o) => (
               <option key={o} value={o}>
                 {OPERATOR_LABELS[o]}
               </option>
             ))}
           </select>
-          <SeriesEditor value={c.right} onChange={(s) => setCond(i, { ...c, right: s })} />
+          <SeriesEditor side="Right value" value={c.right} onChange={(s) => setCond(i, { ...c, right: s })} />
           {rule.conditions.length > 1 && (
-            <button className="btn sm ghost icon" title="Remove condition" onClick={() => onChange({ ...rule, conditions: rule.conditions.filter((_, j) => j !== i) })}>
-              ✕
+            <button className="btn sm ghost icon" title="Remove condition" aria-label="Remove condition" onClick={() => onChange({ ...rule, conditions: rule.conditions.filter((_, j) => j !== i) })}>
+              <span aria-hidden="true">✕</span>
             </button>
           )}
         </div>
@@ -158,7 +161,7 @@ function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Ru
         </button>
         <div className="spacer" />
         <b>THEN</b>
-        <select value={rule.action} onChange={(e) => onChange({ ...rule, action: e.target.value as OrderAction })}>
+        <select aria-label="Action" value={rule.action} onChange={(e) => onChange({ ...rule, action: e.target.value as OrderAction })}>
           <option value="buy">Buy (open long)</option>
           <option value="sell">Sell (close long)</option>
           <option value="short">Short (open short)</option>
@@ -328,6 +331,7 @@ export function BacktestPage() {
             <h2>Strategy</h2>
             <div className="spacer" />
             <select
+              aria-label="Load a strategy preset"
               value=""
               onChange={(e) => {
                 const p = STRATEGY_PRESETS.find((x) => x.name === e.target.value);

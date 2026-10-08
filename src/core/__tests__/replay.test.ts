@@ -131,6 +131,44 @@ describe('ReplaySession: rewind, jump, and fills', () => {
     expect(s.broker.state.events.some((e) => e.message.includes(D))).toBe(false);
   });
 
+  it('says exactly which trades a rewind will undo, wherever Play left the clock', () => {
+    /** A session played like the Play button (37 s steps), trading a bracket whenever flat. */
+    const played = (steps: number) => {
+      const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+      for (let i = 0; i < steps; i++) {
+        if (i % 3 === 0 && s.broker.position('TEST').quantity === 0) {
+          const px = s.engine.lastPrice()!;
+          s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 10, stopLoss: px - 0.6, takeProfit: px + 0.6 });
+        }
+        s.advance(37);
+      }
+      return s;
+    };
+    const state = (s: ReplaySession) => new Map(s.broker.state.roundTrips.map((t) => [t.id, t.closed]));
+    let checked = 0;
+    for (let steps = 5; steps < 120; steps += 7) {
+      for (const rewind of ['stepBack', 'jump'] as const) {
+        const s = played(steps);
+        const target = rewind === 'stepBack' ? s.stepBackTarget()! : s.now - 437;
+        const predicted = s.undoneBy(target);
+        const before = state(s);
+        if (rewind === 'stepBack') s.stepBack();
+        else s.jumpTo(target);
+        const after = state(s);
+        let closed = 0;
+        let open = 0;
+        for (const [id, wasClosed] of before) {
+          if (wasClosed && after.get(id) !== true) closed++;
+          else if (!wasClosed && !after.has(id)) open++;
+        }
+        expect(predicted).toEqual({ open, closed });
+        checked += closed;
+      }
+    }
+    // The walk must actually undo closed trades, or it proves nothing.
+    expect(checked).toBeGreaterThan(5);
+  });
+
   it('restart returns to the initial state', () => {
     const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
     s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });

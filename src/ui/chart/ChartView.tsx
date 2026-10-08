@@ -26,7 +26,7 @@ import {
   TickMarkType,
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
-import { aggregateBars, bucketFor } from '../../core/data/aggregate';
+import { aggregateBars, bucketFor, mergeBars } from '../../core/data/aggregate';
 import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
 import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
@@ -571,19 +571,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         return;
       }
       if (e.symbol !== symbol) return;
-      const base = baseRef.current;
-      if (e.type === 'append') {
-        const from = base.length;
-        // A bar the chart already holds would make the series throw ("Cannot update oldest data").
-        for (const b of e.bars) if (!base.length || b.time > base[base.length - 1].time) base.push(b);
-        if (base.length > from) rebuildTail(from);
-      } else {
-        // Sim tick: the forming 1m bar is re-sent with cumulative values; replace, don't add.
-        const last = base[base.length - 1];
-        if (last && last.time === e.bar.time) base[base.length - 1] = { ...e.bar };
-        else base.push({ ...e.bar });
-        rebuildTail(base.length - 1);
-      }
+      // Replay appends new bars; a sim tick re-sends the forming bar with cumulative values. Bars the
+      // chart already holds are skipped: the series throws on them ("Cannot update oldest data").
+      const from = mergeBars(baseRef.current, e.bars);
+      if (from >= 0) rebuildTail(from);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, timeframe]);
@@ -733,6 +724,9 @@ function DeleteDrawingButton({ left, top }: { left: number; top: number }) {
 }
 
 async function snapshot(chart: IChartApi, container: HTMLElement): Promise<string | null> {
+  // A chart that is not laid out (e.g. a layout that removes it) collapses to a sliver: no picture
+  // rather than a smear saved for good.
+  if (container.clientWidth < 100 || container.clientHeight < 60) return null;
   const canvas = chart.takeScreenshot(true, false);
   const svg = container.parentElement?.querySelector('svg.drawing-layer') as SVGSVGElement | null;
   if (svg && svg.childElementCount > 0) {

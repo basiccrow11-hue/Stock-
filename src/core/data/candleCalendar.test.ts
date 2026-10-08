@@ -52,6 +52,18 @@ describe('candle calendar past the data', () => {
     expect(hourly.next(at('2024-11-29', '16:30'))).toBe(at('2024-12-02', '03:30'));
   });
 
+  it('does not carry an early close over to normal days when the data ends on one', () => {
+    // The last full day of data is the 13:00 close on 2024-11-29.
+    const extended = candleCalendar([...day('2024-11-29', '01:30', '13:30', 240), ...day('2024-12-02', '01:30', '01:30', 240)], '4h');
+    expect(extended.next(at('2024-12-02', '13:30'))).toBe(at('2024-12-02', '17:30'));
+    expect(extended.next(at('2024-12-02', '17:30'))).toBe(at('2024-12-03', '01:30'));
+    const regular = candleCalendar([...day('2024-11-29', '09:30', '09:30', 240), ...day('2024-12-02', '09:30', '09:30', 240)], '4h');
+    expect(regular.next(at('2024-12-02', '09:30'))).toBe(at('2024-12-02', '13:30'));
+    expect(regular.next(at('2024-12-02', '13:30'))).toBe(at('2024-12-03', '09:30'));
+    // And the early-close day itself keeps one regular 4h candle.
+    expect(regular.next(at('2024-11-29', '09:30'))).toBe(at('2024-12-02', '09:30'));
+  });
+
   it('follows the hours the data has: regular session only', () => {
     const regular = [...day('2024-03-12', '09:30', '15:55', 5), ...day('2024-03-13', '09:30', '11:00', 5)];
     const cal = candleCalendar(regular, '5m');
@@ -80,5 +92,40 @@ describe('candle calendar past the data', () => {
         expect(cal.after(from, k + 1)).toBe(cal.next(t));
       }
     }
+  });
+
+  it('agrees with a candle-by-candle walk across holidays and early closes', () => {
+    const cases: [Timeframe, Bar[]][] = [
+      ['5m', [...day('2024-11-18', '04:00', '19:55', 5), ...day('2024-11-19', '04:00', '04:00', 5)]],
+      ['5m', [...day('2024-11-18', '09:30', '15:55', 5), ...day('2024-11-19', '09:30', '09:30', 5)]],
+      ['1h', [...day('2024-11-18', '03:30', '19:30', 60), ...day('2024-11-19', '03:30', '03:30', 60)]],
+      ['4h', [...day('2024-11-18', '01:30', '17:30', 240), ...day('2024-11-19', '01:30', '01:30', 240)]],
+    ];
+    for (const [tf, data] of cases) {
+      const cal = candleCalendar(data, tf);
+      const from = data[data.length - 1].time;
+      // Through Thanksgiving, the 11-29 and 12-24 early closes, Christmas and New Year.
+      let c = from;
+      for (let i = 0; c < at('2025-01-06', '00:00'); i++, c = cal.next(c)) {
+        expect(cal.slots(from, c)).toBe(i);
+        expect(cal.after(from, i)).toBe(c);
+      }
+    }
+  });
+
+  it('counts years ahead without walking every candle', () => {
+    const data = [...day('2019-03-11', '04:00', '19:59', 1), ...day('2019-03-12', '04:00', '04:00', 1)];
+    const cal = candleCalendar(data, '1m');
+    const from = data[data.length - 1].time;
+    const far = at('2026-06-01', '12:00');
+    const k = cal.slots(from, far);
+    expect(cal.after(from, k)).toBe(far);
+    const started = performance.now();
+    for (let i = 0; i < 200; i++) {
+      cal.slots(from, far + i * 60);
+      cal.after(from, k + i);
+    }
+    // A chart projects every drawing point on every frame; this must stay far below a frame.
+    expect((performance.now() - started) / 200).toBeLessThan(1);
   });
 });

@@ -16,11 +16,12 @@ export function modalOpen(): boolean {
 }
 
 /**
- * Whether a global shortcut should leave this key alone: a dialog is open, a dialog or popover has
- * already handled it (Escape), or focus is in a text field, a dialog or a popover.
+ * Whether a global shortcut should leave this key alone: a dialog or a toolbar menu is open (focus
+ * can stay on the menu's button, or nowhere), a dialog or popover has already handled it (Escape),
+ * or focus is in a text field, a dialog or a popover.
  */
 export function keyBelongsElsewhere(e: KeyboardEvent): boolean {
-  if (modalOpen() || e.defaultPrevented) return true;
+  if (modalOpen() || e.defaultPrevented || document.querySelector('.popover')) return true;
   const el = e.target instanceof Element ? e.target : null;
   return !!el?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover');
 }
@@ -38,7 +39,11 @@ export function useModalCount(): number {
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [contenteditable=""], [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
 
-const visible = (el: HTMLElement) => el.getClientRects().length > 0;
+/**
+ * Whether an element is on screen: laid out, and not in the terminal while a page covers it (the
+ * terminal keeps its layout there, only hidden).
+ */
+export const isShown = (el: Element) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
 
 /**
  * Where focus goes when a dialog closes and the control that opened it is gone (the empty-state
@@ -46,7 +51,7 @@ const visible = (el: HTMLElement) => el.getClientRects().length > 0;
  * it is showing, otherwise the current page's tab in the top bar.
  */
 function focusHome(): void {
-  const first = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)].find(visible);
+  const first = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)].find(isShown);
   (first('[data-focus-home]') ?? first('[aria-current="page"]'))?.focus({ preventScroll: true });
 }
 
@@ -72,7 +77,7 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
     modalsChanged();
     const opener = openerRef.current;
     const isTop = () => modalStack[modalStack.length - 1]?.id === id;
-    const items = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(visible);
+    const items = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(isShown);
     // Focus moves into the dialog, to the control marked data-autofocus if there is one, so Tab
     // starts inside and Space or Enter acts on the dialog rather than on the page behind it.
     if (!dialog.contains(document.activeElement)) (dialog.querySelector<HTMLElement>('[data-autofocus]') ?? dialog).focus();
@@ -117,7 +122,7 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
       // Give focus back to whatever opened the dialog if it is still on the page and not hidden
       // behind another open dialog. Otherwise to the dialog that is now on top, or the terminal.
       const top = modalStack[modalStack.length - 1]?.el;
-      if (opener && opener.isConnected && typeof opener.focus === 'function' && (!top || top.contains(opener))) opener.focus();
+      if (opener && opener.isConnected && typeof opener.focus === 'function' && isShown(opener) && (!top || top.contains(opener))) opener.focus();
       else if (top) top.focus();
       else focusHome();
     };

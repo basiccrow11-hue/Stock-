@@ -267,6 +267,37 @@ export function tradingDayOnOrBefore(date: string): string {
   return isTradingDay(date) ? date : prevTradingDay(date);
 }
 
+/** Nearest trading day on or after `date`. */
+export function tradingDayOnOrAfter(date: string): string {
+  return isTradingDay(date) ? date : nextTradingDay(date);
+}
+
+const dayNumber = (date: string): number => {
+  const { y, m, d } = parseDate(date);
+  return Math.round(Date.UTC(y, m - 1, d) / 86_400_000);
+};
+
+/** Trading days in [from, to) (0 when `to` is not after `from`), without walking the days. */
+export function tradingDaysBetween(from: string, to: string): number {
+  const a = dayNumber(from);
+  const b = dayNumber(to);
+  if (b <= a) return 0;
+  const weeks = Math.floor((b - a) / 7);
+  let n = weeks * 5;
+  for (let i = a + weeks * 7; i < b; i++) {
+    const dow = (((i + 4) % 7) + 7) % 7; // 1970-01-01 was a Thursday
+    if (dow !== 0 && dow !== 6) n++;
+  }
+  for (let y = parseDate(from).y; y <= parseDate(to).y; y++) for (const h of nyseHolidays(y)) if (h >= from && h < to && !isTradingDay(h) && weekdayOf(h) % 6 !== 0) n--;
+  return n;
+}
+
+/** Trading days of a year that close early (13:00). */
+export function earlyCloses(y: number): string[] {
+  const days = [addDays(nthWeekday(y, 11, 4, 4), 1), formatDate(y, 12, 24), formatDate(y, 7, 3)];
+  return days.filter((d) => isTradingDay(d) && regularCloseMinute(d) < REGULAR_CLOSE);
+}
+
 export function marketSession(t: UnixSeconds): MarketSession {
   const date = exchangeDate(t);
   if (!isTradingDay(date)) return 'closed';
@@ -301,4 +332,9 @@ export function formatDuration(seconds: number): string {
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+/** `text` with its calendar dates (YYYY-MM-DD, with any ISO time) replaced, for blind mode. */
+export function withoutDates(text: string): string {
+  return text.replace(/\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?)?/g, 'this day');
 }

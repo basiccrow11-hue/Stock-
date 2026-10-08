@@ -9,6 +9,8 @@ import {
   nextTradingDay,
   prevTradingDay,
   regularCloseMinute,
+  tradingDaysBetween,
+  withoutDates,
 } from '../time';
 import { et } from './helpers';
 
@@ -60,5 +62,25 @@ describe('exchange calendar', () => {
     expect(nextTradingDay('2025-01-17')).toBe('2025-01-21'); // over weekend + MLK
     expect(prevTradingDay('2025-01-10')).toBe('2025-01-08'); // over Jan 9 closure
     expect(exchangeDate(et('2025-01-15', '23:59'))).toBe('2025-01-15');
+  });
+});
+
+describe('calendar arithmetic', () => {
+  it('counts trading days like a day-by-day walk, across years of weekends and holidays', () => {
+    const walk = (from: string, to: string) => {
+      let n = 0;
+      for (let d = isTradingDay(from) ? from : nextTradingDay(from); d < to; d = nextTradingDay(d)) n++;
+      return n;
+    };
+    const days = ['2019-01-01', '2019-12-24', '2020-03-14', '2021-07-02', '2022-12-26', '2024-03-28', '2024-11-27', '2025-01-01', '2026-06-01'];
+    for (const a of days) for (const b of days) if (a <= b) expect(tradingDaysBetween(a, b)).toBe(walk(a, b));
+  });
+});
+
+describe('blind-mode text', () => {
+  it('replaces dates and ISO timestamps, and leaves other numbers alone', () => {
+    expect(withoutDates('No QQQ data for 2024-03-13. Pick another date or data source.')).toBe('No QQQ data for this day. Pick another date or data source.');
+    expect(withoutDates('start 2024-03-13T09:30:00.000Z invalid')).toBe('start this day invalid');
+    expect(withoutDates('HTTP 429 after 1200 ms')).toBe('HTTP 429 after 1200 ms');
   });
 });

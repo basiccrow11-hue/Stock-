@@ -495,13 +495,24 @@ export class SimBroker {
       if (o.symbol === symbol && o.status === 'pending' && this.eligible(o, session)) o.status = 'working';
     }
 
-    const tripOpenAtStart = this.s.openTripBySymbol[symbol];
     const path = this.intrabarPath(symbol, bar);
     let capacity = this.cfg.maxParticipation > 0 ? Math.floor(bar.volume * this.cfg.maxParticipation) : Infinity;
     const ext = session !== 'regular';
-    let openedThisBar: { seg: number; level: number } | null = null;
 
-    for (let seg = 0; seg < path.length - 1 && capacity > 0; seg++) {
+    // Excursions (MFE/MAE): every price the path passes while a trade is open, including the part of
+    // the bar before a trade closes in it. The path is straight between its points, so reaching each
+    // point and each fill level covers it.
+    let tripId = this.s.openTripBySymbol[symbol];
+    const reach = (price: number) => {
+      if (!tripId) return;
+      const trip = this.tripById(tripId)!;
+      trip.highWhileOpen = Math.max(trip.highWhileOpen, price);
+      trip.lowWhileOpen = Math.min(trip.lowWhileOpen, price);
+    };
+    reach(path[0]);
+
+    let seg = 0;
+    for (; seg < path.length - 1 && capacity > 0; seg++) {
       let pos = path[seg];
       const end = path[seg + 1];
       const skip = new Set<string>();
@@ -512,30 +523,21 @@ export class SimBroker {
         const segLen = Math.abs(end - path[seg]);
         const frac = (seg + (segLen > 0 ? Math.abs(pos - path[seg]) / segLen : 0)) / (path.length - 1);
         const t = bar.time + Math.min(barSeconds - 1, Math.floor(barSeconds * frac));
-        const hadTrip = !!this.s.openTripBySymbol[symbol];
+        reach(pos);
         const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, skip);
         capacity -= used;
-        if (!hadTrip && this.s.openTripBySymbol[symbol] && !openedThisBar) openedThisBar = { seg, level: pos };
+        // A trade opened (or reversed into) here starts at this level.
+        tripId = this.s.openTripBySymbol[symbol];
+        reach(pos);
       }
+      reach(end);
     }
+    // Out of capacity: no more fills this bar, but price still travels the rest of the path.
+    for (let k = seg + 1; k < path.length; k++) reach(path[k]);
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
-
-    // Excursion tracking for the open round trip.
-    const tripId = this.s.openTripBySymbol[symbol];
-    if (tripId) {
-      const trip = this.tripById(tripId)!;
-      if (tripOpenAtStart === tripId) {
-        trip.highWhileOpen = Math.max(trip.highWhileOpen, bar.high);
-        trip.lowWhileOpen = Math.min(trip.lowWhileOpen, bar.low);
-      } else if (openedThisBar) {
-        const pts = [openedThisBar.level, ...path.slice(openedThisBar.seg + 1)];
-        trip.highWhileOpen = Math.max(trip.highWhileOpen, ...pts);
-        trip.lowWhileOpen = Math.min(trip.lowWhileOpen, ...pts);
-      }
-    }
 
     this.recordEquity(bar.time + barSeconds);
     this.touch();

@@ -182,13 +182,23 @@ export const useSettings = create<SettingsStore>()(
           rules: { ...current.rules, ...p.rules },
           replay: { ...current.replay, ...p.replay },
           sim: { ...current.sim, ...p.sim },
-          indicators: p.indicators?.length ? p.indicators : current.indicators,
+          // An empty list is a choice (a price-only chart), not a missing value.
+          indicators: Array.isArray(p.indicators) ? p.indicators : current.indicators,
           appearance: sanitizeAppearance(p.appearance),
         };
       },
     },
   ),
 );
+
+// Every open tab saves the whole settings object, so each takes the others' saves as they land;
+// otherwise a tab's next write (even starting a replay) would put back its stale copy over them.
+// A cleared key (another tab cleared site data) is not a save, and this tab keeps what it has.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'stock-replay-settings' && e.newValue !== null) void useSettings.persist.rehydrate();
+  });
+}
 
 export function getSettings(): Settings {
   return useSettings.getState();

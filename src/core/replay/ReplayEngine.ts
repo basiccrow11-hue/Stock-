@@ -148,9 +148,14 @@ export class ReplayEngine {
    * restoring any account state (ReplaySession does this with snapshots).
    */
   rewindTo(target: UnixSeconds): void {
+    this.#cursor = this.revealedCountAt(target) - 1;
+    this.#now = Math.max(target, this.start);
+  }
+
+  /** How many bars stay revealed after `rewindTo(target)`. */
+  revealedCountAt(target: UnixSeconds): number {
     const t = Math.max(target, this.start);
-    this.#cursor = Math.max(this.#firstSessionIndex - 1, lastIndexAtOrBefore(this.#ends, t, (x) => x));
-    this.#now = t;
+    return Math.max(this.#firstSessionIndex - 1, lastIndexAtOrBefore(this.#ends, t, (x) => x)) + 1;
   }
 
   /** Time at which the next bar will be revealed, or null at the end. */

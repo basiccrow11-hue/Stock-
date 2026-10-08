@@ -4,7 +4,7 @@ import { useJournal } from '../state/journalStore';
 import { EmptyState, SourceBadge, rowAction } from '../components/common';
 import { JournalEntryDetail } from '../components/JournalEntryDetail';
 import { pnlClass, signedMoney } from '../services/format';
-import { useEntryTime } from '../components/useEntryTime';
+import { useDateHidden, useEntryTime } from '../components/useEntryTime';
 import { takeFocusRequest } from '../services/focusRequest';
 import type { JournalEntry } from '../../core/journal';
 
@@ -59,6 +59,7 @@ function toCsv(entries: JournalEntry[]): string {
 export function JournalPage({ focusId }: { focusId: string | null }) {
   const { entries, loaded, error, remove } = useJournal();
   const entryTime = useEntryTime();
+  const dateHidden = useDateHidden();
   const [selected, setSelected] = useState<string | null>(focusId);
   const [query, setQuery] = useState('');
   const [outcome, setOutcome] = useState<'all' | 'win' | 'loss'>('all');
@@ -82,6 +83,10 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
         (!noteless || Object.values(e.notes).every((n) => !n.trim())),
     );
   }, [entries, query, outcome, noteless]);
+
+  // Exports carry full timestamps, so the running blind session's trades wait until it ends.
+  const exportable = list.filter((e) => !dateHidden(e));
+  const held = list.length - exportable.length;
 
   const current = entries.find((e) => e.id === selected) ?? list[0];
   // Pin the entry shown by default. Otherwise saving its notes can drop it from a "Needs notes" or
@@ -109,10 +114,11 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
           <h1>Journal</h1>
           <span className="muted small">{entries.length} trades. An entry is created automatically when a trade closes.</span>
           <div className="spacer" />
-          <button className="btn sm" disabled={!entries.length} onClick={() => download('trade-journal.csv', toCsv(list), 'text/csv')}>
+          {held > 0 && <span className="muted small">Exports leave out the {held} trade(s) from the blind session in progress until it ends.</span>}
+          <button className="btn sm" disabled={!exportable.length} onClick={() => download('trade-journal.csv', toCsv(exportable), 'text/csv')}>
             Export CSV
           </button>
-          <button className="btn sm" disabled={!entries.length} onClick={() => download('trade-journal.json', JSON.stringify(list, null, 2), 'application/json')}>
+          <button className="btn sm" disabled={!exportable.length} onClick={() => download('trade-journal.json', JSON.stringify(exportable, null, 2), 'application/json')}>
             Export JSON
           </button>
         </div>

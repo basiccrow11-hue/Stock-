@@ -223,7 +223,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   }
 
   let capturePct: number | null = null;
-  if (mfe.dollars > 0) {
+  // Only once price moved at least a tick your way: below that there was no open profit to keep
+  // (and float noise in the average entry would make a nonsense percentage).
+  if (mfePerShare >= 0.01 - 1e-9) {
     capturePct = (trip.pnl / mfe.dollars) * 100;
     if (outcome === 'win' && capturePct < 40) {
       findings.push({ tone: 'bad', title: 'Gave back most of the open profit', detail: `Peak open profit was ${money(mfe.dollars)}; you kept ${money(trip.pnl)} (${capturePct.toFixed(0)}%).` });

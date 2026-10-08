@@ -10,6 +10,7 @@ import {
   setSpeed,
   stepBack,
   stepCandle,
+  stepBackTarget,
   stepForward,
   togglePlay,
   tradesUndoneBy,
@@ -26,13 +27,20 @@ function speedLabel(s: number): string {
   return `${s}x · ${perSec >= 60 ? `${perSec / 60}h` : `${perSec}m`}/s`;
 }
 
-function confirmRewind(target: number): boolean {
-  const n = tradesUndoneBy(target);
+function confirmRewind(target: number | null): boolean {
+  if (target === null) return false;
+  const { open, closed } = tradesUndoneBy(target);
   const first = useTrading.getState().rewinds === 0;
   const parts: string[] = [];
   if (first) parts.push('Going back in time means you have seen what happens next. This session will be marked "rewound": challenges become unofficial and journal entries are flagged.');
-  if (n > 0) parts.push(`This will undo ${n} trade(s) after that point and remove their journal entries.`);
+  if (closed > 0) parts.push(`This will undo ${closed} closed trade(s) and permanently delete ${closed === 1 ? 'its journal entry' : 'their journal entries'}, notes included.`);
+  if (open > 0) parts.push(`${open} open trade(s) entered after that point will be undone.`);
   return parts.length === 0 || window.confirm(`${parts.join('\n\n')}\n\nContinue?`);
+}
+
+/** Step back one bar, after the same warning as any rewind. */
+function confirmStepBack(): void {
+  if (confirmRewind(stepBackTarget())) stepBack();
 }
 
 /**
@@ -62,7 +70,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const timeframe = useTrading((s) => s.timeframe);
   const [jumpDate, setJumpDate] = useState('');
   // Set when Space was used for play/pause, so its keyup cannot press the focused button either
-  // (some browsers press buttons on keyup). A ref: the key listeners are re-registered as time moves.
+  // (some browsers press buttons on keyup). A ref, so it survives the listeners being re-registered.
   const spaceTaken = useRef(false);
   const [jumpTime, setJumpTime] = useState('');
   const isReplay = session?.mode === 'replay';
@@ -90,8 +98,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
         else stepForward();
       } else if (e.key === 'ArrowLeft' && isReplay) {
         e.preventDefault();
-        const last = now - 60;
-        if (confirmRewind(last)) stepBack();
+        confirmStepBack();
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -105,7 +112,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [session, isReplay, now, active]);
+  }, [session, isReplay, active]);
 
   if (!session) return null;
   const progress = session.end ? Math.min(1, Math.max(0, (now - session.start) / (session.end - session.start))) : 0;
@@ -125,7 +132,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start) && restart()} disabled={now <= session.start}>
             <span aria-hidden="true">⏮</span>
           </button>
-          <button className="btn icon" title="Step back one bar (←)" aria-label="Step back one bar" onClick={() => confirmRewind(now - 60) && stepBack()} disabled={now <= session.start}>
+          <button className="btn icon" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= session.start}>
             <span aria-hidden="true">◀</span>
           </button>
           <button className={`btn ${playing ? '' : 'primary'}`} style={{ minWidth: 76 }} onClick={() => (playing ? pause() : play())} disabled={finished}>

@@ -141,6 +141,16 @@ describe('learning review', () => {
     const early = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars.slice(0, 4), timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
     expect(early.afterExit!.reachedOriginalTarget).toBe(false);
   });
+
+  it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
+    // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
+    const avgEntry = (100.1 + 100.1 + 100.1) / 3;
+    const t = trip({ avgEntry, highWhileOpen: 100.1, lowWhileOpen: 99.6, avgExit: 99.6, pnl: -50, initialStop: 99.6 });
+    const review = reviewTrade({ trip: t, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 10_000, allTrips: [t], rules: DEFAULT_TRADING_RULES });
+    expect(review.capturePct).toBeNull();
+    const moved = reviewTrade({ trip: { ...t, highWhileOpen: 100.6, avgExit: 100.35, pnl: 25 }, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 10_000, allTrips: [t], rules: DEFAULT_TRADING_RULES });
+    expect(moved.capturePct).toBeCloseTo(50, 6);
+  });
 });
 
 describe('challenges', () => {

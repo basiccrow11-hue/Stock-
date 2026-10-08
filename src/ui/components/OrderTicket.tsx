@@ -167,6 +167,18 @@ export function OrderTicket() {
     for (const w of r.warnings.slice(0, -1)) if (!w.startsWith('No stop loss')) toast('warning', w, 6000);
   };
 
+  /** Close at market, with the same feedback as an order: outside regular hours it waits for the open. */
+  const closeNow = () => {
+    const r = closePosition(symbol);
+    if (!r.ok) {
+      setResult({ tone: 'error', text: r.error ?? 'Could not close the position.' });
+      return;
+    }
+    const o = r.order;
+    const filled = !!o && useTrading.getState().fills.some((f) => f.orderId === o.id);
+    setResult({ tone: 'success', text: filled || !o ? `${symbol} position closed.` : `Close order for ${symbol} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}` });
+  };
+
   /** Pick-from-chart button. The field's input carries its own name, so the button's never joins it. */
   const pickBtn = (field: PriceField, name: string) => (
     <button
@@ -338,7 +350,7 @@ export function OrderTicket() {
             {last !== undefined ? signedMoney((last - position.avgPrice) * position.quantity) : '—'}
           </span>
           <span />
-          <button className="btn sm" onClick={() => closePosition(symbol)}>
+          <button className="btn sm" onClick={closeNow}>
             Close position (market)
           </button>
         </div>
