@@ -127,6 +127,43 @@ describe('journal edits cut off by closing the tab', () => {
     vi.doUnmock('../services/idb');
   });
 
+  it("keeps a closed tab's edit when another open tab saves the same trade", async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const other = await tab(db, 'work');
+    const closing = await tab(db, 'hang');
+    void closing.getState().updateNotes('t1', { why: 'breakout over premarket high' });
+    await other.getState().updateNotes('t1', {}, 'ORB');
+    expect(db.get('t1')).toMatchObject({ tag: 'ORB', notes: { why: 'breakout over premarket high' } });
+    expect(other.getState().entries[0].notes.why).toBe('breakout over premarket high');
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    vi.doUnmock('../services/idb');
+  });
+
+  it("shows a closed tab's edit in a tab that is already open", async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const other = await tab(db, 'work');
+    const closing = await tab(db, 'hang');
+    void closing.getState().updateNotes('t1', { why: 'fade at VWAP' });
+    window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-journal-drafts', newValue: localStorage.getItem('stock-replay-journal-drafts') }));
+    await new Promise((r) => setTimeout(r, 1700));
+    expect((db.get('t1') as JournalEntry).notes.why).toBe('fade at VWAP');
+    expect(other.getState().entries[0].notes.why).toBe('fade at VWAP');
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    vi.doUnmock('../services/idb');
+  });
+
+  it('finishes the last of several saves cut off mid-sequence', async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const ok = await tab(db, 'work');
+    await ok.getState().updateNotes('t1', { why: 'break' });
+    // The next save starts from what the store holds; then the tab closes before it lands.
+    const drafts = { t1: { notes: { why: ['break', 'breakout'] } } };
+    localStorage.setItem('stock-replay-journal-drafts', JSON.stringify(drafts));
+    await tab(db, 'work');
+    expect((db.get('t1') as JournalEntry).notes.why).toBe('breakout');
+    vi.doUnmock('../services/idb');
+  });
+
   it('leaves nothing behind once a write lands', async () => {
     const db = new Map<string, unknown>([['t1', entry()]]);
     const ok = await tab(db, 'work');

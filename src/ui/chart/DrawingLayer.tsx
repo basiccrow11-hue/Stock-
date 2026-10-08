@@ -97,21 +97,27 @@ function segments(d: Drawing, proj: Projector, width: number, height: number): S
   return [[ax, ay, bx, by], ...levels.filter((y) => y !== null).map((y): Seg => [left, y!, right, y!])];
 }
 
-function distanceToSegment(px: number, py: number, [x1, y1, x2, y2]: Seg): number {
+/** The point of a segment nearest to (px, py). */
+function nearest(px: number, py: number, [x1, y1, x2, y2]: Seg): [number, number] {
   const dx = x2 - x1;
   const dy = y2 - y1;
   const len2 = dx * dx + dy * dy;
   const k = len2 ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2)) : 0;
-  return Math.hypot(px - (x1 + k * dx), py - (y1 + k * dy));
+  return [x1 + k * dx, y1 + k * dy];
 }
 
-/** The topmost drawing with a line within `tolerance` pixels of (x, y), or null. */
+/**
+ * The topmost drawing with a line within `tolerance` pixels of (x, y), or null. Only the part of a
+ * line inside the price pane counts: the rest is clipped away and cannot be seen.
+ */
 export function hitTest(drawings: Drawing[], proj: Projector, width: number, height: number, x: number, y: number, tolerance: number): string | null {
   let best: string | null = null;
   let bestDistance = tolerance;
   for (const d of drawings) {
     for (const seg of segments(d, proj, width, height)) {
-      const dist = distanceToSegment(x, y, seg);
+      const [nx, ny] = nearest(x, y, seg);
+      if (nx < 0 || nx > width || ny < 0 || ny > height) continue;
+      const dist = Math.hypot(x - nx, y - ny);
       // Later drawings are painted on top, so they win a tie.
       if (dist <= bestDistance) {
         best = d.id;
@@ -201,7 +207,10 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       const s = useDrawings.getState();
       if (!still || !rect || s.tool !== 'select' || useTrading.getState().pickTarget) return;
       const { proj, width, height } = latest.current;
-      const id = hitTest(s.drawings, proj, width, height, e.clientX - rect.left, e.clientY - rect.top, TAP_TOLERANCE[e.pointerType] ?? 6);
+      const [x, y] = [e.clientX - rect.left, e.clientY - rect.top];
+      // A click on an axis or an indicator pane is a click off every drawing.
+      const inPane = x >= 0 && x <= width && y >= 0 && y <= height;
+      const id = inPane ? hitTest(s.drawings, proj, width, height, x, y, TAP_TOLERANCE[e.pointerType] ?? 6) : null;
       if (id !== s.selectedId) s.select(id);
     };
     container.addEventListener('pointerdown', onDown);
@@ -355,7 +364,7 @@ function Shape({
         p.x !== null && p.y !== null ? (
           <g key={`h${i}`}>
             <circle className="handle" cx={p.x} cy={p.y} r={5} fill={background} stroke={d.color} strokeWidth={2} />
-            <circle className="handle-hit" cx={p.x} cy={p.y} r={coarse ? 14 : 7} onPointerDown={(e) => onDragStart(e, d, i)} />
+            <circle className="handle-hit" cx={p.x} cy={p.y} r={coarse ? 14 : 7} fill="transparent" onPointerDown={(e) => onDragStart(e, d, i)} />
           </g>
         ) : null,
       )

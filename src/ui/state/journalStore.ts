@@ -30,9 +30,10 @@ async function stored(id: string): Promise<JournalEntry | undefined> {
 const inflight = new Map<string, number>();
 
 /**
- * Note and tag edits not yet confirmed written, per entry, as [value before, value after]. They are
- * kept in localStorage, which writes at once: an IndexedDB write started as the tab closes, reloads
- * or is killed in the background is often dropped. The next load finishes them.
+ * Note and tag edits not yet confirmed written, per entry, as [value in the store before, value
+ * after]. They are kept in localStorage, which writes at once: an IndexedDB write started as a tab
+ * closes, reloads or is killed in the background is often dropped. Whichever tab next sees such a
+ * draft finishes it, field by field and only where the store still holds the value it started from.
  */
 type Change = [before: string, after: string];
 type Draft = { notes: Partial<Record<keyof JournalNotes, Change>>; tag?: Change };
@@ -56,24 +57,26 @@ function writeDrafts(drafts: Record<string, Draft>): void {
   }
 }
 
-/** Entries with a write that failed since their draft was started: their draft must stay. */
-const unsaved = new Set<string>();
+/** A draft's fields, with the tag as one of them. */
+function draftFields(d: Draft): [string, Change][] {
+  return [...(Object.entries(d.notes ?? {}) as [string, Change][]), ...(d.tag ? [['tag', d.tag] as [string, Change]] : [])];
+}
+
+const fieldOf = (e: JournalEntry, k: string): string => (k === 'tag' ? e.tag : e.notes[k as keyof JournalNotes]);
 
 /**
- * A draft's edits on top of the stored entry. A field someone has changed since (another tab) is
- * left alone, and one the original write already saved needs nothing. Undefined when nothing changes.
+ * A draft's edits on top of the stored entry: each field that still holds the value its edit
+ * started from. Undefined when that changes nothing.
  */
-function applyDraft(cur: JournalEntry, d: Draft, today: string): JournalEntry | undefined {
+function applyDraft(cur: JournalEntry, d: Draft | undefined, today: string): JournalEntry | undefined {
+  if (!d) return undefined;
   const notes = { ...cur.notes };
-  let changed = false;
-  for (const [k, [before, after]] of Object.entries(d.notes ?? {}) as [keyof JournalNotes, Change][])
-    if (notes[k] === before && before !== after) {
-      notes[k] = after;
-      changed = true;
-    }
   let tag = cur.tag;
-  if (d.tag && tag === d.tag[0] && d.tag[0] !== d.tag[1]) {
-    tag = d.tag[1];
+  let changed = false;
+  for (const [k, [before, after]] of draftFields(d)) {
+    if (fieldOf(cur, k) !== before || before === after) continue;
+    if (k === 'tag') tag = after;
+    else notes[k as keyof JournalNotes] = after;
     changed = true;
   }
   if (!changed) return undefined;
@@ -82,36 +85,79 @@ function applyDraft(cur: JournalEntry, d: Draft, today: string): JournalEntry | 
 }
 
 /**
+ * Bring an entry's draft up to date with what the store now holds (`stored`, undefined when the
+ * entry is gone): fields holding their edit's value are done; fields this tab has just written
+ * (`wrote`) now start from the stored value; with `dropStale`, fields another value has overtaken
+ * are given up.
+ */
+function settleDraft(id: string, stored: JournalEntry | undefined, wrote: string[], dropStale: boolean): void {
+  const drafts = readDrafts();
+  const d = drafts[id];
+  if (!d) return;
+  if (stored) {
+    for (const [k, c] of draftFields(d)) {
+      const now = fieldOf(stored, k);
+      if (now === c[1] || (dropStale && now !== c[0])) {
+        if (k === 'tag') delete d.tag;
+        else delete d.notes[k as keyof JournalNotes];
+      } else if (wrote.includes(k)) c[0] = now;
+    }
+  }
+  if (!stored || (!Object.keys(d.notes ?? {}).length && !d.tag)) delete drafts[id];
+  writeDrafts(drafts);
+}
+
+/**
+ * Finish the drafts other tabs left behind (a tab that closed mid-write), for entries this tab
+ * has no write in flight for. On load, fields another value has overtaken are given up too.
+ */
+async function finishDrafts(onLoad: boolean): Promise<JournalEntry[]> {
+  const today = dayKey(new Date());
+  const finished: JournalEntry[] = [];
+  for (const [id, d] of Object.entries(readDrafts())) {
+    if (inflight.has(id)) continue;
+    let cur: JournalEntry | undefined;
+    const done = await idb.modify<JournalEntry>('journal', id, (c) => {
+      cur = c;
+      return c ? applyDraft(c, d, today) : undefined;
+    });
+    settleDraft(id, done ?? cur, [], onLoad);
+    if (!done) continue;
+    finished.push(done);
+    announce(id);
+    // The first note on a trade counts as its review, as when it is typed.
+    if (done.reviewedOn === today && cur?.reviewedOn !== today) recordReview();
+  }
+  return finished;
+}
+
+/**
  * Show `optimistic` at once, then apply `change` to the stored copy in one transaction, so fields
  * another tab saved meanwhile are kept. Writes to one entry land in the order they were made, and
  * the list takes the stored result only after the last of them, so an older write never puts back
  * text the user has typed since. If storage fails the change applies to this tab's copy only.
+ * Resolves with the stored result, or null when the write failed.
  */
-async function write(id: string, before: JournalEntry, optimistic: JournalEntry, change: (cur: JournalEntry) => JournalEntry): Promise<JournalEntry> {
+async function write(id: string, before: JournalEntry, optimistic: JournalEntry, change: (cur: JournalEntry) => JournalEntry): Promise<JournalEntry | null> {
   replace(id, optimistic);
   inflight.set(id, (inflight.get(id) ?? 0) + 1);
   let next: JournalEntry;
+  let saved: JournalEntry | null = null;
   try {
-    next = (await idb.modify<JournalEntry>('journal', id, (cur) => change(cur ?? before))) ?? optimistic;
+    next = saved = (await idb.modify<JournalEntry>('journal', id, (cur) => change(cur ?? before))) ?? optimistic;
     announce(id);
   } catch (err) {
     useJournal.setState({ error: (err as Error).message });
-    unsaved.add(id);
     next = change(before);
   }
   const left = (inflight.get(id) ?? 1) - 1;
   if (left > 0) inflight.set(id, left);
   else {
     inflight.delete(id);
-    if (!unsaved.has(id)) {
-      const drafts = readDrafts();
-      delete drafts[id];
-      writeDrafts(drafts);
-    }
     // Not when the entry was deleted here meanwhile (its delete lands after this write).
     if (useJournal.getState().entries.some((e) => e.id === id)) replace(id, next);
   }
-  return next;
+  return saved;
 }
 
 interface JournalStore {
@@ -132,28 +178,11 @@ export const useJournal = create<JournalStore>()((set, get) => ({
   error: null,
   load: async () => {
     try {
-      const entries = await idb.all<JournalEntry>('journal');
       // Finish edits whose write was cut off when a tab closed.
-      const drafts = readDrafts();
-      const today = dayKey(new Date());
-      let reviewed = false;
-      for (const [id, d] of Object.entries(drafts)) {
-        if (!entries.some((e) => e.id === id)) continue;
-        const done = await idb.modify<JournalEntry>('journal', id, (cur) => (cur ? applyDraft(cur, d, today) : undefined));
-        if (!done) continue;
-        reviewed ||= done.reviewedOn === today && entries.find((e) => e.id === id)?.reviewedOn !== today;
-        entries.splice(entries.findIndex((e) => e.id === id), 1, done);
-        announce(id);
-      }
-      // Read again: an edit made meanwhile may have added to the drafts. Those of this tab's own
-      // writes still in flight stay until the writes land.
-      const left = readDrafts();
-      for (const id of Object.keys(drafts)) if (!inflight.has(id)) delete left[id];
-      writeDrafts(left);
-      unsaved.clear();
+      await finishDrafts(true);
+      const entries = await idb.all<JournalEntry>('journal');
       entries.sort(byExit);
       set({ entries, loaded: true, error: null });
-      if (reviewed) recordReview();
     } catch (e) {
       set({ loaded: true, error: (e as Error).message });
     }
@@ -184,18 +213,22 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     writeDrafts(drafts);
     const today = dayKey(new Date());
     let reviewed = false;
-    await write(id, entry, { ...entry, ...retag, notes: { ...entry.notes, ...edits } }, (cur) => {
+    const saved = await write(id, entry, { ...entry, ...retag, notes: { ...entry.notes, ...edits } }, (stored) => {
+      // Another tab's edits cut off by its closing travel with this write.
+      const cur = applyDraft(stored, readDrafts()[id], today) ?? stored;
       const merged = { ...cur.notes, ...edits };
       // The first note written on a trade counts as a review for the daily practice summary, once
       // a day: clearing the notes and writing them again is still the same review.
-      reviewed = !hasNotes(cur.notes) && hasNotes(merged) && cur.reviewedOn !== today;
+      reviewed = !hasNotes(stored.notes) && hasNotes(merged) && stored.reviewedOn !== today;
       return { ...cur, ...retag, notes: merged, ...(reviewed ? { reviewedOn: today } : {}) };
     });
+    if (saved) settleDraft(id, saved, [...keys, ...('tag' in retag ? ['tag'] : [])], false);
     if (reviewed) recordReview();
   },
   remove: async (id) => {
     const entry = get().entries.find((e) => e.id === id);
     set({ entries: get().entries.filter((e) => e.id !== id) });
+    settleDraft(id, undefined, [], true);
     await idb.delete('journal', id).catch(() => undefined);
     if (entry?.snapshotKey) await idb.delete('snapshots', entry.snapshotKey).catch(() => undefined);
     announce(id);
@@ -214,6 +247,23 @@ export async function saveSnapshot(key: string, dataUrl: string): Promise<void> 
 export async function loadSnapshot(key: string): Promise<string | undefined> {
   return idb.get<string>('snapshots', key);
 }
+
+// A tab that closed mid-write leaves a draft: an open tab finishes it shortly after (its own write,
+// if the tab is still alive, normally lands first and clears it), so it shows the edit and never
+// saves over it.
+let finishing: ReturnType<typeof setTimeout> | undefined;
+if (typeof window !== 'undefined')
+  window.addEventListener('storage', (e) => {
+    if (e.key !== DRAFTS_KEY || !e.newValue || !useJournal.getState().loaded) return;
+    clearTimeout(finishing);
+    finishing = setTimeout(async () => {
+      try {
+        for (const e of await finishDrafts(false)) if (useJournal.getState().entries.some((x) => x.id === e.id)) replace(e.id, e);
+      } catch {
+        /* the next load tries again */
+      }
+    }, 1500);
+  });
 
 channel?.addEventListener('message', (e: MessageEvent) => {
   if (typeof e.data !== 'string' || !useJournal.getState().loaded) return;

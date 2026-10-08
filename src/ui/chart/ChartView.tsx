@@ -133,8 +133,6 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const positions = useTrading((s) => s.positions);
   const simEventCount = useTrading((s) => s.simEvents.length);
   const pickTarget = useTrading((s) => s.pickTarget);
-  const selectedDrawing = useDrawings((s) => s.selectedId);
-  const removeDrawing = useDrawings((s) => s.remove);
   const blind = session?.blind ?? false;
   const tfSeconds = TIMEFRAME_MINUTES[timeframe] * 60;
 
@@ -177,6 +175,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (p !== null) pickPrice(Math.round(p * 100) / 100);
     });
     const bump = () => setGeometryVersion((v) => v + 1);
+    // Dragging or double-clicking the price axis rescales prices without any chart event: follow
+    // pointer drags on the chart (once per frame), and wheel and double-click, so drawings keep up.
+    let frame = 0;
+    const bumpSoon = () => {
+      if (!frame) frame = requestAnimationFrame(() => ((frame = 0), bump()));
+    };
+    const onMove = (e: PointerEvent) => e.buttons !== 0 && bumpSoon();
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', bumpSoon);
+    el.addEventListener('dblclick', bumpSoon);
+    el.addEventListener('wheel', bumpSoon, { passive: true });
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       bump();
       syncPercentBase();
@@ -199,6 +208,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     registerSnapshotProvider(async () => snapshot(chart, el));
     return () => {
       registerSnapshotProvider(null);
+      cancelAnimationFrame(frame);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', bumpSoon);
+      el.removeEventListener('dblclick', bumpSoon);
+      el.removeEventListener('wheel', bumpSoon);
       stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
       chart.remove();
@@ -655,13 +669,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     <div className={`chart-wrap${pickTarget ? ' picking' : ''}`}>
       <div ref={containerRef} className="chart-canvas" />
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
-      {/* In the price pane's bottom corner (clear of the legend) rather than in the toolbar, where it
-          would re-wrap the toolbar and move the chart under the pointer on every select. */}
-      {geometry && selectedDrawing && (
-        <button className="btn sm danger drawing-delete" style={{ left: geometry.paneWidth() - 8, top: geometry.paneHeight() - 8 }} onClick={() => removeDrawing(selectedDrawing)} title="Delete selected drawing (Del)">
-          Delete
-        </button>
-      )}
+      {geometry && <DeleteDrawingButton left={geometry.paneWidth() - 8} top={geometry.paneHeight() - 8} />}
       {lb && (
         <div className="chart-legend">
           <span className="legend-sym">{symbol}</span>
@@ -687,6 +695,39 @@ function axisLabel(color: string): { axisLabelColor: string; axisLabelTextColor:
 }
 
 /** Chart + drawings as a JPEG data URL (for journal entries). */
+/**
+ * Deletes the selected drawing. It sits in the price pane's bottom corner (clear of the legend)
+ * rather than in the toolbar, where it would re-wrap the toolbar and move the chart under the
+ * pointer on every select. It appears the moment a drawing is finished or picked, so the click that
+ * ends that same tap can land on it: only a press that starts on it, or the keyboard, deletes.
+ */
+function DeleteDrawingButton({ left, top }: { left: number; top: number }) {
+  const selectedId = useDrawings((s) => s.selectedId);
+  const remove = useDrawings((s) => s.remove);
+  const pressed = useRef(false);
+  useEffect(() => {
+    pressed.current = false;
+  }, [selectedId]);
+  if (!selectedId) return null;
+  const release = () => (pressed.current = false);
+  return (
+    <button
+      className="btn sm danger drawing-delete"
+      style={{ left, top }}
+      onPointerDown={() => (pressed.current = true)}
+      onPointerCancel={release}
+      onClick={(e) => {
+        const intended = pressed.current || e.detail === 0;
+        release();
+        if (intended) remove(selectedId);
+      }}
+      title="Delete selected drawing (Del)"
+    >
+      Delete
+    </button>
+  );
+}
+
 async function snapshot(chart: IChartApi, container: HTMLElement): Promise<string | null> {
   const canvas = chart.takeScreenshot(true, false);
   const svg = container.parentElement?.querySelector('svg.drawing-layer') as SVGSVGElement | null;
@@ -694,6 +735,11 @@ async function snapshot(chart: IChartApi, container: HTMLElement): Promise<strin
     const ctx = canvas.getContext('2d');
     const clone = svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    // The image gets none of the page's CSS: leave out the selection handles and the invisible
+    // grab targets (they would paint black), and carry the label font over.
+    clone.querySelectorAll('.hit, .handle, .handle-hit').forEach((n) => n.remove());
+    const font = svg.querySelector('text') ? getComputedStyle(svg.querySelector('text')!).fontFamily : '';
+    if (font) clone.querySelectorAll('text').forEach((t) => t.setAttribute('font-family', font));
     const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' }));
     try {
       const img = new Image();

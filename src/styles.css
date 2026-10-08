@@ -292,6 +292,10 @@ table.grid tr.clickable:focus-visible { outline: 2px solid var(--accent); outlin
 .stat .v { font-family: var(--mono); font-size: 17px; margin-top: 2px; }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .journal-cols { grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); align-items: start; }
+/* The journal list wraps its cells (the long data-source badge and tags too) so P/L, which never
+   wraps, always fits in the list. */
+.journal-cols table.grid td, .journal-cols table.grid .badge { white-space: normal; }
+.journal-cols table.grid td.num { white-space: nowrap; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
 .mini-chart { height: 260px; position: relative; }
 .section-title { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -447,8 +451,6 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 }
 @media (max-width: 820px) {
   .two-col { grid-template-columns: minmax(0, 1fr); }
-  /* The journal list wraps its cells (the long data-source badge too) so P/L stays on screen. */
-  .journal-cols table.grid td, .journal-cols table.grid .badge { white-space: normal; }
   .appearance-grid { grid-template-columns: 1fr; }
   .metrics { gap: 10px; }
   /* Phones: the page tabs get a row of their own and every group wraps, so nothing runs off screen. */

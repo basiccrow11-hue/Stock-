@@ -92,6 +92,11 @@ export function OrderTicket() {
     setSl('');
     setTp('');
   }, [symbol, direction, sessionId]);
+  // So do limit and stop prices, for one symbol and one session (not the side: a level can be bought or sold).
+  useEffect(() => {
+    setLimit('');
+    setStop('');
+  }, [symbol, sessionId]);
 
   // Estimated fill price used for risk math.
   const entry = useMemo(() => {

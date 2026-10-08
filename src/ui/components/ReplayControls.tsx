@@ -166,8 +166,8 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
             <div style={{ width: `${progress * 100}%` }} />
           </div>
           <span className="row" style={{ gap: 4 }}>
-            {!session.blind && <input type="date" value={jumpDate} onChange={(e) => setJumpDate(e.target.value)} style={{ width: 130 }} />}
-            <input type="time" value={jumpTime} onChange={(e) => setJumpTime(e.target.value)} style={{ width: 96 }} />
+            {!session.blind && <input type="date" value={jumpDate} onChange={(e) => setJumpDate(e.target.value)} aria-label="Jump to date" title="Jump to date" style={{ width: 130 }} />}
+            <input type="time" value={jumpTime} onChange={(e) => setJumpTime(e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 96 }} />
             <button className="btn sm" onClick={doJump} title="Jump to time. Forward jumps process every skipped bar, so your orders still fill.">
               Jump
             </button>

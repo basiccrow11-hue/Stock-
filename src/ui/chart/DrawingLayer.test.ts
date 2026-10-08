@@ -65,6 +65,16 @@ describe('drawing hit test', () => {
     expect(hitTest(all, proj, 800, 400, 130, 225, 6)).toBeNull();
   });
 
+  it('never picks the part of a line outside the price pane', () => {
+    // Price 95 sits at y 405, below the 400px pane: clipped away, so a tap just inside misses it.
+    const low: Drawing = { id: 'low', type: 'hline', points: [{ time: T0, price: 95 }], color: '#fff' };
+    expect(hitTest([low], proj, 800, 400, 300, 398, 16)).toBeNull();
+    expect(hitTest([low], proj, 800, 400, 300, 410, 16)).toBeNull();
+    // A trend line leaving the pane is still picked by its visible part.
+    const steep: Drawing = { id: 's', type: 'trend', points: [{ time: T0, price: 150 }, { time: T0 + 300, price: 50 }], color: '#fff' };
+    expect(hitTest([steep], proj, 800, 400, 104, 390, 6)).toBe('s');
+  });
+
   it('prefers the drawing painted on top when two are equally close', () => {
     const again: Drawing = { ...hline, id: 'h2' };
     expect(hitTest([hline, again], proj, 800, 400, 300, 400, 6)).toBe('h2');
