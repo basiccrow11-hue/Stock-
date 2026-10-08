@@ -81,6 +81,8 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
     const onKey = (e: KeyboardEvent) => {
       // Never delete a drawing hidden behind a dialog, or reset the tool with the Escape that closed one.
       if (keyBelongsElsewhere(e)) return;
+      // The terminal stays mounted on other pages; a drawing that is not on screen is never deleted.
+      if (!svgRef.current?.getClientRects().length) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         remove(selectedId);
         e.preventDefault();
@@ -201,6 +203,9 @@ function Shape({
   }
   const sw = selected ? 2 : 1.25;
   const common = { stroke: d.color, strokeWidth: sw, fill: 'none', className: 'shape', onPointerDown: (e: React.PointerEvent) => onDragStart(e, d, 'all') };
+  // Filled shapes are grabbed by their outline only: the inside lets hover, wheel zoom and panning
+  // reach the chart, so the crosshair and legend keep working over a box or zone.
+  const fill = { stroke: d.color, strokeWidth: sw, className: 'shape-fill' };
   const handles = selected
     ? xy.map((p, i) =>
         p.x !== null && p.y !== null ? <circle key={`h${i}`} className="handle" cx={p.x} cy={p.y} r={5} fill={background} stroke={d.color} strokeWidth={2} onPointerDown={(e) => onDragStart(e, d, i)} /> : null,
@@ -246,9 +251,11 @@ function Shape({
     }
     case 'rect': {
       const [a, b] = xy as { x: number; y: number }[];
+      const box = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(b.x - a.x), height: Math.abs(b.y - a.y) };
       return (
         <g>
-          <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} {...common} fill={`${d.color}22`} />
+          <rect {...box} {...fill} fill={`${d.color}22`} />
+          <rect {...box} className="hit" fill="none" onPointerDown={(e) => onDragStart(e, d, 'all')} />
           {handles}
         </g>
       );
@@ -257,9 +264,11 @@ function Shape({
       const y1 = xy[0].y!;
       const y2 = xy[1].y!;
       const [lo, hi] = [Math.min(d.points[0].price, d.points[1].price), Math.max(d.points[0].price, d.points[1].price)];
+      const band = { x: 0, y: Math.min(y1, y2), width, height: Math.max(2, Math.abs(y2 - y1)) };
       return (
         <g>
-          <rect x={0} y={Math.min(y1, y2)} width={width} height={Math.max(2, Math.abs(y2 - y1))} {...common} fill={`${d.color}26`} strokeDasharray="4 3" />
+          <rect {...band} {...fill} fill={`${d.color}26`} strokeDasharray="4 3" />
+          <rect {...band} className="hit" fill="none" onPointerDown={(e) => onDragStart(e, d, 'all')} />
           {label(4, Math.min(y1, y2) - 4, `S/R zone ${fmtPrice(lo)} – ${fmtPrice(hi)}`)}
         </g>
       );

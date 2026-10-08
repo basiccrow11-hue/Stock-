@@ -1,5 +1,5 @@
 /** Bottom dock: positions, working orders, fills, closed trades, simulated news and the broker log. */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { blindDayLabel, cancelAllOrders, cancelOrder, closePosition, modifyOrder, setActiveSymbol, useTrading } from '../state/tradingStore';
 import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
@@ -147,20 +147,32 @@ function OrderPriceEditor({ order }: { order: Order }) {
   const current = field ? order[field] : undefined;
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState<string>('');
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  // Enter and Escape hand focus back to the price; leaving the box by clicking elsewhere does not.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!editing && refocus.current) {
+      refocus.current = false;
+      buttonRef.current?.focus();
+    }
+  }, [editing]);
   if (!field || current === undefined) return <>{order.type === 'market' ? 'MKT' : '—'}</>;
+  const what = `${order.symbol} ${order.action} ${field === 'limitPrice' ? 'limit' : 'stop'} price`;
   if (!editing)
     return (
-      <span
-        className="mono"
-        title="Click to modify"
-        style={{ cursor: 'pointer', borderBottom: '1px dashed var(--muted)' }}
+      <button
+        ref={buttonRef}
+        type="button"
+        className="price-edit mono"
+        title="Change price"
+        aria-label={`Change ${what}, now ${price(current)}`}
         onClick={() => {
           setVal(String(current));
           setEditing(true);
         }}
       >
         {price(current)}
-      </span>
+      </button>
     );
   const commit = () => {
     const n = Number(val);
@@ -175,12 +187,21 @@ function OrderPriceEditor({ order }: { order: Order }) {
       type="number"
       step="0.01"
       value={val}
+      aria-label={`New ${what}`}
       style={{ width: 90 }}
       onChange={(e) => setVal(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') commit();
-        if (e.key === 'Escape') setEditing(false);
+        if (e.key === 'Enter') {
+          // Without this the same Enter would also press the price button that takes focus back.
+          e.preventDefault();
+          refocus.current = true;
+          commit();
+        }
+        if (e.key === 'Escape') {
+          refocus.current = true;
+          setEditing(false);
+        }
       }}
     />
   );

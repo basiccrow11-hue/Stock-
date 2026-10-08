@@ -37,7 +37,7 @@ const DEFAULTS: Record<IndicatorType, Partial<IndicatorConfig>> = {
  * into the minimum at once, so the value is applied only while what is typed is valid, and tidied
  * up (clamped, or restored if empty) when the box loses focus or on Enter.
  */
-function DraftNumber({ value, min, step = 1, integer = true, label, width, onCommit }: { value: number; min: number; step?: number; integer?: boolean; label: string; width: number; onCommit: (v: number) => void }) {
+function DraftNumber({ value, min, step = 1, integer = true, label, onCommit }: { value: number; min: number; step?: number; integer?: boolean; label: string; onCommit: (v: number) => void }) {
   const [draft, setDraft] = useState<string | null>(null);
   const parse = (text: string) => {
     const n = Number(text);
@@ -49,6 +49,7 @@ function DraftNumber({ value, min, step = 1, integer = true, label, width, onCom
     if (n !== null && Math.max(min, n) !== value) onCommit(Math.max(min, n));
     setDraft(null);
   };
+  const text = draft ?? String(value);
   return (
     <input
       type="number"
@@ -56,8 +57,11 @@ function DraftNumber({ value, min, step = 1, integer = true, label, width, onCom
       title={label}
       min={min}
       step={step}
-      style={{ width }}
-      value={draft ?? String(value)}
+      // As wide as what it holds (at least two characters) plus padding and the spin buttons, so a
+      // value is never clipped and short ones leave room for the indicator's name.
+      className="draft-number"
+      style={{ width: `calc(${Math.max(2, text.length)}ch + 36px)` }}
+      value={text}
       onChange={(e) => {
         setDraft(e.target.value);
         const n = parse(e.target.value);
@@ -89,16 +93,16 @@ export function IndicatorMenu() {
                   {indicatorName(i)}
                 </label>
                 {(i.type === 'sma' || i.type === 'ema' || i.type === 'rsi' || i.type === 'atr' || i.type === 'bb') && (
-                  <DraftNumber label={`${indicatorName(i)} period`} width={54} min={2} value={i.period ?? 2} onCommit={(period) => updateIndicator(i.id, { period })} />
+                  <DraftNumber label={`${indicatorName(i)} period`} min={2} value={i.period ?? 2} onCommit={(period) => updateIndicator(i.id, { period })} />
                 )}
                 {i.type === 'bb' && (
-                  <DraftNumber label={`${indicatorName(i)} standard deviation multiplier`} width={48} min={0.5} step={0.5} integer={false} value={i.mult ?? 2} onCommit={(mult) => updateIndicator(i.id, { mult })} />
+                  <DraftNumber label={`${indicatorName(i)} standard deviation multiplier`} min={0.5} step={0.5} integer={false} value={i.mult ?? 2} onCommit={(mult) => updateIndicator(i.id, { mult })} />
                 )}
                 {i.type === 'macd' && (
                   <>
-                    <DraftNumber label={`${indicatorName(i)} fast period`} width={42} min={2} value={i.fast ?? 12} onCommit={(fast) => updateIndicator(i.id, { fast })} />
-                    <DraftNumber label={`${indicatorName(i)} slow period`} width={42} min={3} value={i.slow ?? 26} onCommit={(slow) => updateIndicator(i.id, { slow })} />
-                    <DraftNumber label={`${indicatorName(i)} signal period`} width={42} min={2} value={i.signal ?? 9} onCommit={(signal) => updateIndicator(i.id, { signal })} />
+                    <DraftNumber label={`${indicatorName(i)} fast period`} min={2} value={i.fast ?? 12} onCommit={(fast) => updateIndicator(i.id, { fast })} />
+                    <DraftNumber label={`${indicatorName(i)} slow period`} min={3} value={i.slow ?? 26} onCommit={(slow) => updateIndicator(i.id, { slow })} />
+                    <DraftNumber label={`${indicatorName(i)} signal period`} min={2} value={i.signal ?? 9} onCommit={(signal) => updateIndicator(i.id, { signal })} />
                   </>
                 )}
                 {i.type !== 'volume' && i.type !== 'macd' && (

@@ -6,6 +6,7 @@ import {
   ColorType,
   CrosshairMode,
   LineSeries,
+  PriceLineSource,
   PriceScaleMode,
   type ChartOptions,
   type DeepPartial,
@@ -159,9 +160,18 @@ export function lastVisibleIndex(range: LogicalRange | null, count: number): num
   return range ? Math.max(0, Math.min(count - 1, Math.ceil(range.to))) : count - 1;
 }
 
-/** Style-specific options for the main price series; safe to apply to a series of that style. */
+/**
+ * Style-specific options for the main price series; safe to apply to a series of that style. The
+ * last-price line marks the same bar as the axis label (the last one on screen), so line and label
+ * always share a price and a colour.
+ */
 export function mainSeriesOptions(p: ChartPalette, lastUp = true): Record<string, unknown> {
-  const common = { priceLineVisible: p.lastPriceLine, lastValueVisible: true, priceLineColor: lastPriceColor(p, lastUp) };
+  const common = {
+    priceLineVisible: p.lastPriceLine,
+    priceLineSource: PriceLineSource.LastVisible,
+    lastValueVisible: true,
+    priceLineColor: lastPriceColor(p, lastUp),
+  };
   switch (p.style) {
     case 'candles':
       return { ...common, ...candleOptions(p) };

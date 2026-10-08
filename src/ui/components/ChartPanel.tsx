@@ -57,7 +57,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
           Sim market
         </button>
       </div>
-      <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+      <div className="chart-host">
         <ChartView symbol={symbol} timeframe={timeframe} />
         {!session && (
           <div className="chart-empty">

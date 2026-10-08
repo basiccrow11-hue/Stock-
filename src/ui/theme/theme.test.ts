@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chartLabelFill, chartLabelText, chroma, contrast, deltaE, distance, fillFor, isHex, mix, normHex, parseHex, readable, toHex, withAlpha } from './color';
-import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
+import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, NEUTRAL_GAP, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
 import { lastPriceColor } from '../chart/chartTheme';
 
 describe('colour helpers', () => {
@@ -180,9 +180,35 @@ describe('appearance', () => {
 
   it('keeps deep, clearly coloured candles as P/L colours on every theme', () => {
     // Lightened for a dark panel, these lose HSL saturation but still read as plainly green and red.
-    for (const up of ['#1b5e20', '#004d40', '#33691e', '#2e7d32'])
+    // (Teal #004d40 is not here: lightened for a dark panel it is a grey-teal, #6e9a92, too close to
+    // the muted labels.)
+    for (const up of ['#1b5e20', '#33691e', '#2e7d32'])
       for (const down of ['#b71c1c', '#c62828', '#d32f2f', '#880e4f', '#e65100'])
         for (const theme of THEME_IDS) expect(resolveTheme(sanitizeAppearance({ theme, colors: { up, down } })).pnlUsesCandles, `${theme} ${up}/${down}`).toBe(true);
+  });
+
+  it('falls back when P/L text would look like the grey labels next to it', () => {
+    // Greyish blues are colourful enough on their own but read as one more muted label.
+    for (const [theme, up] of [
+      ['light', '#8899bb'],
+      ['light', '#bbccff'],
+      ['light', '#446688'],
+      ['midnight', '#002255'],
+      ['midnight', '#446688'],
+      ['midnight', '#8899bb'],
+      ['graphite', '#002255'],
+    ] as const) {
+      const r = resolveTheme(sanitizeAppearance({ theme, colors: { up, down: '#ef5350' } }));
+      expect(r.pnlUsesCandles, `${theme} ${up}`).toBe(false);
+    }
+    // Whenever candle colours are used, P/L text stays clearly apart from every neutral text colour.
+    for (const theme of THEME_IDS)
+      for (let i = 0; i < 300; i++) {
+        const up = toHex([(i * 97) % 256, (i * 57 + 31) % 256, (i * 151 + 7) % 256]);
+        const r = resolveTheme(sanitizeAppearance({ theme, colors: { up, down: '#ef5350' } }));
+        if (!r.pnlUsesCandles) continue;
+        for (const n of ['--text', '--text-2', '--muted']) expect(deltaE(r.vars['--pos'], r.vars[n]), `${theme} ${up} vs ${n}`).toBeGreaterThanOrEqual(NEUTRAL_GAP);
+      }
   });
 
   it('adjusts axis label boxes as little as possible', () => {

@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
 import { recordReview } from './streakStore';
+import { dayKey } from '../../core/streak/streak';
 
 const hasNotes = (n: JournalNotes) => Object.values(n).some((v) => typeof v === 'string' && v.trim() !== '');
 
@@ -50,9 +51,12 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     const entry = get().entries.find((e) => e.id === id);
     if (!entry) return;
     const next = { ...entry.notes, ...notes };
-    // The first note written on a trade counts as a review for the daily practice summary.
-    if (!hasNotes(entry.notes) && hasNotes(next)) recordReview();
-    await get().update(id, { notes: next });
+    // The first note written on a trade counts as a review for the daily practice summary, once a
+    // day: clearing the notes and writing them again is still the same review.
+    const today = dayKey(new Date());
+    const reviewed = !hasNotes(entry.notes) && hasNotes(next) && entry.reviewedOn !== today;
+    if (reviewed) recordReview();
+    await get().update(id, reviewed ? { notes: next, reviewedOn: today } : { notes: next });
   },
   remove: async (id) => {
     const entry = get().entries.find((e) => e.id === id);

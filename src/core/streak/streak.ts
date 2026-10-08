@@ -225,7 +225,9 @@ export function streakStatus(data: StreakData, today: DayKey): StreakStatus {
 /**
  * The milestone still worth celebrating, or null. A celebration belongs to the streak that reached
  * it: once that streak has ended (a missed day with no freeze), congratulating the user on it would
- * contradict the "Fresh start" shown everywhere else.
+ * contradict the "Fresh start" shown everywhere else. Only this check hides a stale one; the stored
+ * record is left as it is, so a clock or time zone that moves back and forth never loses a
+ * celebration. The next milestone or a dismissal replaces it.
  */
 export function pendingCelebration(data: StreakData, today: DayKey): Celebration | null {
   const c = data.celebrate;
@@ -249,13 +251,6 @@ export interface SettleResult {
  * enough. Idempotent: calling it again the same day changes nothing.
  */
 export function settle(data: StreakData, today: DayKey): SettleResult {
-  const { data: covered, usedFreezes } = coverGap(data, today);
-  // A celebration whose streak ended is dropped for good. Returns the same object when nothing changed.
-  const stale = covered.celebrate && !pendingCelebration(covered, today);
-  return { data: stale ? { ...covered, celebrate: null } : covered, usedFreezes };
-}
-
-function coverGap(data: StreakData, today: DayKey): SettleResult {
   const last = lastCoveredBefore(data, today);
   if (!last) return { data, usedFreezes: [] };
   const gap = dayNumber(today) - dayNumber(last) - 1;

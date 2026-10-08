@@ -44,6 +44,8 @@ export interface JournalEntry {
   /** Full round trip, kept for analytics. */
   trip: RoundTrip;
   createdAt: number;
+  /** Local day (YYYY-MM-DD) this trade last counted as reviewed for the practice streak. */
+  reviewedOn?: string;
 }
 
 export function journalEntryFromTrip(trip: RoundTrip, ctx: { sessionId: string; mode: 'replay' | 'sim'; rewound: boolean; blind?: boolean }): JournalEntry {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addDays, emptyStreak, recordActivity, type StreakData } from '../../core/streak/streak';
+import { addDays, emptyStreak, pendingCelebration, recordActivity, type StreakData } from '../../core/streak/streak';
 
 type Store = typeof import('./streakStore');
 
@@ -147,7 +147,7 @@ describe('practice tracker', () => {
     stop();
   });
 
-  it('drops a held milestone when the user comes back after the streak has ended', async () => {
+  it('does not celebrate a held milestone when the user comes back after the streak has ended', async () => {
     seed(['2026-10-01', '2026-10-02']);
     vi.setSystemTime(new Date(2026, 9, 3, 12, 0, 0));
     let m = await freshStore();
@@ -159,8 +159,50 @@ describe('practice tracker', () => {
     vi.setSystemTime(new Date(2026, 9, 6, 9, 0, 0));
     m = await freshStore();
     stop = m.startPracticeTracker(() => true, () => false);
-    expect(m.useStreak.getState().data.celebrate).toBeNull();
-    expect(JSON.parse(localStorage.getItem('stock-replay-streak')!).celebrate).toBeNull();
+    const s = m.useStreak.getState();
+    expect(pendingCelebration(s.data, s.today)).toBeNull();
+    stop();
+  });
+
+  it('keeps a held milestone through a clock that goes back past midnight and forward again', async () => {
+    seed(['2026-10-06', '2026-10-07', '2026-10-08']);
+    vi.setSystemTime(new Date(2026, 9, 8, 0, 20, 0));
+    const m = await freshStore();
+    const stop = m.startPracticeTracker(() => true, () => false);
+    const held = () => {
+      const s = m.useStreak.getState();
+      return pendingCelebration(s.data, s.today);
+    };
+    expect(held()).toEqual({ milestone: 3, streak: 3, day: '2026-10-08' });
+    vi.setSystemTime(new Date(2026, 9, 7, 22, 20, 0));
+    practise(1);
+    expect(held()).toBeNull();
+    vi.setSystemTime(new Date(2026, 9, 8, 0, 25, 0));
+    practise(1);
+    expect(held()).toEqual({ milestone: 3, streak: 3, day: '2026-10-08' });
+    stop();
+  });
+
+  it('credits the seconds in front when the tab is hidden between ticks', async () => {
+    vi.setSystemTime(new Date(2026, 9, 8, 12, 0, 0));
+    const m = await freshStore();
+    const stop = m.startPracticeTracker(() => true, () => false);
+    const setVisibility = (v: 'visible' | 'hidden') => {
+      Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    // 60 rounds of 9 s in front then 1 s hidden: 540 s in front.
+    for (let i = 0; i < 60; i++) {
+      for (let k = 0; k < 9; k++) {
+        window.dispatchEvent(new Event('keydown'));
+        vi.advanceTimersByTime(1_000);
+      }
+      setVisibility('hidden');
+      vi.advanceTimersByTime(1_000);
+      setVisibility('visible');
+    }
+    expect(today(m)?.activeSeconds).toBeGreaterThanOrEqual(539);
+    expect(today(m)?.activeSeconds).toBeLessThanOrEqual(541);
     stop();
   });
 

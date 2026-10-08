@@ -199,24 +199,25 @@ describe('milestones and bests across freezes', () => {
     expect(sanitizeStreak({ ...d, celebrate: { milestone: 3, streak: 3, day: 'yesterday' } }).celebrate).toBeNull();
   });
 
-  it('keeps a milestone while its streak runs and drops it once the streak has ended', () => {
+  it('keeps a milestone while its streak runs and hides it once the streak has ended', () => {
     const d = practise(emptyStreak(), run('2026-01-01', 3));
     // Same day, the next day (not practised yet) and after practising that day: still running.
     expect(pendingCelebration(d, '2026-01-03')).toEqual(d.celebrate);
     expect(pendingCelebration(d, '2026-01-04')).toEqual(d.celebrate);
     expect(pendingCelebration(practise(d, ['2026-01-04']), '2026-01-04')).toEqual(d.celebrate);
-    // A missed day with no freeze ends the streak: nothing to celebrate, and settle clears it.
+    // A missed day with no freeze ends the streak: nothing to celebrate.
     expect(pendingCelebration(d, '2026-01-05')).toBeNull();
-    expect(settle(d, '2026-01-05').data.celebrate).toBeNull();
+    expect(pendingCelebration(settle(d, '2026-01-05').data, '2026-01-05')).toBeNull();
     // A new streak practised afterwards does not revive the old celebration.
     expect(pendingCelebration(practise(d, ['2026-01-06']), '2026-01-06')).toBeNull();
     // A freeze that covers the gap keeps the streak, and the celebration, alive.
     const banked = { ...d, freezes: 1 };
     expect(settle(banked, '2026-01-05').data.celebrate).toEqual(d.celebrate);
     expect(pendingCelebration(settle(banked, '2026-01-05').data, '2026-01-05')).toEqual(d.celebrate);
-    // A clock set back before the milestone day shows nothing.
+    // A clock set back before the milestone day shows nothing, and loses nothing once it is right again.
     expect(pendingCelebration(d, '2026-01-02')).toBeNull();
-    // Nothing to drop: settle returns the same data, so nothing is saved.
+    expect(pendingCelebration(settle(d, '2026-01-02').data, '2026-01-03')).toEqual(d.celebrate);
+    // No missed days to cover: settle returns the same data, so nothing is saved.
     expect(settle(d, '2026-01-04').data).toBe(d);
   });
 

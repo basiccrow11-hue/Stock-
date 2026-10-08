@@ -7,7 +7,7 @@ import { closePosition, setPickTarget, submitOrder, useTrading } from '../state/
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
-import { keyBelongsElsewhere } from './common';
+import { modalOpen } from './common';
 
 const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
   { a: 'buy', label: 'Buy', cls: 'buy' },
@@ -69,7 +69,8 @@ export function OrderTicket() {
   }, [picked]);
 
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && !keyBelongsElsewhere(e) && setPickTarget(null);
+    // Works from the ticket's own fields too; only an Escape that closed a dialog or menu is left alone.
+    const k = (e: KeyboardEvent) => e.key === 'Escape' && !modalOpen() && !e.defaultPrevented && setPickTarget(null);
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
   }, []);

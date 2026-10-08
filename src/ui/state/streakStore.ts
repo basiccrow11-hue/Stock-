@@ -185,18 +185,22 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
       lastTick = performance.now();
       lastWall = Date.now();
       settleNow();
-    }
+    } else tick(true);
   };
+  // Closing or leaving the page: credit the seconds since the last tick, which were spent in front.
+  const onPageHide = () => tick(true);
   const onStorage = (e: StorageEvent) => {
     if (e.key === KEY) useStreak.setState({ data: load() });
   };
   const events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'] as const;
   for (const ev of events) window.addEventListener(ev, onInput, { passive: true });
   document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', onPageHide);
   window.addEventListener('storage', onStorage);
 
   settleNow();
-  const tick = () => {
+  /** `leaving`: the page is being hidden right now, so the time since the last tick was in front. */
+  function tick(leaving = false) {
     const now = performance.now();
     const wall = Date.now();
     // Cap a tick's credit so a sleeping laptop or a throttled timer cannot add a burst of time.
@@ -205,7 +209,7 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
     lastTick = now;
     lastWall = wall;
     const active =
-      document.visibilityState === 'visible' && counting() && (now - lastInput < IDLE_SECONDS * 1000 || (playing() && now - lastInput < WATCHING_SECONDS * 1000));
+      (leaving || document.visibilityState === 'visible') && counting() && (now - lastInput < IDLE_SECONDS * 1000 || (playing() && now - lastInput < WATCHING_SECONDS * 1000));
     const midnight = startOfDay(wall);
     if (active && dt > 0 && prevWall < midnight && wall - prevWall < 60_000) {
       // The tick spans midnight: the seconds before it belong to yesterday, which may still need them.
@@ -217,8 +221,8 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
     }
     if (dayKey(new Date(wall)) !== useStreak.getState().today) settleNow();
     if (active && dt > 0) recordPractice({ activeSeconds: dt, at: wall });
-  };
-  const timer = setInterval(tick, TICK_MS);
+  }
+  const timer = setInterval(() => tick(), TICK_MS);
   // Only a change on a new day needs the pending seconds first; flushing more often is harmless.
   const flush = () => {
     if (dayKey(new Date()) !== useStreak.getState().today) tick();
@@ -230,6 +234,7 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
     if (flushTracker === flush) flushTracker = null;
     for (const ev of events) window.removeEventListener(ev, onInput);
     document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('pagehide', onPageHide);
     window.removeEventListener('storage', onStorage);
   };
 }

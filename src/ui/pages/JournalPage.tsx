@@ -112,7 +112,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
         {!entries.length ? (
           <EmptyState title="Your journal is empty">Start a replay or the simulated market and close a trade. It will be journaled here with a chart snapshot and review.</EmptyState>
         ) : (
-          <div className="two-col" style={{ gridTemplateColumns: 'minmax(280px, 380px) 1fr', alignItems: 'start' }}>
+          <div className="two-col journal-cols">
             <div className="card stack" style={{ padding: 10, gap: 8 }}>
               <input type="text" placeholder="Search symbol, tag or notes" value={query} onChange={(e) => setQuery(e.target.value)} />
               <div className="row wrap">

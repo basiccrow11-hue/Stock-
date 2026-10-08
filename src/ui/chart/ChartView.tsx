@@ -233,10 +233,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     lastUpRef.current = lastUp();
     series.applyOptions(mainSeriesOptions(pal, lastUpRef.current));
     applyPriceScale();
+    // A Normal/Log switch moves every price on screen without a scroll or resize: redraw drawings now
+    // and again once the chart has laid out the new scale.
+    setGeometryVersion((v) => v + 1);
+    const frame = requestAnimationFrame(() => setGeometryVersion((v) => v + 1));
     restyleIndicators();
     // Volume and MACD histogram colours are per point, so their data is re-sent.
     volumeRef.current?.setData(candlesRef.current.map(volumePoint));
     setIndicatorData(0);
+    return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pal, seriesVersion]);
 
