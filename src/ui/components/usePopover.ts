@@ -1,7 +1,7 @@
 /**
  * Shared behaviour for toolbar popovers: one open at a time; close on a press outside, when focus
- * moves elsewhere, or on Escape (returning focus to the button that opened it); and shift the panel
- * sideways so it never runs off the screen.
+ * moves elsewhere, or on Escape (returning focus to the button that opened it); and keep the panel
+ * on screen: shifted sideways, and scrolling inside when it is taller than the room below it.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { modalOpen } from './common';
@@ -70,10 +70,17 @@ export function usePopover() {
       if (r.right > vw - MARGIN) shift = vw - MARGIN - r.right;
       if (r.left + shift < MARGIN) shift = MARGIN - r.left;
       pop.style.left = `${shift}px`;
+      // A panel running past the bottom would make the whole app scroll (styles.css .popover).
+      pop.style.setProperty('--pop-room', `${Math.max(240, document.documentElement.clientHeight - r.top - MARGIN)}px`);
     };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    // The stacked layout scrolls the terminal, which moves the panel up or down.
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
   }, [open]);
 
   return { open, toggle: () => (open ? close(false) : setOpen(true)), close, boxRef, triggerRef, popRef };

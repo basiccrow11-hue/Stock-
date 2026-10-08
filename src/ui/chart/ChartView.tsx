@@ -6,6 +6,7 @@
  * revealed candles with the causal functions in core/indicators.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   HistogramSeries,
   LineSeries,
@@ -25,7 +26,6 @@ import {
   TickMarkType,
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
-import { TIMEFRAME_MINUTES } from '../../core/types';
 import { aggregateBars, bucketFor } from '../../core/data/aggregate';
 import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
 import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
@@ -134,7 +134,6 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const simEventCount = useTrading((s) => s.simEvents.length);
   const pickTarget = useTrading((s) => s.pickTarget);
   const blind = session?.blind ?? false;
-  const tfSeconds = TIMEFRAME_MINUTES[timeframe] * 60;
 
   // ---------------------------------------------------------------- create chart once
   useEffect(() => {
@@ -205,7 +204,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     syncTouch();
     stacked.addEventListener('change', syncTouch);
 
-    registerSnapshotProvider(async () => snapshot(chart, el));
+    registerSnapshotProvider(async () => {
+      // Fill markers and order lines follow the store in effects: apply them before the picture.
+      flushSync(() => {});
+      return snapshot(chart, el);
+    });
     return () => {
       registerSnapshotProvider(null);
       cancelAnimationFrame(frame);
@@ -571,8 +574,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       const base = baseRef.current;
       if (e.type === 'append') {
         const from = base.length;
-        for (const b of e.bars) base.push(b);
-        rebuildTail(from);
+        // A bar the chart already holds would make the series throw ("Cannot update oldest data").
+        for (const b of e.bars) if (!base.length || b.time > base[base.length - 1].time) base.push(b);
+        if (base.length > from) rebuildTail(from);
       } else {
         // Sim tick: the forming 1m bar is re-sent with cumulative values; replace, don't add.
         const last = base[base.length - 1];
@@ -655,14 +659,14 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       chart,
       series,
       candles: () => candlesRef.current,
-      tfSeconds,
+      timeframe,
       paneHeight: () => chart.panes()[0]?.getHeight() ?? 0,
       paneWidth: () => chart.timeScale().width(),
       container,
     };
     // geometryVersion forces consumers to re-render on scroll/zoom/resize/data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tfSeconds, geometryVersion, seriesVersion]);
+  }, [timeframe, geometryVersion, seriesVersion]);
 
   const lb = legend?.bar ?? candlesRef.current[candlesRef.current.length - 1];
   return (

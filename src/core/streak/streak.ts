@@ -21,8 +21,6 @@ export interface DayActivity {
   /** Seconds of active practice. */
   activeSeconds: number;
   tradesClosed: number;
-  /** Journal entries the user annotated that day. */
-  reviews: number;
   /** Set once the day's goal was met; never unset. */
   done: boolean;
 }
@@ -71,7 +69,7 @@ export function emptyStreak(): StreakData {
 }
 
 function emptyDay(): DayActivity {
-  return { activeSeconds: 0, tradesClosed: 0, reviews: 0, done: false };
+  return { activeSeconds: 0, tradesClosed: 0, done: false };
 }
 
 // ------------------------------------------------------------------ calendar arithmetic
@@ -118,7 +116,6 @@ export function sanitizeStreak(raw: unknown): StreakData {
       out.days[k] = {
         activeSeconds: nonNeg(v.activeSeconds),
         tradesClosed: Math.floor(nonNeg(v.tradesClosed)),
-        reviews: Math.floor(nonNeg(v.reviews)),
         done: v.done === true,
       };
     }
@@ -184,7 +181,6 @@ export interface StreakStatus {
   todayDone: boolean;
   todaySeconds: number;
   todayTrades: number;
-  todayReviews: number;
   goalSeconds: number;
   /** A streak is running but today's goal is not met yet. */
   atRisk: boolean;
@@ -212,7 +208,6 @@ export function streakStatus(data: StreakData, today: DayKey): StreakStatus {
     todayDone: t.done,
     todaySeconds: t.activeSeconds,
     todayTrades: t.tradesClosed,
-    todayReviews: t.reviews,
     goalSeconds: data.goalMinutes * 60,
     atRisk: !t.done && current > 0,
     freezes: data.freezes,
@@ -275,7 +270,6 @@ function streakAtPreviousPractice(data: StreakData, k: DayKey): number {
 export interface ActivityDelta {
   activeSeconds?: number;
   tradesClosed?: number;
-  reviews?: number;
   /**
    * Wall-clock time (ms) at the end of the practice being credited. When given, only time after
    * `creditedUntil` counts, so overlapping credits from two windows are not added twice.
@@ -315,7 +309,6 @@ export function recordActivity(input: StreakData, today: DayKey, delta: Activity
   const day: DayActivity = {
     activeSeconds: prev.activeSeconds + seconds,
     tradesClosed: prev.tradesClosed + Math.max(0, Math.floor(delta.tradesClosed ?? 0)),
-    reviews: prev.reviews + Math.max(0, Math.floor(delta.reviews ?? 0)),
     done: prev.done,
   };
   const completedNow = !day.done && day.activeSeconds >= settled.goalMinutes * 60;

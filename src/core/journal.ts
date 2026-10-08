@@ -44,8 +44,15 @@ export interface JournalEntry {
   /** Full round trip, kept for analytics. */
   trip: RoundTrip;
   createdAt: number;
-  /** Local day (YYYY-MM-DD) this trade last counted as reviewed for the practice streak. */
+  /** Local day (YYYY-MM-DD) the trade's first notes were written: the day it counts as reviewed. */
   reviewedOn?: string;
+}
+
+/** Trades reviewed on a local day. Counted from the entries, so every tab agrees on it. */
+export function reviewedCount(entries: readonly JournalEntry[], day: string): number {
+  let n = 0;
+  for (const e of entries) if (e.reviewedOn === day) n++;
+  return n;
 }
 
 export function journalEntryFromTrip(trip: RoundTrip, ctx: { sessionId: string; mode: 'replay' | 'sim'; rewound: boolean; blind?: boolean }): JournalEntry {

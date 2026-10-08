@@ -126,11 +126,6 @@ export function recordTradeClosed(): void {
   recordPractice({ tradesClosed: 1 });
 }
 
-export function recordReview(): void {
-  flushTracker?.();
-  recordPractice({ reviews: 1 });
-}
-
 export function setStreakGoal(minutes: number): void {
   flushTracker?.();
   commit((d, today) => setGoal(d, today, minutes));

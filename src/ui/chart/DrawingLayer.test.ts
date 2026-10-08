@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ChartGeometry } from './DrawingLayer';
 import { hitTest, projector } from './DrawingLayer';
 import type { Drawing } from './drawings';
+import type { Bar } from '../../core/types';
+import { exchangeDate, exchangeTimeToUnix } from '../../core/time';
 
 const T0 = 1_736_947_800;
 const candles = Array.from({ length: 10 }, (_, i) => ({ time: T0 + i * 300, open: 1, high: 1, low: 1, close: 1, volume: 0 }));
@@ -13,7 +15,7 @@ function geometry(): ChartGeometry {
     chart: { timeScale: () => timeScale } as never,
     series: { priceToCoordinate: (p: number) => 500 - p, coordinateToPrice: (y: number) => 500 - y } as never,
     candles: () => candles,
-    tfSeconds: 300,
+    timeframe: '5m',
     paneHeight: () => 400,
     paneWidth: () => 800,
     container: null as never,
@@ -43,6 +45,35 @@ describe('drawing projector', () => {
     expect(proj.shiftT(T0 + 3 * 300 + 150, 21)).toBe(T0 + 5 * 300 + 150);
     expect(proj.shiftT(T0 + 3 * 300 + 150, 4)).toBe(T0 + 3 * 300 + 150);
     expect(proj.shiftT(T0 + 3 * 300 + 150, -30)).toBe(T0 + 150);
+  });
+});
+
+describe('drawing points past the last candle', () => {
+  it('keep their slot as the replay reveals candles across a weekend', () => {
+    const daily = (date: string) => ({ time: exchangeTimeToUnix(date, 9 * 60 + 30), open: 1, high: 1, low: 1, close: 1, volume: 0 });
+    const shown = ['2024-03-11', '2024-03-12', '2024-03-13'].map(daily);
+    const g: ChartGeometry = { ...geometry(), candles: () => shown, timeframe: '1D' };
+    // Five slots right of Wednesday's candle: Thu, Fri, Mon, Tue, Wed.
+    const t = projector(g).t(100 + 7 * 10)!;
+    expect(exchangeDate(t)).toBe('2024-03-20');
+    for (const date of ['2024-03-14', '2024-03-15', '2024-03-18']) {
+      shown.push(daily(date));
+      expect(projector(g).x(t)).toBe(170);
+    }
+  });
+
+  it('skip the night on intraday timeframes', () => {
+    const at = (date: string, min: number) => exchangeTimeToUnix(date, min);
+    const shown: Bar[] = [];
+    for (const date of ['2024-03-11', '2024-03-12']) for (let m = 4 * 60; m < 20 * 60; m += 5) if (date === '2024-03-11' || m <= 19 * 60 + 40) shown.push({ time: at(date, m), open: 1, high: 1, low: 1, close: 1, volume: 0 });
+    const g: ChartGeometry = { ...geometry(), candles: () => shown };
+    const last = shown.length - 1;
+    // Seven slots right of 19:40: 19:45, 19:50, 19:55, then 04:00, 04:05, 04:10, 04:15 the next day.
+    const t = projector(g).t(100 + (last + 7) * 10)!;
+    expect(t).toBe(at('2024-03-13', 4 * 60 + 15));
+    for (let m = 19 * 60 + 45; m < 20 * 60; m += 5) shown.push({ time: at('2024-03-12', m), open: 1, high: 1, low: 1, close: 1, volume: 0 });
+    for (let m = 4 * 60; m <= 4 * 60 + 10; m += 5) shown.push({ time: at('2024-03-13', m), open: 1, high: 1, low: 1, close: 1, volume: 0 });
+    expect(projector(g).x(t)).toBe(100 + (last + 7) * 10);
   });
 });
 

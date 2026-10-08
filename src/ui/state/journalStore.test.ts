@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EMPTY_NOTES, type JournalEntry } from '../../core/journal';
+import { EMPTY_NOTES, reviewedCount, type JournalEntry } from '../../core/journal';
 
 vi.mock('../services/idb', () => ({
   idb: {
@@ -23,12 +23,8 @@ describe('journal reviews', () => {
     vi.setSystemTime(new Date(2026, 9, 8, 12, 0, 0));
     vi.resetModules();
     const { useJournal } = await import('./journalStore');
-    const { useStreak } = await import('./streakStore');
     useJournal.setState({ entries: [{ id: 't1', notes: { ...EMPTY_NOTES } } as JournalEntry] });
-    const reviews = () => {
-      const s = useStreak.getState();
-      return s.data.days[s.today]?.reviews ?? 0;
-    };
+    const reviews = () => reviewedCount(useJournal.getState().entries, '2026-10-08');
     const write = (why: string) => useJournal.getState().updateNotes('t1', { ...EMPTY_NOTES, why });
     await write('breakout');
     expect(reviews()).toBe(1);
@@ -70,11 +66,11 @@ describe('journal in two tabs', () => {
     await a.getState().updateNotes('t1', { ...EMPTY_NOTES, why: 'A' });
     await b.getState().updateNotes('t1', { ...EMPTY_NOTES, setup: 'B' });
     expect((db.get('t1') as JournalEntry).notes).toMatchObject({ why: 'A', setup: 'B' });
-    const reviews = JSON.parse(localStorage.getItem('stock-replay-streak')!).days[dayKey(new Date())].reviews;
-    expect(reviews).toBe(1);
+    expect((db.get('t1') as JournalEntry).reviewedOn).toBe(dayKey(new Date()));
     // Each tab hears about the other's writes and shows the stored version.
     await new Promise((r) => setTimeout(r, 50));
     expect(a.getState().entries[0].notes).toMatchObject({ why: 'A', setup: 'B' });
+    for (const tab of [a, b]) expect(reviewedCount(tab.getState().entries, dayKey(new Date()))).toBe(1);
     vi.doUnmock('../services/idb');
   });
 });
@@ -82,8 +78,11 @@ describe('journal in two tabs', () => {
 describe('journal edits cut off by closing the tab', () => {
   const entry = (notes: Partial<typeof EMPTY_NOTES> = {}, tag = '') => ({ id: 't1', exitTime: 1, createdAt: 1, tag, notes: { ...EMPTY_NOTES, ...notes } }) as JournalEntry;
 
-  /** A store whose IndexedDB writes either never finish (the tab closed mid-write) or work. */
-  async function tab(db: Map<string, unknown>, writes: 'hang' | 'work') {
+  /**
+   * A store whose IndexedDB writes work, never finish (the tab closed mid-write), or land but
+   * never report back (the tab closed just after).
+   */
+  async function tab(db: Map<string, unknown>, writes: 'hang' | 'land' | 'work') {
     vi.resetModules();
     vi.doMock('../services/idb', () => ({
       idb: {
@@ -95,7 +94,7 @@ describe('journal edits cut off by closing the tab', () => {
           if (writes === 'hang') return new Promise(() => undefined);
           const next = fn(structuredClone(db.get(k)));
           if (next !== undefined) db.set(k, structuredClone(next));
-          return Promise.resolve(next);
+          return writes === 'land' ? new Promise(() => undefined) : Promise.resolve(next);
         },
       },
     }));
@@ -149,6 +148,36 @@ describe('journal edits cut off by closing the tab', () => {
     expect((db.get('t1') as JournalEntry).notes.why).toBe('fade at VWAP');
     expect(other.getState().entries[0].notes.why).toBe('fade at VWAP');
     expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    vi.doUnmock('../services/idb');
+  });
+
+  it("shows a closed tab's edit in an open tab when its write landed but the tab closed before saying so", async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const other = await tab(db, 'work');
+    const closing = await tab(db, 'land');
+    void closing.getState().updateNotes('t1', { why: 'breakout over the high' });
+    expect((db.get('t1') as JournalEntry).notes.why).toBe('breakout over the high');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-journal-drafts', newValue: localStorage.getItem('stock-replay-journal-drafts') }));
+    await new Promise((r) => setTimeout(r, 1700));
+    expect(other.getState().entries[0].notes.why).toBe('breakout over the high');
+    expect(reviewedCount(other.getState().entries, other.getState().entries[0].reviewedOn!)).toBe(1);
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    // Editing another field there keeps the closed tab's note.
+    await other.getState().updateNotes('t1', { setup: 'ORB' });
+    expect((db.get('t1') as JournalEntry).notes).toMatchObject({ why: 'breakout over the high', setup: 'ORB' });
+    vi.doUnmock('../services/idb');
+  });
+
+  it('shows an edit another tab saved and cleared its draft for, even if that tab never said so', async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const open = await tab(db, 'work');
+    // The other tab records its draft, writes, clears the draft and closes; its message is lost.
+    const draft = JSON.stringify({ t1: { notes: { why: ['', 'gap fill'] } } });
+    window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-journal-drafts', oldValue: null, newValue: draft }));
+    db.set('t1', entry({ why: 'gap fill' }));
+    window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-journal-drafts', oldValue: draft, newValue: null }));
+    await new Promise((r) => setTimeout(r, 1700));
+    expect(open.getState().entries[0].notes.why).toBe('gap fill');
     vi.doUnmock('../services/idb');
   });
 

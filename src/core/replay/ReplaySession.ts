@@ -18,7 +18,7 @@ import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
   exchangeTimeToUnix,
-  formatExchangeDateTime,
+  formatExchangeTime,
   parseHHMM,
   prevTradingDay,
   tradingDayOnOrBefore,
@@ -274,7 +274,8 @@ export class ReplaySession {
     const curve = this.broker.state.equityCurve.filter((p) => p.time <= cutoff);
     const events = this.broker.state.events.filter((e) => e.time <= cutoff);
     this.broker.restore({ ...snap.state, equityCurve: curve, events });
-    this.broker.logInfo(`Rewound to ${formatExchangeDateTime(time)}. Results after a rewind are not blind.`);
+    // No date: the log's time column already gives the day, and hides it in blind mode.
+    this.broker.logInfo(`Rewound to ${formatExchangeTime(time)} ET. Results after a rewind are not blind.`);
     this.lastSnapshotVersion = this.broker.version;
     this.rewinds += 1;
   }

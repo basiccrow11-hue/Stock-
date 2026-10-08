@@ -2,7 +2,6 @@
 import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
-import { recordReview } from './streakStore';
 import { dayKey } from '../../core/streak/streak';
 
 const hasNotes = (n: JournalNotes) => Object.values(n).some((v) => typeof v === 'string' && v.trim() !== '');
@@ -22,8 +21,9 @@ function replace(id: string, entry: JournalEntry | undefined): void {
   useJournal.setState({ entries: entry ? [...others, entry].sort(byExit) : others });
 }
 
-async function stored(id: string): Promise<JournalEntry | undefined> {
-  return idb.get<JournalEntry>('journal', id).catch(() => undefined);
+/** The stored entry: undefined when it is gone, null when it could not be read. */
+async function stored(id: string): Promise<JournalEntry | undefined | null> {
+  return idb.get<JournalEntry>('journal', id).catch(() => null);
 }
 
 /** This tab's journal writes still in flight, per entry. */
@@ -111,9 +111,8 @@ function settleDraft(id: string, stored: JournalEntry | undefined, wrote: string
  * Finish the drafts other tabs left behind (a tab that closed mid-write), for entries this tab
  * has no write in flight for. On load, fields another value has overtaken are given up too.
  */
-async function finishDrafts(onLoad: boolean): Promise<JournalEntry[]> {
+async function finishDrafts(onLoad: boolean): Promise<void> {
   const today = dayKey(new Date());
-  const finished: JournalEntry[] = [];
   for (const [id, d] of Object.entries(readDrafts())) {
     if (inflight.has(id)) continue;
     let cur: JournalEntry | undefined;
@@ -122,13 +121,8 @@ async function finishDrafts(onLoad: boolean): Promise<JournalEntry[]> {
       return c ? applyDraft(c, d, today) : undefined;
     });
     settleDraft(id, done ?? cur, [], onLoad);
-    if (!done) continue;
-    finished.push(done);
-    announce(id);
-    // The first note on a trade counts as its review, as when it is typed.
-    if (done.reviewedOn === today && cur?.reviewedOn !== today) recordReview();
+    if (done) announce(id);
   }
-  return finished;
 }
 
 /**
@@ -212,18 +206,16 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     drafts[id] = draft;
     writeDrafts(drafts);
     const today = dayKey(new Date());
-    let reviewed = false;
     const saved = await write(id, entry, { ...entry, ...retag, notes: { ...entry.notes, ...edits } }, (stored) => {
       // Another tab's edits cut off by its closing travel with this write.
       const cur = applyDraft(stored, readDrafts()[id], today) ?? stored;
       const merged = { ...cur.notes, ...edits };
-      // The first note written on a trade counts as a review for the daily practice summary, once
-      // a day: clearing the notes and writing them again is still the same review.
-      reviewed = !hasNotes(stored.notes) && hasNotes(merged) && stored.reviewedOn !== today;
+      // The first note written on a trade marks the day it was reviewed (the practice panel counts
+      // them): clearing the notes and writing them again the same day is still the same review.
+      const reviewed = !hasNotes(stored.notes) && hasNotes(merged) && stored.reviewedOn !== today;
       return { ...cur, ...retag, notes: merged, ...(reviewed ? { reviewedOn: today } : {}) };
     });
     if (saved) settleDraft(id, saved, [...keys, ...('tag' in retag ? ['tag'] : [])], false);
-    if (reviewed) recordReview();
   },
   remove: async (id) => {
     const entry = get().entries.find((e) => e.id === id);
@@ -249,16 +241,33 @@ export async function loadSnapshot(key: string): Promise<string | undefined> {
 }
 
 // A tab that closed mid-write leaves a draft: an open tab finishes it shortly after (its own write,
-// if the tab is still alive, normally lands first and clears it), so it shows the edit and never
-// saves over it.
+// if the tab is still alive, normally lands first and clears it). Then it re-reads every entry
+// another tab was saving, since a tab that closes just after its write may never get to tell the
+// others (its message is dropped). So an open tab shows the edit and never saves over it.
+const draftIds = (v: string | null): string[] => {
+  try {
+    return Object.keys(JSON.parse(v ?? '{}') ?? {});
+  } catch {
+    return [];
+  }
+};
+const saving = new Set<string>();
 let finishing: ReturnType<typeof setTimeout> | undefined;
 if (typeof window !== 'undefined')
   window.addEventListener('storage', (e) => {
-    if (e.key !== DRAFTS_KEY || !e.newValue || !useJournal.getState().loaded) return;
+    if (e.key !== DRAFTS_KEY || !useJournal.getState().loaded) return;
+    for (const id of [...draftIds(e.oldValue), ...draftIds(e.newValue)]) saving.add(id);
     clearTimeout(finishing);
     finishing = setTimeout(async () => {
+      const ids = [...saving];
+      saving.clear();
       try {
-        for (const e of await finishDrafts(false)) if (useJournal.getState().entries.some((x) => x.id === e.id)) replace(e.id, e);
+        await finishDrafts(false);
+        for (const id of ids) {
+          if (inflight.has(id) || !useJournal.getState().entries.some((x) => x.id === id)) continue;
+          const entry = await stored(id);
+          if (entry !== null) replace(id, entry);
+        }
       } catch {
         /* the next load tries again */
       }
@@ -270,5 +279,5 @@ channel?.addEventListener('message', (e: MessageEvent) => {
   const id = e.data;
   // This tab's own write in flight reads the stored copy, other tab's change included, when it lands.
   if (inflight.has(id)) return;
-  void stored(id).then((entry) => replace(id, entry));
+  void stored(id).then((entry) => entry !== null && replace(id, entry));
 });

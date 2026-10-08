@@ -82,16 +82,14 @@ describe('daily goal and streak', () => {
   });
 
   it('ignores negative or junk deltas', () => {
-    const r = recordActivity(emptyStreak(), '2026-10-01', { activeSeconds: -500, tradesClosed: -2, reviews: 1.7 });
-    expect(r.data.days['2026-10-01']).toEqual({ activeSeconds: 0, tradesClosed: 0, reviews: 1, done: false });
+    const r = recordActivity(emptyStreak(), '2026-10-01', { activeSeconds: -500, tradesClosed: -2.5 });
+    expect(r.data.days['2026-10-01']).toEqual({ activeSeconds: 0, tradesClosed: 0, done: false });
   });
 
-  it('tracks trades and reviews without letting them complete the day', () => {
-    const r = recordActivity(emptyStreak(), '2026-10-01', { tradesClosed: 25, reviews: 3 });
+  it('tracks trades without letting them complete the day', () => {
+    const r = recordActivity(emptyStreak(), '2026-10-01', { tradesClosed: 25 });
     expect(r.completedNow).toBe(false);
-    const s = streakStatus(r.data, '2026-10-01');
-    expect(s.todayTrades).toBe(25);
-    expect(s.todayReviews).toBe(3);
+    expect(streakStatus(r.data, '2026-10-01').todayTrades).toBe(25);
   });
 });
 
@@ -304,7 +302,7 @@ describe('persistence hygiene', () => {
     });
     expect(d.goalMinutes).toBe(15);
     expect(Object.keys(d.days)).toEqual(['2026-10-01']);
-    expect(d.days['2026-10-01']).toEqual({ activeSeconds: 700, tradesClosed: 2, reviews: 0, done: true });
+    expect(d.days['2026-10-01']).toEqual({ activeSeconds: 700, tradesClosed: 2, done: true });
     expect(d.frozen).toEqual(['2026-09-30']);
     expect(d.freezes).toBe(2);
     expect(d.best).toBe(0);

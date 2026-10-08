@@ -16,6 +16,8 @@ import {
 } from '../../core/streak/streak';
 import { dismissCelebration, openStreakPanel, setStreakGoal, useStreak } from '../state/streakStore';
 import { useTrading } from '../state/tradingStore';
+import { useJournal } from '../state/journalStore';
+import { reviewedCount } from '../../core/journal';
 import { Modal, modalOpen, useModalCount } from './common';
 import { toast } from '../state/toasts';
 import type { View } from './TopBar';
@@ -140,6 +142,7 @@ export function StreakPanel() {
   const data = useStreak((st) => st.data);
   const today = useStreak((st) => st.today);
   const weeks = useMemo(() => calendarWeeks(data, today, 17), [data, today]);
+  const reviews = useJournal((j) => reviewedCount(j.entries, today));
   const msg = streakMessage(s);
   const pct = Math.min(1, s.todaySeconds / s.goalSeconds);
   const lit = s.todayDone || s.current > 0;
@@ -189,9 +192,9 @@ export function StreakPanel() {
         <div className={`streak-bar${s.todayDone ? ' done' : ''}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct * 100)} aria-label="Today's practice goal">
           <div style={{ width: `${pct * 100}%` }} />
         </div>
-        {s.todayReviews > 0 && (
+        {reviews > 0 && (
           <div className="small muted">
-            {s.todayReviews} trade{s.todayReviews === 1 ? '' : 's'} reviewed in the journal today
+            {reviews} trade{reviews === 1 ? '' : 's'} reviewed in the journal today
           </div>
         )}
       </div>

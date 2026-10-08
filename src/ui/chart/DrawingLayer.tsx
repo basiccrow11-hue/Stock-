@@ -1,12 +1,14 @@
 /**
  * SVG overlay for chart drawings. Drawings are stored in (time, price) space and projected through
  * the chart's own coordinate converters, so they stay anchored while panning, zooming, and as new
- * candles are revealed. Points to the right of the last candle are extrapolated by bar spacing,
- * which reveals nothing about future prices.
+ * candles are revealed. Points to the right of the last candle are placed by the trading calendar
+ * (the slots later candles will take), which reveals nothing about future prices.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { IChartApi, ISeriesApi, SeriesType } from 'lightweight-charts';
-import type { Bar } from '../../core/types';
+import type { Bar, Timeframe } from '../../core/types';
+import { TIMEFRAME_MINUTES } from '../../core/types';
+import { candleCalendar, type CandleCalendar } from '../../core/data/candleCalendar';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import { FIB_LEVELS, POINTS_NEEDED, useDrawings, type DrawPoint, type Drawing, type DrawingType } from './drawings';
 import { newId } from '../../core/util/ids';
@@ -20,7 +22,7 @@ export interface ChartGeometry {
   chart: IChartApi;
   series: ISeriesApi<SeriesType>;
   candles: () => Bar[];
-  tfSeconds: number;
+  timeframe: Timeframe;
   paneHeight: () => number;
   paneWidth: () => number;
   /** The chart's own element: clicks and taps that miss every drawing land here. */
@@ -39,6 +41,7 @@ export interface Projector {
 
 export function projector(g: ChartGeometry): Projector {
   const candles = g.candles();
+  const tfSeconds = TIMEFRAME_MINUTES[g.timeframe] * 60;
   const ts = g.chart.timeScale();
   // lightweight-charts converts whole bar indexes only (it returns 0 for a fractional one), and a
   // point drawn on another timeframe usually falls inside a candle. The time scale is linear in the
@@ -47,20 +50,28 @@ export function projector(g: ChartGeometry): Projector {
   const x1 = candles.length ? ts.logicalToCoordinate(1 as never) : null;
   const spacing = x0 === null || x1 === null ? 0 : x1 - x0;
   const ready = spacing > 0;
+  // Past the last candle, slots follow the trading calendar (overnight and weekend gaps take no
+  // slot), so a point drawn there stays on the candle that later fills its slot.
+  let cal: CandleCalendar | undefined;
+  const calendar = () => (cal ??= candleCalendar(candles, g.timeframe));
   const toLogical = (t: number): number => {
     const i = lastIndexAtOrBefore(candles, t, (c) => c.time);
     const last = candles.length - 1;
-    if (i < 0) return (t - candles[0].time) / g.tfSeconds;
-    if (i >= last) return last + (t - candles[last].time) / g.tfSeconds;
+    if (i < 0) return (t - candles[0].time) / tfSeconds;
+    if (i >= last) return last + calendar().slots(candles[last].time, t);
     const span = candles[i + 1].time - candles[i].time;
-    return i + Math.min(1, (t - candles[i].time) / Math.max(1, Math.min(span, g.tfSeconds)));
+    return i + Math.min(1, (t - candles[i].time) / Math.max(1, Math.min(span, tfSeconds)));
   };
   const fromLogical = (l: number): number => {
     const last = candles.length - 1;
-    if (l <= 0) return candles[0].time + l * g.tfSeconds;
-    if (l >= last) return candles[last].time + (l - last) * g.tfSeconds;
+    if (l <= 0) return candles[0].time + l * tfSeconds;
+    if (l >= last) {
+      const k = Math.floor(l - last);
+      const c = calendar().after(candles[last].time, k);
+      return c + (l - last - k) * Math.min(tfSeconds, calendar().next(c) - c);
+    }
     const i = Math.floor(l);
-    return candles[i].time + (l - i) * Math.min(g.tfSeconds, candles[i + 1].time - candles[i].time);
+    return candles[i].time + (l - i) * Math.min(tfSeconds, candles[i + 1].time - candles[i].time);
   };
   return {
     x: (t) => (ready ? x0! + toLogical(t) * spacing : null),

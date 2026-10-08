@@ -122,17 +122,17 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
     <div className="replay-bar">
       {isReplay ? (
         <>
-          <button className="btn icon" title="Restart (rewind to start)" onClick={() => confirmRewind(session.start) && restart()} disabled={now <= session.start}>
-            ⏮
+          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start) && restart()} disabled={now <= session.start}>
+            <span aria-hidden="true">⏮</span>
           </button>
-          <button className="btn icon" title="Step back one bar (←)" onClick={() => confirmRewind(now - 60) && stepBack()} disabled={now <= session.start}>
-            ◀
+          <button className="btn icon" title="Step back one bar (←)" aria-label="Step back one bar" onClick={() => confirmRewind(now - 60) && stepBack()} disabled={now <= session.start}>
+            <span aria-hidden="true">◀</span>
           </button>
           <button className={`btn ${playing ? '' : 'primary'}`} style={{ minWidth: 76 }} onClick={() => (playing ? pause() : play())} disabled={finished}>
-            {playing ? '❚❚ Pause' : '▶ Play'}
+            <span aria-hidden="true">{playing ? '❚❚' : '▶'}</span> {playing ? 'Pause' : 'Play'}
           </button>
-          <button className="btn icon" title="Step forward one 1-minute bar (→)" onClick={stepForward} disabled={finished}>
-            ▶|
+          <button className="btn icon" title="Step forward one 1-minute bar (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
+            <span aria-hidden="true">▶|</span>
           </button>
           <button className="btn sm" title={`Step one ${timeframe} candle (Shift+→)`} onClick={stepCandle} disabled={finished}>
             +1 {timeframe}
@@ -167,7 +167,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           </div>
           <span className="row" style={{ gap: 4 }}>
             {!session.blind && <input type="date" value={jumpDate} onChange={(e) => setJumpDate(e.target.value)} aria-label="Jump to date" title="Jump to date" style={{ width: 130 }} />}
-            <input type="time" value={jumpTime} onChange={(e) => setJumpTime(e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 96 }} />
+            <input type="time" value={jumpTime} onChange={(e) => setJumpTime(e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 'auto' }} />
             <button className="btn sm" onClick={doJump} title="Jump to time. Forward jumps process every skipped bar, so your orders still fill.">
               Jump
             </button>

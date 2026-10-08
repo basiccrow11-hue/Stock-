@@ -292,6 +292,8 @@ async function processClosedTrips(): Promise<void> {
     }
     if (settings.autoSnapshot && snapshotFn && useTrading.getState().activeSymbol === trip.symbol) {
       try {
+        // Publishing is throttled while playing; the picture shows the moment the trade closed.
+        publish(true);
         const img = await snapshotFn();
         if (img) {
           entry.snapshotKey = `snap:${entry.id}`;
@@ -579,9 +581,10 @@ export function jumpTo(time: UnixSeconds): void {
   const revealed = eng.replay.jumpTo(time);
   if (back) void afterRewind();
   else {
-    emitChart({ type: 'reset' });
-    afterChange(revealed);
+    // The reset redraws every revealed bar, so they are not sent to the chart a second time.
+    if (revealed.length) emitChart({ type: 'reset' });
     publish(true);
+    void processClosedTrips();
   }
 }
 

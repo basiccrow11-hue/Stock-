@@ -12,24 +12,19 @@ import type { Bar } from '../../core/types';
 
 const COLOR_INPUT_STYLE = { width: 30, height: 26, padding: 0, border: 0, background: 'none', cursor: 'pointer' } as const;
 
-function ColorField({ label, value, onChange, hint }: { label: string; value: string; onChange: (v: string) => void; hint?: string | null }) {
-  const hintId = useId();
+/** `hintId`: the visible warning about this colour, shown under the grid (a tooltip never shows on touch). */
+function ColorField({ label, value, onChange, hintId }: { label: string; value: string; onChange: (v: string) => void; hintId?: string }) {
   return (
-    <label className="color-field" title={hint ?? undefined}>
-      <input type="color" value={value} onChange={(e) => onChange(normHex(e.target.value))} style={COLOR_INPUT_STYLE} aria-label={label} aria-describedby={hint ? hintId : undefined} />
+    <label className="color-field">
+      <input type="color" value={value} onChange={(e) => onChange(normHex(e.target.value))} style={COLOR_INPUT_STYLE} aria-label={label} aria-describedby={hintId} />
       <span className="color-field-text">
         <span>{label}</span>
         <span className="mono muted small">{value}</span>
       </span>
-      {hint && (
-        <>
-          <span className="color-warn" aria-hidden="true">
-            !
-          </span>
-          <span id={hintId} className="sr-only">
-            {hint}
-          </span>
-        </>
+      {hintId && (
+        <span className="color-warn" aria-hidden="true">
+          !
+        </span>
       )}
     </label>
   );
@@ -119,7 +114,7 @@ function visibilityHints(c: ChartColors): Partial<Record<keyof ChartColors, stri
   faint('up', 'Up colour');
   faint('down', 'Down colour');
   faint('line', 'Line colour');
-  if (contrast(c.text, c.background) < 4.5) out.text = 'Too faint on this background, so the chart shows it lighter or darker to keep labels readable.';
+  if (contrast(c.text, c.background) < 4.5) out.text = 'Axis text is too faint on this background, so the chart shows it lighter or darker to keep labels readable.';
   if (!out.up && !out.down && contrast(c.up, c.down) < 1.12 && distance(c.up, c.down) < 70) out.down = 'Up and down colours look almost the same.';
   return out;
 }
@@ -129,8 +124,13 @@ export function ChartColorsEditor({ compact = false }: { compact?: boolean }) {
   const setColor = useSettings((s) => s.setChartColor);
   const update = useSettings((s) => s.updateAppearance);
   const c = a.colors;
-  const hints = visibilityHints(c);
   const usesLine = a.chartStyle === 'line' || a.chartStyle === 'area';
+  const hints = visibilityHints(c);
+  // Only warnings about fields shown here.
+  if (!usesLine) delete hints.line;
+  if (compact) delete hints.text;
+  const hintBase = useId();
+  const hintId = (k: keyof ChartColors) => (hints[k] ? `${hintBase}-${k}` : undefined);
   const usesCandles = a.chartStyle === 'candles' || a.chartStyle === 'hollow';
   const hollow = a.chartStyle === 'hollow';
   const unlinked = usesCandles && !a.linkCandleParts;
@@ -140,8 +140,8 @@ export function ChartColorsEditor({ compact = false }: { compact?: boolean }) {
     <div className="stack" style={{ gap: 8 }}>
       <div className="color-grid">
         {hollow && unlinked && <ColorField label="Up outline" value={c.borderUp} onChange={(v) => setColor('borderUp', v)} />}
-        <ColorField label={upLabel} value={c.up} onChange={(v) => setColor('up', v)} hint={hints.up} />
-        <ColorField label={usesCandles ? 'Down body' : 'Down'} value={c.down} onChange={(v) => setColor('down', v)} hint={hints.down} />
+        <ColorField label={upLabel} value={c.up} onChange={(v) => setColor('up', v)} hintId={hintId('up')} />
+        <ColorField label={usesCandles ? 'Down body' : 'Down'} value={c.down} onChange={(v) => setColor('down', v)} hintId={hintId('down')} />
         {unlinked && (
           <>
             {!hollow && <ColorField label="Up border" value={c.borderUp} onChange={(v) => setColor('borderUp', v)} />}
@@ -150,16 +150,25 @@ export function ChartColorsEditor({ compact = false }: { compact?: boolean }) {
             <ColorField label="Down wick" value={c.wickDown} onChange={(v) => setColor('wickDown', v)} />
           </>
         )}
-        {usesLine && <ColorField label="Line" value={c.line} onChange={(v) => setColor('line', v)} hint={hints.line} />}
+        {usesLine && <ColorField label="Line" value={c.line} onChange={(v) => setColor('line', v)} hintId={hintId('line')} />}
         {!compact && (
           <>
             <ColorField label="Background" value={c.background} onChange={(v) => setColor('background', v)} />
             <ColorField label="Grid" value={c.grid} onChange={(v) => setColor('grid', v)} />
-            <ColorField label="Axis text" value={c.text} onChange={(v) => setColor('text', v)} hint={hints.text} />
+            <ColorField label="Axis text" value={c.text} onChange={(v) => setColor('text', v)} hintId={hintId('text')} />
             <ColorField label="Crosshair" value={c.crosshair} onChange={(v) => setColor('crosshair', v)} />
           </>
         )}
       </div>
+      {Object.keys(hints).length > 0 && (
+        <div className="alert warn">
+          {(Object.keys(hints) as (keyof ChartColors)[]).map((k) => (
+            <div key={k} id={hintId(k)}>
+              {hints[k]}
+            </div>
+          ))}
+        </div>
+      )}
       {usesCandles && (
         <label className="check small">
           <input type="checkbox" checked={a.linkCandleParts} onChange={(e) => update({ linkCandleParts: e.target.checked })} /> Wick and border match the body

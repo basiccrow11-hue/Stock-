@@ -120,6 +120,17 @@ describe('ReplaySession: rewind, jump, and fills', () => {
     expect(s.broker.account().equity).toBe(acctBefore.equity);
   });
 
+  it('logs a rewind without the calendar date, which blind mode hides', () => {
+    const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+    for (let i = 0; i < 5; i++) s.step();
+    const rewound = () => s.broker.state.events.filter((e) => e.message.startsWith('Rewound')).map((e) => e.message);
+    s.stepBack();
+    expect(rewound()).toEqual(['Rewound to 09:34 ET. Results after a rewind are not blind.']);
+    s.restart();
+    expect(rewound()).toEqual(['Rewound to 09:30 ET. Results after a rewind are not blind.']);
+    expect(s.broker.state.events.some((e) => e.message.includes(D))).toBe(false);
+  });
+
   it('restart returns to the initial state', () => {
     const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
     s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });
