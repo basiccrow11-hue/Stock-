@@ -5,7 +5,7 @@ import { setTimeframe, useTrading } from '../state/tradingStore';
 import { IndicatorMenu } from './IndicatorMenu';
 import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
-import { EmptyState } from './common';
+import { EmptyState, useFocusRescue } from './common';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
 
@@ -17,10 +17,12 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   const error = useTrading((s) => s.error);
   const { tool, setTool, color, setColor, clear, drawings } = useDrawings();
   const isSim = session?.mode === 'sim';
+  // Clear all drawings disables itself once they are gone: focus goes to the drawing tools.
+  const toolbarRef = useFocusRescue<HTMLDivElement>((bar) => bar.querySelector<HTMLElement>('[aria-label="Drawing tools"] button.on'));
 
   return (
     <section className="panel area-chart">
-      <div className="chart-toolbar">
+      <div className="chart-toolbar" ref={toolbarRef}>
         <strong style={{ marginRight: 4 }}>{symbol}</strong>
         <div className="seg" role="group" aria-label="Timeframe">
           {TIMEFRAMES.map((tf) => (
@@ -62,13 +64,13 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
             {loading ? (
               <EmptyState title="Loading market data…">Preparing the replay. Future bars stay hidden.</EmptyState>
             ) : (
-              <div className="stack" style={{ alignItems: 'center', maxWidth: 520, textAlign: 'center' }}>
+              <div className="stack" style={{ alignItems: 'center', width: '100%', maxWidth: 520, textAlign: 'center' }}>
                 {error && <div className="alert error">{error}</div>}
                 <h2>Practice trading when the market is closed</h2>
                 <p className="muted">
                   Pick an old trading day and replay it bar by bar without seeing what comes next, or trade a continuously running fictional market.
                 </p>
-                <div className="row">
+                <div className="row wrap" style={{ justifyContent: 'center' }}>
                   <button className="btn primary" onClick={() => onNewSession('replay')}>
                     Start a historical replay
                   </button>

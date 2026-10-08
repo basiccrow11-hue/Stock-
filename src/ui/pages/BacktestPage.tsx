@@ -21,7 +21,7 @@ import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
 import { AFTERHOURS_CLOSE, exchangeTimeToUnix, isTradingDay, nextTradingDay, prevTradingDay, tradingDayOnOrBefore } from '../../core/time';
 import { bucketFor } from '../../core/data/aggregate';
 import { runBacktestAsync, cancelBacktests } from '../services/backtestClient';
-import { NumberField, SourceBadge, EmptyState } from '../components/common';
+import { NumberField, SourceBadge, EmptyState, useFocusRescue, useNumberDraft } from '../components/common';
 import { StatsGrid } from './AnalyticsPage';
 import { LineChart, type LineSpec } from '../chart/LineChart';
 import { toChartTime } from '../chart/ChartView';
@@ -79,19 +79,22 @@ function clone<T>(v: T): T {
 }
 
 function SmallNum({ value, onChange, step = 1, min = 1, title, label }: { value: number; onChange: (n: number) => void; step?: number; min?: number; title: string; label?: string }) {
+  const draft = useNumberDraft(value, onChange, min);
   return (
     <input
       type="number"
       title={title}
       aria-label={label ?? title}
-      value={value}
+      value={draft.text}
       step={step}
       min={min}
       style={{ width: 64 }}
       onChange={(e) => {
+        draft.set(e.target.value);
         const n = Number(e.target.value);
-        if (e.target.value !== '' && Number.isFinite(n)) onChange(n);
+        if (e.target.value !== '' && Number.isFinite(n) && n >= min) onChange(n);
       }}
+      onBlur={draft.finish}
     />
   );
 }
@@ -124,8 +127,10 @@ function SeriesEditor({ value, onChange, side }: { value: SeriesRef; onChange: (
 
 function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Rule) => void; onRemove: () => void }) {
   const setCond = (i: number, c: Condition) => onChange({ ...rule, conditions: rule.conditions.map((x, j) => (j === i ? c : x)) });
+  // A removed condition takes its ✕ with it: focus goes to this rule's "+ Condition".
+  const ruleRef = useFocusRescue<HTMLDivElement>((r) => r.querySelector<HTMLElement>('[data-home]'));
   return (
-    <div className="rule card" style={{ padding: 10, background: 'var(--panel-2)' }}>
+    <div className="rule card" ref={ruleRef} style={{ padding: 10, background: 'var(--panel-2)' }}>
       <div className="row wrap">
         <b>IF</b>
         <select aria-label="Condition logic" value={rule.logic} onChange={(e) => onChange({ ...rule, logic: e.target.value as 'all' | 'any' })}>
@@ -156,7 +161,7 @@ function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Ru
         </div>
       ))}
       <div className="row wrap" style={{ marginLeft: 16 }}>
-        <button className="btn sm" onClick={() => onChange({ ...rule, conditions: [...rule.conditions, { left: { kind: 'close' }, op: 'above', right: { kind: 'ema', period: 20 } }] })}>
+        <button className="btn sm" data-home onClick={() => onChange({ ...rule, conditions: [...rule.conditions, { left: { kind: 'close' }, op: 'above', right: { kind: 'ema', period: 20 } }] })}>
           + Condition
         </button>
         <div className="spacer" />
@@ -232,6 +237,8 @@ export function BacktestPage() {
   const panel = useTheme().panel;
   useCredentials((s) => s.creds);
   const [strategy, setStrategy] = useState<StrategyDefinition>(() => clone(STRATEGY_PRESETS[0]));
+  // A removed rule takes its Remove button with it: focus goes to "+ Rule".
+  const rulesRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('[data-add-rule]'));
   const [providerId, setProviderId] = useState(settings.replay.providerId);
   const [symbol, setSymbol] = useState(settings.replay.symbol);
   const lastDay = demoProvider.lastDate;
@@ -326,7 +333,7 @@ export function BacktestPage() {
           <span className="muted small">Signals are evaluated on closed candles only and filled at the next bar&apos;s open. No future data is used.</span>
         </div>
 
-        <div className="card stack rule-builder">
+        <div className="card stack rule-builder" ref={rulesRef}>
           <div className="row wrap">
             <h2>Strategy</h2>
             <div className="spacer" />
@@ -361,6 +368,7 @@ export function BacktestPage() {
           <div className="row">
             <button
               className="btn sm"
+              data-add-rule
               onClick={() =>
                 setStrategy({
                   ...strategy,

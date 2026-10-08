@@ -277,8 +277,15 @@ export class ReplaySession {
    */
   advance(seconds: number): RevealedBar[] {
     let target = this.now + seconds;
-    const next = this.nextRevealTime();
-    if (next !== null && next > target && next - this.now > 30 * 60) target = next;
+    // A stretch with no bar trading that is longer than 30 minutes (a night, a weekend, a halt) is
+    // skipped to the next bar's open. While a bar trades, time passes at the chosen speed, whatever
+    // the base timeframe: an hourly or daily bar takes its hour or session.
+    let open: UnixSeconds | null = null;
+    for (const e of this.engines.values()) {
+      const t = e.nextBarTime();
+      if (t !== null && (open === null || t < open)) open = t;
+    }
+    if (open !== null && open > target && open - this.now > 30 * 60) target = open;
     return this.advanceAll(target);
   }
 
@@ -304,10 +311,12 @@ export class ReplaySession {
   /**
    * What a rewind to `time` (or Restart, with `restart`) would undo, worked out on a copy of the
    * account: trades opened since (`open`: still open now) and trades closed since (`closed`: their
-   * journal entries go).
+   * journal entries go). `hides` says whether any bar seen so far would be hidden again, which is
+   * what makes it a rewind.
    */
-  undoneBy(time: UnixSeconds, restart = false): { open: number; closed: number } {
+  undoneBy(time: UnixSeconds, restart = false): { open: number; closed: number; hides: boolean } {
     const target = restart ? this.checkpoints[0].cursors : [...this.engines.values()].map((e) => Math.min(e.revealedCount, e.revealedCountAt(time)));
+    const hides = this.cursors().some((c, k) => target[k] < c);
     const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target)];
     const after = this.broker.fork(cp.broker);
     this.replayFrom(after, cp, target);
@@ -318,7 +327,7 @@ export class ReplaySession {
       if (t.closed && then.get(t.id) !== true) closed++;
       else if (!t.closed && !then.has(t.id)) open++;
     }
-    return { open, closed };
+    return { open, closed, hides };
   }
 
   /** Back to the start with the starting account: no orders, even ones placed before the first bar. */
@@ -328,10 +337,12 @@ export class ReplaySession {
 
   /** Rewind to `time`: the account as it was then, including orders placed at that moment (not with `restart`). */
   private rewindTo(time: UnixSeconds, restart = false): void {
-    // Restart at the start only clears the account: nothing after the start has been seen.
-    const back = time < this.now;
+    // It is a rewind only if bars already seen are hidden again. Before the first new bar (Restart
+    // at the start, or Play stopped within the first minute) nothing has been seen.
+    const before = this.cursors();
     for (const e of this.engines.values()) e.rewindTo(time);
     const cursors = this.cursors();
+    const back = cursors.some((c, k) => c < before[k]);
     const i = restart ? 0 : this.checkpointAt(cursors);
     const cp = this.checkpoints[i];
     this.checkpoints.length = i + 1;
@@ -340,7 +351,7 @@ export class ReplaySession {
     // Settings changed since `cp` apply from here on, so a later rewind past here must know it.
     if (this.broker.cfg !== cp.config) this.checkpoint();
     if (!back) {
-      this.broker.logInfo('Back to the start: orders and trades cleared.');
+      if (restart) this.broker.logInfo('Back to the start: orders and trades cleared.');
       return;
     }
     // No date: the log's time column already gives the day, and hides it in blind mode.

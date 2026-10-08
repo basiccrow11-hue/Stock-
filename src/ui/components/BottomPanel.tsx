@@ -137,6 +137,7 @@ function PositionsTab() {
                     const r = closePosition(p.symbol);
                     if (!r.ok) toast('error', r.error ?? 'Could not close position');
                     else if (r.order?.status === 'pending') toast('info', r.warnings[r.warnings.length - 1] ?? 'Close order queued until the market is open.');
+                    for (const n of r.notes ?? []) toast('info', n, 6000);
                   }}
                 >
                   Close

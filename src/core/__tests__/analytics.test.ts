@@ -272,6 +272,64 @@ describe('learning review', () => {
       const target = run((_, next) => next(100, 104.5, 100, 104.2));
       expect(target.titles).toContain('Target reached');
     });
+
+    /** Long 1000 at 100 (stop 98, target 102) where each bar fills at most a quarter of its volume. */
+    const thin = (script: (next: (o: number, h: number, l: number, c: number, v: number) => void) => void) => {
+      const b = new SimBroker({ startingBalance: 200_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 } });
+      const bars = [bar(t0, 100, 100, 100, 100, 100_000)];
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 1000, stopLoss: 98, takeProfit: 102 });
+      script((o, h, l, c, v) => {
+        const nb = bar(t0 + 60 * bars.length, o, h, l, c, v);
+        bars.push(nb);
+        b.onBar('T', nb);
+      });
+      const st = b.state;
+      const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 200_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return { review, find: (title: string) => review.findings.find((f) => f.title === title)?.detail };
+    };
+
+    it('goes by the order that closed most of a trade closed in parts', () => {
+      const stopFirst = thin((next) => {
+        next(100, 100.2, 97.8, 98.5, 3200); // the stop takes 800 at 98
+        next(98.5, 101, 98.4, 100.9, 100_000);
+        next(100.9, 102.4, 100.8, 102.2, 100_000); // the target takes the last 200 at 102
+      });
+      expect(stopFirst.review.exitReason).toBe('stop_loss');
+      expect(stopFirst.review.findings[0].detail).toContain('exited @ 98.80 in 2 parts');
+      expect(stopFirst.find('Closed in parts')).toBe('800 by your stop at 98.00, then 200 at your target at 102.00. The rest of this review goes by the order that closed the most shares.');
+      expect(stopFirst.find('Target reached')).toContain('though only 200 of 1000 shares filled there');
+
+      const half = thin((next) => {
+        next(100, 102.5, 100.7, 101.2, 2000); // the target takes 500 at 102
+        next(101.2, 101.3, 97.5, 97.8, 100_000); // the stop takes the other 500 at 98
+        for (let i = 0; i < 3; i++) next(97.8, 98.2, 97.4, 97.9, 100_000);
+      });
+      expect(half.review.outcome).toBe('breakeven');
+      expect(half.find('Stop did its job')).toContain('It closed 500 of 1000 shares where you planned.');
+      expect(half.find('Stop did its job')).not.toContain('loss');
+    });
+
+    it('measures risk from the order price when a gap fills the entry past its own stop', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const bars = [bar(et('2025-01-15', '15:59'), 101, 101.2, 100.8, 101)];
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 100, quantity: 100, stopLoss: 99.5, takeProfit: 101.5, tif: 'gtc' });
+      for (let i = 0; i < 5; i++) {
+        bars.push(bar(et('2025-01-16', '09:30') + 60 * i, 99, 99.4, 98.8, 99.2));
+        b.onBar('T', bars[bars.length - 1]);
+      }
+      const st = b.state;
+      const t = st.roundTrips[0];
+      expect([t.avgEntry, t.avgExit, t.plannedEntry]).toEqual([99, 99, 100]);
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      expect([review.rMultiple, review.plannedRR, review.riskDollars]).toEqual([0, 3, 50]);
+      const titles = review.findings.map((f) => f.title);
+      expect(titles).toContain('Entry filled past your stop');
+      expect(titles).not.toContain('No stop loss');
+      expect(review.rules.filter((r) => r.passed === false)).toEqual([]);
+      expect(evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
+    });
   });
 
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {

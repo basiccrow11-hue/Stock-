@@ -62,3 +62,11 @@ export const CHART_LOCALE: string = (() => {
     return 'en-US';
   }
 })();
+
+/** A replay or market speed: simulated time per real second. */
+export function speedLabel(s: number): string {
+  if (s === 1) return '1x real time';
+  if (s < 60) return `${s}x`;
+  const perSec = s / 60;
+  return `${s}x · ${perSec >= 60 ? `${perSec / 60}h` : `${perSec}m`}/s`;
+}

@@ -9,7 +9,7 @@
 import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../types';
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
-import { initialRiskPerShare, plannedRR, rMultiple } from '../analytics/stats';
+import { entryPastStop, initialRiskPerShare, plannedRR, rMultiple } from '../analytics/stats';
 import { exchangeDate, exchangeMinuteOfDay, REGULAR_OPEN } from '../time';
 
 export interface TradingRules {
@@ -79,23 +79,49 @@ export interface TradeReview {
   rules: RuleCheck[];
 }
 
-/** The trade's last fill and the order it came from. */
-function closingFill(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): { fill?: Fill; order?: Order } {
-  const lastFillId = trip.fills[trip.fills.length - 1];
-  const fill = fills.find((f) => f.id === lastFillId);
-  return { fill, order: fill ? orders.find((o) => o.id === fill.orderId) : undefined };
+/** One order's share of a trade's exit: the shares it closed and their average price. */
+interface ExitPart {
+  order: Order;
+  qty: number;
+  price: number;
 }
 
+/** The orders that closed the trade, in the order they first filled. */
+function exitParts(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): ExitPart[] {
+  const ids = new Set(trip.fills);
+  const closing = trip.direction === 'long' ? 'sell' : 'cover';
+  const parts = new Map<string, ExitPart>();
+  for (const f of fills) {
+    if (!ids.has(f.id) || f.action !== closing) continue;
+    const p = parts.get(f.orderId);
+    if (p) {
+      p.price = (p.price * p.qty + f.price * f.quantity) / (p.qty + f.quantity);
+      p.qty += f.quantity;
+      continue;
+    }
+    const order = orders.find((o) => o.id === f.orderId);
+    if (order) parts.set(f.orderId, { order, qty: f.quantity, price: f.price });
+  }
+  return [...parts.values()];
+}
+
+/** The part that closed the most shares; on a tie, the later one, which finished the exit. */
+function mainExit(parts: readonly ExitPart[]): ExitPart | undefined {
+  return parts.reduce<ExitPart | undefined>((best, p) => (!best || p.qty >= best.qty ? p : best), undefined);
+}
+
+const isStop = (o: Order) => o.type === 'stop' || o.type === 'stop_limit';
+
 /**
- * How the trade was closed, by the closing order: a stop order (bracket or placed separately) is
- * the stop loss, a limit that took profit is the target, a market order is a manual exit, and a
- * limit that closed at a loss is just an exit order.
+ * How the trade was closed, by the order that closed most of it: a stop order (bracket or placed
+ * separately) is the stop loss, a limit that took profit is the target, a market order is a manual
+ * exit, and a limit that closed at a loss is just an exit order.
  */
 export function exitReasonOf(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): ExitReason {
-  const { fill, order } = closingFill(trip, fills, orders);
-  if (!order || !fill) return 'other';
-  if (order.type === 'stop' || order.type === 'stop_limit') return 'stop_loss';
-  if (order.type === 'limit') return (trip.direction === 'long' ? fill.price > trip.avgEntry : fill.price < trip.avgEntry) ? 'take_profit' : 'other';
+  const main = mainExit(exitParts(trip, fills, orders));
+  if (!main) return 'other';
+  if (isStop(main.order)) return 'stop_loss';
+  if (main.order.type === 'limit') return (trip.direction === 'long' ? main.price > trip.avgEntry : main.price < trip.avgEntry) ? 'take_profit' : 'other';
   return 'manual';
 }
 
@@ -149,6 +175,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const mfe = excursion(Math.max(0, best), trip, riskPerShare);
   const mae = excursion(Math.max(0, -worst), trip, riskPerShare);
   const exitReason = exitReasonOf(trip, input.fills, input.orders);
+  // A gap through both the entry order and its stop: R is measured from the order's price instead.
+  const pastStop = entryPastStop(trip) && riskPerShare !== null;
   const equityAtEntry = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
@@ -181,13 +209,27 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const findings: Finding[] = [];
   const outcome: TradeReview['outcome'] = trip.pnl > 0.005 ? 'win' : trip.pnl < -0.005 ? 'loss' : 'breakeven';
   const rText = r !== null ? ` (${r >= 0 ? '+' : ''}${r.toFixed(2)}R)` : '';
+  const dir = long ? 1 : -1;
+  const parts = exitParts(trip, input.fills, input.orders);
+  // A limit exit at or beyond the original target reached it.
+  const reachedTarget = (p: ExitPart) => trip.initialTarget !== undefined && p.order.type === 'limit' && (p.price - trip.initialTarget) * dir >= -1e-9;
   findings.push({
     tone: outcome === 'win' ? 'good' : outcome === 'loss' ? 'bad' : 'neutral',
     title: `${outcome === 'win' ? 'Won' : outcome === 'loss' ? 'Lost' : 'Broke even'} ${money(Math.abs(trip.pnl))}${rText}`,
-    detail: `${long ? 'Long' : 'Short'} ${trip.maxQuantity} @ ${trip.avgEntry.toFixed(2)}, exited @ ${trip.avgExit?.toFixed(2) ?? '—'} via ${
-      { stop_loss: 'your stop loss', take_profit: 'your profit target', manual: 'a manual exit', other: 'an exit order' }[exitReason]
+    detail: `${long ? 'Long' : 'Short'} ${trip.maxQuantity} @ ${trip.avgEntry.toFixed(2)}, exited @ ${trip.avgExit?.toFixed(2) ?? '—'} ${
+      parts.length > 1
+        ? `in ${parts.length} parts`
+        : `via ${{ stop_loss: 'your stop loss', take_profit: 'your profit target', manual: 'a manual exit', other: 'an exit order' }[exitReason]}`
     }. While open, the trade was at best ${signed(best)} and at worst ${signed(worst)} (before costs).`,
   });
+  if (parts.length > 1) {
+    const how = (p: ExitPart) => (isStop(p.order) ? 'by your stop' : reachedTarget(p) ? 'at your target' : p.order.type === 'limit' ? 'by a limit order' : 'at market');
+    findings.push({
+      tone: 'neutral',
+      title: 'Closed in parts',
+      detail: `${parts.map((p) => `${p.qty} ${how(p)} at ${p.price.toFixed(2)}`).join(', then ')}. The rest of this review goes by the order that closed the most shares.`,
+    });
+  }
 
   if (riskPerShare === null) {
     findings.push({
@@ -202,25 +244,30 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: tight ? 'bad' : 'neutral',
       title: tight ? 'Stop was tight relative to normal movement' : 'Stop distance',
-      detail: `Your stop was ${riskPerShare.toFixed(2)} away, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry!.toFixed(2)}).${
+      detail: `Your stop was ${riskPerShare.toFixed(2)} away${pastStop ? ' from your order’s price' : ''}, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry!.toFixed(2)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
     });
   }
 
-  // Where the closing stop sat when it filled (it may have been moved since entry) and the fill.
-  const closing = closingFill(trip, input.fills, input.orders);
-  const stopAt = closing.order?.stopPrice;
-  const exitPx = closing.fill?.price;
+  // Where the closing stop sat when it filled (it may have been moved since entry) and its fills.
+  const main = mainExit(parts);
+  const stopAt = main?.order.stopPrice;
+  const exitPx = main?.price;
   if (exitReason === 'stop_loss' && riskPerShare && stopAt !== undefined && exitPx !== undefined) {
-    const dir = long ? 1 : -1;
     const inR = (px: number) => ((px - trip.avgEntry) * dir) / riskPerShare;
     const fmtR = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`;
     // How far past the stop it filled: more than a quarter of the planned risk is not slippage noise.
     const past = (stopAt - exitPx) * dir;
     const filledPast = past >= 0.02 - 1e-9 && past > 0.25 * riskPerShare;
     const moved = Math.abs(stopAt - trip.initialStop!) > 1e-9;
-    if (inR(exitPx) >= 0) {
+    if (pastStop) {
+      findings.push({
+        tone: 'neutral',
+        title: 'Entry filled past your stop',
+        detail: `Price gapped through both your entry order at ${trip.plannedEntry!.toFixed(2)} and your stop at ${trip.initialStop!.toFixed(2)}, so the entry filled at ${trip.avgEntry.toFixed(2)} and the stop closed the trade at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk. An order left working while the market is closed fills at the next open wherever price is, even past its own stop.`,
+      });
+    } else if (inR(exitPx) >= 0) {
       findings.push({
         tone: trip.pnl > 0.005 ? 'good' : 'neutral',
         title: 'Your moved stop closed the trade',
@@ -254,21 +301,28 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         }. That pattern suggests the stop was placed where normal noise could reach it, not that the idea was wrong. It is one trade, so treat it as a data point, not a rule.`,
       });
     } else if (afterExit) {
+      const where = moved ? `at your moved stop (${stopAt.toFixed(2)}; planned at ${trip.initialStop!.toFixed(2)})` : 'where you planned';
       findings.push({
         tone: 'good',
         title: 'Stop did its job',
-        detail: `Since you exited, price has not recovered meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction so far). Your loss was capped ${
-          moved ? `at your moved stop (${stopAt.toFixed(2)}; planned at ${trip.initialStop!.toFixed(2)})` : 'where you planned'
-        }.`,
+        detail: `Since you exited, price has not recovered meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction so far). ${
+          outcome === 'loss' ? `Your loss was capped ${where}.` : `It closed ${parts.length > 1 ? `${main!.qty} of ${trip.exitQtyTotal} shares` : 'the position'} ${where}.`
+        }`,
       });
     }
   }
 
   if (targetDistance !== null) {
     // A limit that took profit short of the original target (or a target moved closer) did not reach it.
-    const atTarget = exitReason === 'take_profit' && exitPx !== undefined && (exitPx - trip.initialTarget!) * (long ? 1 : -1) >= -1e-9;
-    if (atTarget) {
-      findings.push({ tone: 'good', title: 'Target reached', detail: `Your target ${targetDistanceAtr !== null ? `(${targetDistanceAtr.toFixed(1)}× ATR away) ` : ''}was realistic for this move.` });
+    const atTarget = parts.filter(reachedTarget).reduce((a, p) => a + p.qty, 0);
+    if (atTarget > 0) {
+      findings.push({
+        tone: 'good',
+        title: 'Target reached',
+        detail: `Your target ${targetDistanceAtr !== null ? `(${targetDistanceAtr.toFixed(1)}× ATR away) ` : ''}was realistic for this move${
+          atTarget < trip.exitQtyTotal ? `, though only ${atTarget} of ${trip.exitQtyTotal} shares filled there` : ''
+        }.`,
+      });
     } else {
       const reach = targetDistance > 0 ? (bestMove / targetDistance) * 100 : 0;
       findings.push({

@@ -37,10 +37,29 @@ export interface PerformanceStats {
   maxConsecutiveLosses: number;
 }
 
-export function initialRiskPerShare(t: RoundTrip): number | null {
+/**
+ * The entry price and per-share risk to the initial stop that R is measured from: the average entry,
+ * or, when that is at or past the stop (a gap through both the entry order and its stop), the price
+ * the entry order was placed at, which is the risk that was planned.
+ */
+function riskBasis(t: RoundTrip): { entry: number; risk: number } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;
-  const d = t.direction === 'long' ? t.avgEntry - t.initialStop : t.initialStop - t.avgEntry;
-  return d > 0 ? d : null;
+  const dir = t.direction === 'long' ? 1 : -1;
+  for (const entry of [t.avgEntry, t.plannedEntry]) {
+    if (entry === undefined) continue;
+    const risk = (entry - t.initialStop) * dir;
+    if (risk > 0) return { entry, risk };
+  }
+  return null;
+}
+
+export function initialRiskPerShare(t: RoundTrip): number | null {
+  return riskBasis(t)?.risk ?? null;
+}
+
+/** True when the trade's entry filled at or past its own initial stop (only a gap can do that). */
+export function entryPastStop(t: RoundTrip): boolean {
+  return t.initialStop !== undefined && (t.avgEntry - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
 }
 
 /** Realized R multiple: P/L divided by the dollars at risk to the initial stop. */
@@ -51,10 +70,10 @@ export function rMultiple(t: RoundTrip): number | null {
 }
 
 export function plannedRR(t: RoundTrip): number | null {
-  const r = initialRiskPerShare(t);
-  if (r === null || t.initialTarget === undefined) return null;
-  const reward = t.direction === 'long' ? t.initialTarget - t.avgEntry : t.avgEntry - t.initialTarget;
-  return reward > 0 ? reward / r : null;
+  const b = riskBasis(t);
+  if (b === null || t.initialTarget === undefined) return null;
+  const reward = (t.initialTarget - b.entry) * (t.direction === 'long' ? 1 : -1);
+  return reward > 0 ? reward / b.risk : null;
 }
 
 export function returnPct(t: RoundTrip): number {

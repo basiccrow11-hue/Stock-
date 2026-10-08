@@ -74,7 +74,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
     if (loaded && takeFocusRequest('journal')) rowsRef.current?.querySelector<HTMLElement>('tr[aria-current="true"]')?.focus();
   }, [loaded]);
 
-  const list = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries.filter(
       (e) =>
@@ -83,6 +83,10 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
         (!noteless || Object.values(e.notes).every((n) => !n.trim())),
     );
   }, [entries, query, outcome, noteless]);
+  // A running blind session's trades go first, newest first. Listed by exit time among the others,
+  // the dates of their neighbours would give the hidden date away.
+  const hidden = filtered.filter(dateHidden);
+  const list = hidden.length ? [...hidden.sort((a, b) => b.createdAt - a.createdAt), ...filtered.filter((e) => !dateHidden(e))] : filtered;
 
   // Exports carry full timestamps, so the running blind session's trades wait until it ends.
   const exportable = list.filter((e) => !dateHidden(e));

@@ -150,6 +150,8 @@ export interface RoundTrip {
   /** Stop loss / take profit in force when the trade was opened (from the entry order). */
   initialStop?: number;
   initialTarget?: number;
+  /** Price the entry order was placed at (its limit, or its stop); absent for market entries and older trades. */
+  plannedEntry?: number;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

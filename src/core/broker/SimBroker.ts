@@ -90,6 +90,8 @@ export interface SubmitResult {
   order?: Order;
   error?: string;
   warnings: string[];
+  /** What else was done with the order, e.g. entries a close cancelled. */
+  notes?: string[];
 }
 
 const TICK = 0.01;
@@ -482,12 +484,25 @@ export class SimBroker {
     return { ok: true };
   }
 
-  /** Flatten a position with a market order (cancels its bracket orders first). */
+  /**
+   * Flatten a position with a market order. Its exit orders (brackets) are cancelled first, and so is
+   * the rest of any entry still filling into it (a market order, or one already partly filled), which
+   * would otherwise go on adding shares after the close. Entries that have not started stay working.
+   */
   closePosition(symbol: string): SubmitResult {
     const pos = this.position(symbol);
     if (pos.quantity === 0) return { ok: false, error: 'No position.', warnings: [] };
-    for (const o of this.workingOrders(symbol)) if (!isOpeningAction(o.action)) this.cancel(o.id, 'Position closed manually');
-    return this.submit({ symbol, action: pos.quantity > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(pos.quantity), tif: 'day' });
+    const adding = pos.quantity > 0 ? 'buy' : 'short';
+    const notes: string[] = [];
+    for (const o of this.workingOrders(symbol)) {
+      if (!isOpeningAction(o.action)) this.cancel(o.id, 'Position closed manually');
+      else if (o.action === adding && (o.type === 'market' || o.filledQty > 0)) {
+        notes.push(`Cancelled the unfilled ${o.quantity - o.filledQty} of ${describe(o)}, so it cannot add to the position after the close.`);
+        this.cancel(o.id, 'Position closed manually');
+      }
+    }
+    const r = this.submit({ symbol, action: pos.quantity > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(pos.quantity), tif: 'day' });
+    return notes.length ? { ...r, notes } : r;
   }
 
   /** Qty already committed to working exit orders; an OCO group counts once. */
@@ -653,17 +668,28 @@ export class SimBroker {
     return lowFirst ? [o, l, h, c] : [o, h, l, c];
   }
 
-  /** Finds the working order that fires first as price moves from `from` toward `to`. */
+  /**
+   * Finds the working order that fires first as price moves from `from` toward `to`. Orders at the
+   * same level fire in the order they were placed, except that a Buy or Short meeting a position the
+   * other way goes last: an exit at that level (a stop at the other side's entry, a gap through both)
+   * flattens the position first, so the entry then opens the new trade instead of being cancelled.
+   */
   private nextTrigger(symbol: string, from: number, to: number, session: MarketSession, skip: Set<string>): Trigger | null {
     let best: Trigger | null = null;
+    let bestLate = false;
     const ext = session !== 'regular';
+    const q = this.position(symbol).quantity;
     for (const o of this.liveOrders()) {
       if (o.symbol !== symbol || o.status === 'pending' || !isOpen(o) || skip.has(o.id)) continue;
       if (!this.eligible(o, session)) continue;
       const level = this.triggerLevel(o, from, to, ext);
       if (level === null) continue;
       const distance = Math.abs(level - from);
-      if (!best || distance < best.distance - EPS) best = { order: o, level, distance };
+      const late = (o.action === 'buy' && q < 0) || (o.action === 'short' && q > 0);
+      if (!best || distance < best.distance - EPS || (bestLate && !late && distance <= best.distance + EPS)) {
+        best = { order: o, level, distance };
+        bestLate = late;
+      }
     }
     return best;
   }
@@ -878,6 +904,7 @@ export class SimBroker {
         commission: 0,
         initialStop: o.stopLoss,
         initialTarget: o.takeProfit,
+        plannedEntry: o.type === 'limit' ? o.limitPrice : o.type === 'market' ? undefined : o.stopPrice,
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,

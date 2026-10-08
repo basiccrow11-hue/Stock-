@@ -169,7 +169,7 @@ describe('ReplaySession: rewind, jump, and fills', () => {
           if (wasClosed && after.get(id) !== true) closed++;
           else if (!wasClosed && !after.has(id)) open++;
         }
-        expect(predicted).toEqual({ open, closed });
+        expect(predicted).toEqual({ open, closed, hides: true });
         checked += closed;
       }
     }
@@ -263,7 +263,7 @@ describe('ReplaySession: undo is exact', () => {
       s.stepBack();
       const ref = play(target, T('10:00'));
       expect(account(s), name).toEqual(account(ref));
-      expect(predicted, name).toEqual({ open: 0, closed: before - ref.broker.state.roundTrips.length });
+      expect(predicted, name).toEqual({ open: 0, closed: before - ref.broker.state.roundTrips.length, hides: true });
       // The chart and the account agree: the mark is the last bar still on the chart.
       expect(s.broker.markPrice('TEST')).toBe(s.engine.lastPrice());
     }
@@ -276,7 +276,7 @@ describe('ReplaySession: undo is exact', () => {
     s.closePosition('TEST');
     s.step();
     expect(s.broker.state.roundTrips[0].closed).toBe(true);
-    expect(s.undoneBy(s.start, true)).toEqual({ open: 0, closed: 1 });
+    expect(s.undoneBy(s.start, true)).toEqual({ open: 0, closed: 1, hides: true });
     // Going back to the start time keeps what was done at that moment...
     s.jumpTo(s.start);
     expect(s.broker.workingOrders()).toHaveLength(1);
@@ -311,7 +311,7 @@ describe('ReplaySession: undo is exact', () => {
     expect(s.broker.state.fills.at(-1)!.commission).toBe(5);
     // ...so stepping back replays those bars with them too, and undoes nothing but the last bar.
     const target = s.stepBackTarget()!;
-    expect(s.undoneBy(target)).toEqual({ open: 0, closed: 0 });
+    expect(s.undoneBy(target)).toEqual({ open: 0, closed: 0, hides: true });
     s.stepBack();
     const ref = session();
     ref.jumpTo(T('09:44'));
@@ -324,12 +324,33 @@ describe('ReplaySession: undo is exact', () => {
     const s = new ReplaySession(engineWith(bars, T('10:00')), { ...setupFor(), startTime: '10:00' }, ZERO_COST_CONFIG, 's', 'DEMO');
     s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });
     expect(s.broker.position('TEST').quantity).toBe(100);
-    expect(s.undoneBy(s.start, true)).toEqual({ open: 1, closed: 0 });
+    expect(s.undoneBy(s.start, true)).toEqual({ open: 1, closed: 0, hides: false });
     s.restart();
     expect(s.broker.state.orders).toEqual([]);
     expect(s.broker.account().cash).toBe(100_000);
     expect(s.rewound).toBe(false);
     expect(s.broker.state.events.map((e) => e.message)).toEqual(['Back to the start: orders and trades cleared.']);
+  });
+
+  it('going back before any new bar has appeared is not a rewind', () => {
+    const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+    s.submit({ symbol: 'TEST', action: 'buy', type: 'limit', limitPrice: 1, quantity: 10 });
+    // Play at 1x for 40 seconds: the clock moves, but the 09:30 bar is not complete yet.
+    s.advance(40);
+    expect(s.engine.started).toBe(false);
+    s.jumpTo(T('09:30') + 10);
+    expect(s.rewound).toBe(false);
+    expect(s.broker.workingOrders()).toHaveLength(1);
+    expect(s.undoneBy(s.start, true)).toEqual({ open: 0, closed: 0, hides: false });
+    s.restart();
+    expect(s.rewound).toBe(false);
+    expect(s.broker.state.orders).toEqual([]);
+    expect(s.broker.state.events.map((e) => e.message)).toEqual(['Back to the start: orders and trades cleared.']);
+    // Once a bar has been seen, going back is a rewind.
+    s.advance(60);
+    expect(s.undoneBy(s.start, true).hides).toBe(true);
+    s.restart();
+    expect(s.rewound).toBe(true);
   });
 
   it('keeps few, small checkpoints however long the session and however many trades', () => {
@@ -374,6 +395,46 @@ describe('Daily base bars', () => {
     expect(exit.time).toBeLessThan(et('2025-02-05', '16:00'));
     expect(s.broker.state.clock).toBe(et('2025-02-05', '16:00'));
     expect(s.broker.state.equityCurve.map((p) => p.time)).toEqual([et('2025-02-04', '16:00'), et('2025-02-05', '16:00')]);
+  });
+});
+
+describe('Play on coarse base bars', () => {
+  // A bar takes its whole duration at the chosen speed; only stretches with nothing trading are skipped.
+  it('plays a daily bar over its session and skips only the night', () => {
+    const days = ['2025-02-03', '2025-02-04', '2025-02-05', '2025-02-06', '2025-02-07'];
+    const daily = days.map((d, i) => bar(et(d, '09:30'), 100 + i, 102 + i, 99 + i, 101 + i));
+    const e = new ReplayEngine({ symbol: 'XYZ', start: et('2025-02-05', '09:30'), end: et('2025-02-07', '16:00'), baseTimeframe: '1D' }, daily);
+    const s = new ReplaySession(e, { symbol: 'XYZ', date: '2025-02-05', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 2 }, ZERO_COST_CONFIG, 'd', 'DEMO');
+    expect(s.advance(3600)).toEqual([]);
+    expect(s.now).toBe(et('2025-02-05', '10:30'));
+    expect(s.advance(6 * 3600).map((r) => r.bar.time)).toEqual([et('2025-02-05', '09:30')]);
+    // After the close the clock jumps to the next open, and that day's bar again takes its session.
+    expect(s.advance(60)).toEqual([]);
+    expect(s.now).toBe(et('2025-02-06', '09:30'));
+  });
+
+  it('plays an hourly bar over its hour, and never reveals one that ends after the end time', () => {
+    const hours = ['09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30'];
+    const hourly = ['2025-01-14', D].flatMap((d, k) => hours.map((h, i) => bar(et(d, h), 100 + i + k, 101 + i + k, 99 + i + k, 100.5 + i + k)));
+    const session = () =>
+      new ReplaySession(
+        new ReplayEngine({ symbol: 'H', start: et(D, '09:30'), end: et(D, '16:00'), baseTimeframe: '1h' }, hourly),
+        { symbol: 'H', date: D, startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 },
+        ZERO_COST_CONFIG,
+        'h',
+        'DEMO',
+      );
+    const played = session();
+    expect(played.advance(30 * 60)).toEqual([]);
+    expect(played.advance(30 * 60).map((r) => r.bar.time)).toEqual([et(D, '09:30')]);
+    while (!played.finished) played.advance(600);
+    // The 15:30 bar ends at 16:30, after the 16:00 end: no way forward shows it.
+    const stepped = session();
+    while (!stepped.finished) stepped.stepCandle('1h');
+    for (const s of [played, stepped]) {
+      expect(s.engine.lastBar()!.time).toBe(et(D, '14:30'));
+      expect(s.now).toBe(et(D, '16:00'));
+    }
   });
 });
 

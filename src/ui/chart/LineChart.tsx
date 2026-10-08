@@ -1,8 +1,7 @@
 /** Small line/area chart for equity curves and drawdowns (lightweight-charts). */
 import { useEffect, useRef } from 'react';
 import { AreaSeries, createChart, LineSeries, PriceLineSource, TickMarkType, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts';
-import { toChartTime } from './ChartView';
-import { exchangeOffsetSeconds } from '../../core/time';
+import { fromChartTime, toChartTime } from './ChartView';
 import { CHART_LOCALE } from '../services/format';
 import { useTheme } from '../theme/useTheme';
 import { chartLabelFill, withAlpha } from '../theme/color';
@@ -16,21 +15,17 @@ export interface LineSpec {
   dashed?: boolean;
 }
 
-function unshift(shifted: number): number {
-  return shifted - exchangeOffsetSeconds(shifted);
-}
-
 function hm(shifted: number): string {
   const d = new Date(shifted * 1000);
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 /** lightweight-charts needs strictly increasing times; keep the last value per timestamp. */
-function clean(points: { time: number; value: number }[]): { time: UTCTimestamp; value: number }[] {
+function clean(points: { time: number; value: number }[], shift: number): { time: UTCTimestamp; value: number }[] {
   const sorted = points.filter((p) => Number.isFinite(p.value)).sort((a, b) => a.time - b.time);
   const out: { time: UTCTimestamp; value: number }[] = [];
   for (const p of sorted) {
-    const t = toChartTime(p.time);
+    const t = toChartTime(p.time, shift);
     if (out.length && out[out.length - 1].time === t) out[out.length - 1].value = p.value;
     else if (!out.length || t > out[out.length - 1].time) out.push({ time: t, value: p.value });
   }
@@ -49,6 +44,7 @@ export function LineChart({
   format,
   hideDates,
   xLabel,
+  shift = 0,
 }: {
   lines: LineSpec[];
   height?: number;
@@ -56,6 +52,8 @@ export function LineChart({
   hideDates?: boolean;
   /** Custom x-axis label from the original (unshifted) point time, e.g. a trade number. */
   xLabel?: (t: number) => string;
+  /** A blind session's chart time shift (blindChartShift), with hideDates. */
+  shift?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -86,16 +84,17 @@ export function LineChart({
         ...themed.timeScale,
         timeVisible: true,
         tickMarkFormatter: xLabelRef.current
-          ? (t: Time) => xLabelRef.current!(unshift(t as number))
+          ? (t: Time) => xLabelRef.current!(fromChartTime(t as number))
           : // Blind sessions: show clock times only, never calendar dates.
             hideDates
             ? (t: Time, type: TickMarkType) => (type === TickMarkType.Time || type === TickMarkType.TimeWithSeconds ? hm(t as number) : '')
             : undefined,
+        allowBoldLabels: !hideDates,
       },
       localization: {
         locale: CHART_LOCALE,
         ...(format && { priceFormatter: format }),
-        ...(xLabelRef.current ? { timeFormatter: (t: Time) => xLabelRef.current!(unshift(t as number)) } : hideDates ? { timeFormatter: (t: Time) => hm(t as number) } : {}),
+        ...(xLabelRef.current ? { timeFormatter: (t: Time) => xLabelRef.current!(fromChartTime(t as number)) } : hideDates ? { timeFormatter: (t: Time) => hm(t as number) } : {}),
       },
       // On a scrolling page a vertical swipe scrolls the page.
       handleScroll: { vertTouchDrag: false },
@@ -104,10 +103,27 @@ export function LineChart({
     chartRef.current = chart;
     fittedRef.current = false;
     followRef.current = true;
+    // The user takes over the view by panning (a sideways drag), pinching or zooming with the wheel.
+    // A vertical swipe that only scrolls the page leaves it following the data.
     const takeOver = () => {
       followRef.current = false;
     };
-    el.addEventListener('pointerdown', takeOver);
+    const down = new Map<number, { x: number; y: number }>();
+    const onDown = (e: PointerEvent) => {
+      down.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (down.size > 1) takeOver();
+    };
+    const onMove = (e: PointerEvent) => {
+      const p = down.get(e.pointerId);
+      if (!p) return;
+      const dx = Math.abs(e.clientX - p.x);
+      if (dx > 6 && dx > Math.abs(e.clientY - p.y)) takeOver();
+    };
+    const onUp = (e: PointerEvent) => down.delete(e.pointerId);
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
     el.addEventListener('wheel', takeOver, { passive: true });
     seriesRef.current = shape.split(';').map((_, k) => {
       const l = linesRef.current[k];
@@ -119,7 +135,10 @@ export function LineChart({
         : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, ...label });
     });
     return () => {
-      el.removeEventListener('pointerdown', takeOver);
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
       el.removeEventListener('wheel', takeOver);
       chart.remove();
       chartRef.current = null;
@@ -136,12 +155,12 @@ export function LineChart({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    lines.forEach((l, k) => seriesRef.current[k]?.setData(clean(l.points)));
+    lines.forEach((l, k) => seriesRef.current[k]?.setData(clean(l.points, shift)));
     if ((!fittedRef.current || followRef.current) && lines.some((l) => l.points.length > 1)) {
       chart.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [lines, shape, format, hideDates]);
+  }, [lines, shape, format, hideDates, shift]);
 
   return <div ref={ref} style={{ height, position: 'relative' }} />;
 }

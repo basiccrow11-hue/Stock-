@@ -9,6 +9,7 @@ import type { JournalEntry } from '../../core/journal';
 import { EmptyState, Stat } from '../components/common';
 import { useDateHidden } from '../components/useEntryTime';
 import { LineChart, type LineSpec } from '../chart/LineChart';
+import { blindChartShift } from '../chart/ChartView';
 import { useTheme } from '../theme/useTheme';
 import { money, pnlClass, signedMoney } from '../services/format';
 import { exchangeDate, exchangeMinuteOfDay, formatDuration, weekdayOf } from '../../core/time';
@@ -46,8 +47,10 @@ export function StatsGrid({ s }: { s: PerformanceStats }) {
 const CURVE_BASE = 1_000_000_000;
 const tradeLabel = (t: number) => `#${Math.round((t - CURVE_BASE) / 60)}`;
 
-function curveFromTrips(trips: RoundTrip[], base: number): EquityPoint[] {
-  const closed = trips.filter((t) => t.closed).sort((a, b) => a.exitTime! - b.exitTime!);
+/** Trades in exit order, then `last` in the order given (a running blind session's, whose place by exit time would date them). */
+function curveFromTrips(trips: RoundTrip[], base: number, last: RoundTrip[] = []): EquityPoint[] {
+  const closed = trips.filter((t) => t.closed && !last.includes(t)).sort((a, b) => a.exitTime! - b.exitTime!);
+  closed.push(...last.filter((t) => t.closed));
   const out: EquityPoint[] = [];
   let eq = base;
   // Trades from different sessions overlap in real time, so the curve is plotted in trade order.
@@ -85,28 +88,31 @@ function Breakdown({ title, groups }: { title: string; groups: Group[] }) {
   return (
     <div className="card">
       <h3 style={{ marginBottom: 8 }}>{title}</h3>
-      <table className="grid">
-        <thead>
-          <tr>
-            <th />
-            <th className="num">Trades</th>
-            <th className="num">Win %</th>
-            <th className="num">Avg R</th>
-            <th className="num">Net P/L</th>
-          </tr>
-        </thead>
-        <tbody>
-          {groups.slice(0, 12).map((g) => (
-            <tr key={g.key}>
-              <td>{g.key}</td>
-              <td className="num">{g.n}</td>
-              <td className="num">{((g.wins / g.n) * 100).toFixed(0)}%</td>
-              <td className={`num ${pnlClass(g.avgR)}`}>{g.avgR === null ? '—' : g.avgR.toFixed(2)}</td>
-              <td className={`num ${pnlClass(g.pnl)}`}>{signedMoney(g.pnl)}</td>
+      {/* On a phone the columns can be wider than the card: the table scrolls, not the page. */}
+      <div className="table-scroll">
+        <table className="grid">
+          <thead>
+            <tr>
+              <th />
+              <th className="num">Trades</th>
+              <th className="num">Win %</th>
+              <th className="num">Avg R</th>
+              <th className="num">Net P/L</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {groups.slice(0, 12).map((g) => (
+              <tr key={g.key}>
+                <td>{g.key}</td>
+                <td className="num">{g.n}</td>
+                <td className="num">{((g.wins / g.n) * 100).toFixed(0)}%</td>
+                <td className={`num ${pnlClass(g.avgR)}`}>{g.avgR === null ? '—' : g.avgR.toFixed(2)}</td>
+                <td className={`num ${pnlClass(g.pnl)}`}>{signedMoney(g.pnl)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -160,7 +166,13 @@ export function AnalyticsPage() {
   );
   const tags = useMemo(() => [...new Set(entries.map((e) => e.tag).filter(Boolean))].sort(), [entries]);
   const trips = useMemo(() => filtered.map((e) => e.trip), [filtered]);
-  const curve = useMemo(() => curveFromTrips(trips, base), [trips, base]);
+  // Keyed on which trades are hidden, since dateHidden itself is new on every render.
+  const hiddenKey = filtered.filter(dateHidden).map((e) => e.id).join(',');
+  const curve = useMemo(
+    () => curveFromTrips(trips, base, filtered.filter(dateHidden).sort((a, b) => a.createdAt - b.createdAt).map((e) => e.trip)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [trips, base, hiddenKey],
+  );
   const stats = useMemo(() => computeStats(trips, curve, base), [trips, curve, base]);
   const lines = useMemo<LineSpec[]>(() => [{ name: 'Equity', color: accent, area: true, points: curve.map((p) => ({ time: p.time, value: p.equity })) }], [curve, accent]);
 
@@ -203,7 +215,7 @@ export function AnalyticsPage() {
               <h2>Current session</h2>
               <span className="muted small">{session.label}</span>
             </div>
-            {sessionCurve.length > 1 ? <LineChart lines={sessionLines} height={220} format={money} hideDates={session.blind} /> : <p className="muted small">The equity curve appears once the session has run for a while.</p>}
+            {sessionCurve.length > 1 ? <LineChart lines={sessionLines} height={220} format={money} hideDates={session.blind} shift={session.blind ? blindChartShift(session.id) : 0} /> : <p className="muted small">The equity curve appears once the session has run for a while.</p>}
             <StatsGrid s={sessionStats} />
           </div>
         )}
@@ -231,7 +243,7 @@ export function AnalyticsPage() {
               <h3 style={{ marginBottom: 8 }}>R-multiple distribution</h3>
               <RHistogram entries={filtered} />
             </div>
-            <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
+            <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(340px, 100%), 1fr))' }}>
               <Breakdown title="By symbol" groups={groupBy(filtered, (e) => e.symbol)} />
               <Breakdown title="By setup tag" groups={groupBy(filtered, (e) => e.tag || '(untagged)')} />
               <Breakdown title="By direction" groups={groupBy(filtered, (e) => (e.direction === 'long' ? 'Long' : 'Short'))} />

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { DataSourceKind } from '../../core/types';
 import { useToasts } from '../state/toasts';
 
@@ -219,6 +219,80 @@ export function Stat({ k, v, cls }: { k: string; v: ReactNode; cls?: string }) {
   );
 }
 
+/**
+ * Keeps keyboard focus in a part of the page when the focused control there is disabled or removed
+ * by what happened (Restart at the start, Close position, Remove rule, Play at the end): focus goes to
+ * `home(root)` instead of dropping to the page body, where screen-reader users lose their place. Put
+ * the returned ref on the part's root element.
+ */
+export function useFocusRescue<T extends HTMLElement>(home: (root: T) => HTMLElement | null | undefined): (root: T | null) => (() => void) | undefined {
+  const rootRef = useRef<T | null>(null);
+  const last = useRef<HTMLElement | null>(null);
+  const homeRef = useRef(home);
+  homeRef.current = home;
+  const check = useRef(() => {
+    const el = last.current;
+    if (!el || (el.isConnected && !(el as HTMLButtonElement).disabled)) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== el) return;
+    last.current = null;
+    if (rootRef.current) homeRef.current(rootRef.current)?.focus();
+  }).current;
+  // A callback ref, so it also works on a root that is rendered later (or again).
+  const ref = useCallback(
+    (root: T | null) => {
+      if (!root) return;
+      rootRef.current = root;
+      const onIn = (e: FocusEvent) => {
+        last.current = e.target as HTMLElement;
+      };
+      // Chromium reports a disabled or removed control as a blur; a real move away (a click on the
+      // chart, Tab out) leaves it usable, and then there is nothing to rescue.
+      const onOut = (e: FocusEvent) => {
+        const el = e.target as HTMLElement;
+        requestAnimationFrame(() => {
+          if (last.current === el && el.isConnected && !(el as HTMLButtonElement).disabled && document.activeElement !== el) last.current = null;
+          else check();
+        });
+      };
+      root.addEventListener('focusin', onIn);
+      root.addEventListener('focusout', onOut);
+      return () => {
+        if (rootRef.current === root) rootRef.current = null;
+        root.removeEventListener('focusin', onIn);
+        root.removeEventListener('focusout', onOut);
+      };
+    },
+    [check],
+  );
+  // Other browsers send no blur when a control goes: check after each render instead.
+  useEffect(check);
+  return ref;
+}
+
+/**
+ * Text for a controlled number box that shows what is typed even while it is not a value yet (an
+ * emptied box, "-" or "1." on the way to a number). Without it React puts the old value back at once
+ * and the next digit is appended to it (2, cleared, then 3 gives 23). When the box loses focus it
+ * shows the value again, after bringing a number typed outside [min, max] within it.
+ */
+export function useNumberDraft(value: number | '', commit: (v: number) => void, min = -Infinity, max = Infinity) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return {
+    text: draft ?? String(value),
+    set: setDraft,
+    finish: () => {
+      if (draft === null) return;
+      const n = Number(draft);
+      if (draft.trim() !== '' && Number.isFinite(n)) {
+        const c = Math.min(max, Math.max(min, n));
+        if (c !== n) commit(c);
+      }
+      setDraft(null);
+    },
+  };
+}
+
 export function NumberField({
   label,
   value,
@@ -238,6 +312,9 @@ export function NumberField({
   suffix?: string;
   disabled?: boolean;
 }) {
+  // Numbers within range are passed on as typed, and an empty box as '' (callers that always hold a
+  // number ignore it). One outside the range waits, and is brought within it when the box is left.
+  const draft = useNumberDraft(value, onChange, min, max);
   return (
     <label className="field">
       <span>
@@ -246,12 +323,18 @@ export function NumberField({
       </span>
       <input
         type="number"
-        value={value}
+        value={draft.text}
         step={step}
         min={min}
         max={max}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))}
+        onChange={(e) => {
+          draft.set(e.target.value);
+          const n = Number(e.target.value);
+          if (e.target.value === '') onChange('');
+          else if (Number.isFinite(n) && n >= (min ?? -Infinity) && n <= (max ?? Infinity)) onChange(n);
+        }}
+        onBlur={draft.finish}
       />
     </label>
   );

@@ -13,6 +13,7 @@ import { exchangeDate, isTradingDay, nextTradingDay, parseHHMM, tradingDayOnOrBe
 import { DEMO_FIRST_DATE } from '../../core/data/demoProvider';
 import { useCredentials } from '../state/credentials';
 import { useLiveBlind } from '../state/liveBlind';
+import { speedLabel } from '../services/format';
 
 export type SetupMode = 'replay' | 'sim';
 
@@ -204,7 +205,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
           <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
             {REPLAY_SPEEDS.map((s) => (
               <option key={s} value={s}>
-                {s}x
+                {speedLabel(s)}
               </option>
             ))}
           </select>
@@ -338,7 +339,7 @@ function SimForm({ onDone, presetChallenge }: { onDone: () => void; presetChalle
           <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
             {SIM_SPEEDS.map((s) => (
               <option key={s} value={s}>
-                {s}x
+                {speedLabel(s)}
               </option>
             ))}
           </select>

@@ -6,13 +6,13 @@ import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegi
 import { parseCsv, type CsvParseResult } from '../../core/data/csv';
 import type { CsvDataset } from '../../core/data/csvProvider';
 import { deleteEncrypted, hasEncrypted, loadEncrypted, saveEncrypted } from '../services/secureStore';
-import { NumberField, SourceBadge } from '../components/common';
+import { NumberField, SourceBadge, useFocusRescue } from '../components/common';
 import { toast } from '../state/toasts';
 import { dateTime } from '../services/format';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
 import { AppearanceCard } from '../components/Appearance';
 
-/** NumberField handler that ignores the transient empty value while typing. */
+/** NumberField handler for a setting that always has a number: an emptied box changes nothing. */
 function num(set: (v: number) => void) {
   return (v: number | '') => {
     if (v !== '' && Number.isFinite(v)) set(v);
@@ -73,6 +73,8 @@ function CsvImportCard() {
   const [closeStamped, setCloseStamped] = useState(false);
   const [parsed, setParsed] = useState<CsvParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A deleted dataset takes its Delete button with it: focus goes to another dataset's, else the file box.
+  const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('tbody button') ?? card.querySelector<HTMLElement>('input[type=file]'));
 
   useEffect(() => {
     if (!file) return;
@@ -113,7 +115,7 @@ function CsvImportCard() {
   };
 
   return (
-    <div className="card stack">
+    <div className="card stack" ref={cardRef}>
       <h2>Import historical data (CSV)</h2>
       <p className="muted small">
         Bring your own real bars, for example an export from your broker, TradingView or a data vendor. Needs columns for time, open, high, low, close and (ideally) volume. Epoch, ISO and US date formats are recognised. Intraday bars give the most realistic fills; 1-minute is best. Data stays in this browser.
@@ -211,6 +213,8 @@ function ApiKeysCard() {
   const [alpacaSecret, setAlpacaSecret] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [stored, setStored] = useState(false);
+  // Delete saved keys removes itself (and Unlock): focus goes to Forget session keys.
+  const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('[data-home]'));
 
   useEffect(() => {
     void hasEncrypted().then(setStored);
@@ -257,7 +261,7 @@ function ApiKeysCard() {
   const mask = (v?: string) => (v ? `••••${v.slice(-4)}` : 'not set');
 
   return (
-    <div className="card stack">
+    <div className="card stack" ref={cardRef}>
       <h2>Market data API keys (optional)</h2>
       <p className="muted small">
         Keys are never hard-coded and go only to the vendor, through this app&apos;s data proxy (the dev server when you run the app yourself, a server function on the hosted site), which forwards them without storing or logging them. By default they live in memory for this session only. You can save them encrypted with a passphrase. If you run the app yourself, you can instead keep them in <code>.env.local</code> so the browser never sees them (see README).
@@ -314,7 +318,7 @@ function ApiKeysCard() {
           </button>
         )}
         <div className="spacer" />
-        <button className="btn ghost" onClick={clear}>
+        <button className="btn ghost" data-home onClick={clear}>
           Forget session keys
         </button>
         {stored && (

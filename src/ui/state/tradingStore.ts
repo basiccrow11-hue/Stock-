@@ -128,7 +128,8 @@ const eng: Engines = {
   prevClose: {},
 };
 
-export const REPLAY_SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600];
+// The top speed plays one regular session (6.5 hours) per second, which suits daily bars.
+export const REPLAY_SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 23400];
 export const SIM_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300];
 
 const EMPTY: TradingSnapshot = {
@@ -596,9 +597,12 @@ export function stepCandle(): void {
   afterChange(eng.replay.stepCandle(s.timeframe, s.activeSymbol));
 }
 
-/** Trades a rewind to `time` (or Restart) would undo: still open, and closed (whose journal entries it deletes). */
-export function tradesUndoneBy(time: UnixSeconds, restart = false): { open: number; closed: number } {
-  return eng.replay?.undoneBy(time, restart) ?? { open: 0, closed: 0 };
+/**
+ * What a rewind to `time` (or Restart) would undo: trades still open, trades closed (whose journal
+ * entries it deletes), and whether bars already seen would be hidden (only then is it a rewind).
+ */
+export function tradesUndoneBy(time: UnixSeconds, restart = false): { open: number; closed: number; hides: boolean } {
+  return eng.replay?.undoneBy(time, restart) ?? { open: 0, closed: 0, hides: false };
 }
 
 /** Where Step back goes (the open of the last revealed bar), or null when there is nothing to step back over. */

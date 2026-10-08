@@ -7,7 +7,7 @@ import { closePosition, setPickTarget, submitOrder, useTrading } from '../state/
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
-import { modalOpen } from './common';
+import { modalOpen, useFocusRescue } from './common';
 
 const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
   { a: 'buy', label: 'Buy', cls: 'buy' },
@@ -41,6 +41,8 @@ export function OrderTicket() {
   const now = useTrading((s) => s.now);
   const exec = useSettings((s) => s.execution);
   const rules = useSettings((s) => s.rules);
+  // Close position removes its own box once the position is flat: focus goes to the chosen order side.
+  const ticketRef = useFocusRescue<HTMLDivElement>((t) => t.querySelector<HTMLElement>('[aria-label="Order side"] button[aria-pressed="true"]'));
 
   const [action, setAction] = useState<OrderAction>('buy');
   const [type, setType] = useState<OrderType>('market');
@@ -161,8 +163,15 @@ export function OrderTicket() {
       return;
     }
     const o = r.order!;
-    const filled = useTrading.getState().fills.some((f) => f.orderId === o.id);
-    setResult({ tone: 'success', text: filled ? `${action.toUpperCase()} ${q} ${symbol} filled.` : `${action.toUpperCase()} ${q} ${symbol} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}` });
+    const name = `${action.toUpperCase()} ${q} ${symbol}`;
+    // Fills are capped by each bar's volume, so a large order can fill in pieces: say how far it got.
+    const text =
+      o.filledQty >= o.quantity
+        ? `${name} filled.`
+        : o.filledQty > 0
+          ? `${name}: ${o.filledQty} filled, ${o.quantity - o.filledQty} ${o.status === 'partially_filled' ? 'still working' : o.status}.`
+          : `${name} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}`;
+    setResult({ tone: 'success', text });
     // The last warning is shown in the ticket itself; risk warnings were already visible before submitting.
     for (const w of r.warnings.slice(0, -1)) if (!w.startsWith('No stop loss')) toast('warning', w, 6000);
   };
@@ -174,9 +183,15 @@ export function OrderTicket() {
       setResult({ tone: 'error', text: r.error ?? 'Could not close the position.' });
       return;
     }
-    const o = r.order;
-    const filled = !!o && useTrading.getState().fills.some((f) => f.orderId === o.id);
-    setResult({ tone: 'success', text: filled || !o ? `${symbol} position closed.` : `Close order for ${symbol} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}` });
+    const o = r.order!;
+    const done = o.action === 'sell' ? 'sold' : 'bought back';
+    const text =
+      o.filledQty >= o.quantity
+        ? `${symbol} position closed.`
+        : o.filledQty > 0
+          ? `Close order for ${symbol}: ${o.filledQty} of ${o.quantity} ${done}, the rest is still working.`
+          : `Close order for ${symbol} ${o.status === 'pending' ? 'queued' : 'working'}.${r.warnings.length ? ` ${r.warnings[r.warnings.length - 1]}` : ''}`;
+    setResult({ tone: 'success', text: [text, ...(r.notes ?? [])].join(' ') });
   };
 
   /** Pick-from-chart button. The field's input carries its own name, so the button's never joins it. */
@@ -197,7 +212,7 @@ export function OrderTicket() {
   const strict = exec.strictRisk.enabled;
 
   return (
-    <div className="ticket">
+    <div className="ticket" ref={ticketRef}>
       <div className="row">
         <h3>Order ticket</h3>
         <div className="spacer" />

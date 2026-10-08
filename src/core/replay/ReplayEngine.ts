@@ -103,9 +103,16 @@ export class ReplayEngine {
     return aggregateBars(this.#bars.slice(0, this.#cursor + 1), timeframe, this.baseTimeframe);
   }
 
-  /** Reveal the next base bar. Returns it (or null at the end). */
+  /**
+   * Reveal the next base bar. Returns it (or null at the end). A bar that completes after the end
+   * time is never revealed, as with advanceTo: the clock stops at the end instead.
+   */
   step(): Bar | null {
     if (this.finished) return null;
+    if (this.#ends[this.#cursor + 1] > this.end) {
+      this.#now = Math.max(this.#now, this.end);
+      return null;
+    }
     this.#cursor += 1;
     this.#now = Math.max(this.#now, this.#ends[this.#cursor]);
     return { ...this.#bars[this.#cursor] };
@@ -156,6 +163,11 @@ export class ReplayEngine {
   revealedCountAt(target: UnixSeconds): number {
     const t = Math.max(target, this.start);
     return Math.max(this.#firstSessionIndex - 1, lastIndexAtOrBefore(this.#ends, t, (x) => x)) + 1;
+  }
+
+  /** When the next bar opens (it is revealed once complete), or null at the end. */
+  nextBarTime(): UnixSeconds | null {
+    return this.#cursor + 1 < this.#bars.length ? this.#bars[this.#cursor + 1].time : null;
   }
 
   /** Time at which the next bar will be revealed, or null at the end. */

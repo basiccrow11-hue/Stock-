@@ -361,6 +361,51 @@ describe('opening orders that meet a position the other way', () => {
     identity(broker);
   });
 
+  // Where an exit and the opposite entry share a level (stop and reverse, a range traded both ways,
+  // a gap through both), the exit goes first, so the entry opens the new trade.
+  it('reverses when the exit and the opposite entry trigger at the same price', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 101, quantity: 100, stopLoss: 99, tif: 'gtc' });
+    broker.submit({ symbol: S, action: 'short', type: 'stop', stopPrice: 99, quantity: 100, stopLoss: 101, tif: 'gtc' });
+    next(100, 101.4, 99.9, 101.3); // breaks out: long at 101
+    next(101.3, 101.4, 98.5, 98.6); // fails through 99: the long's stop and the short entry
+    expect(broker.position(S)).toMatchObject({ quantity: -100, avgPrice: 99 });
+    expect(broker.state.fills.map((f) => [f.action, f.price])).toEqual([
+      ['buy', 101],
+      ['sell', 99],
+      ['short', 99],
+    ]);
+    expect(broker.state.orders.some((o) => o.conflict)).toBe(false);
+    expect(broker.workingOrders(S).map((o) => [o.action, o.type, o.stopPrice])).toEqual([['cover', 'stop', 101]]);
+    identity(broker);
+  });
+
+  it('trades a range both ways when the target is the other side\'s entry', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 99, quantity: 100, takeProfit: 101 });
+    broker.submit({ symbol: S, action: 'short', type: 'limit', limitPrice: 101, quantity: 100, takeProfit: 99 });
+    next(100, 101.2, 98.9, 101); // dips to 99 (long), then rallies to 101 (target, and the short)
+    expect(broker.position(S)).toMatchObject({ quantity: -100, avgPrice: 101 });
+    expect(broker.state.roundTrips.map((t) => [t.direction, t.closed, t.pnl])).toEqual([
+      ['long', true, 200],
+      ['short', false, 0],
+    ]);
+  });
+
+  it('reverses on a gap through both the stop and the opposite entry', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 101, quantity: 100, stopLoss: 99, tif: 'gtc' });
+    broker.submit({ symbol: S, action: 'short', type: 'stop', stopPrice: 98.5, quantity: 100, stopLoss: 100.5, tif: 'gtc' });
+    next(100, 101.4, 99.9, 101.3);
+    next(97, 97.2, 96.5, 96.8); // opens at 97, below both
+    expect(broker.position(S)).toMatchObject({ quantity: -100, avgPrice: 97 });
+    expect(broker.state.fills.map((f) => [f.action, f.price])).toEqual([
+      ['buy', 101],
+      ['sell', 97],
+      ['short', 97],
+    ]);
+  });
+
   it('still fills a Buy placed while flat once the opposite trade has closed', () => {
     const { broker, next } = setup();
     broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 100, limitPrice: 98 });
@@ -485,6 +530,23 @@ describe('liquidity, partial fills and time in force', () => {
     big.next(100, 100, 100, 100, 2000);
     expect(big.broker.state.fills.map((f) => f.commission)).toEqual([6, 5]);
     identity(big.broker);
+  });
+
+  it('Close position also stops an entry that is still filling, so the position cannot grow back', () => {
+    const { broker, next } = setup({ maxParticipation: 0.25, marketOrderFill: 'next_bar_open' }, 100_000, 10);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 3000, stopLoss: 9.5 }).ok).toBe(true);
+    // A later entry that has not started is a plan of its own and stays.
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 9, quantity: 100 });
+    next(10, 10, 10, 10, 4000);
+    expect(broker.position(S).quantity).toBe(1000);
+    const r = broker.closePosition(S);
+    expect(r.ok).toBe(true);
+    expect(r.notes).toEqual(['Cancelled the unfilled 2000 of BUY 3000 TEST MKT, so it cannot add to the position after the close.']);
+    expect(broker.state.orders[0]).toMatchObject({ status: 'cancelled', filledQty: 1000 });
+    for (let i = 0; i < 3; i++) next(10, 10, 10, 10, 4000);
+    expect(broker.position(S).quantity).toBe(0);
+    expect(broker.workingOrders(S).map((o) => [o.action, o.type, o.limitPrice])).toEqual([['buy', 'limit', 9]]);
+    expect(broker.state.roundTrips.map((t) => [t.closed, t.entryQtyTotal, t.exitQtyTotal])).toEqual([[true, 1000, 1000]]);
   });
 
   it('DAY orders expire at the regular close; GTC orders survive', () => {

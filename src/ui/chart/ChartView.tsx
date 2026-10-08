@@ -40,9 +40,28 @@ import { useTheme } from '../theme/useTheme';
 import { onChart, type ChartPalette } from '../theme/themes';
 import { chartLabelFill, chartLabelText } from '../theme/color';
 
-/** lightweight-charts renders UTC; shift to exchange time so axes read in ET. */
-export function toChartTime(t: number): UTCTimestamp {
-  return (t + exchangeOffsetSeconds(t)) as UTCTimestamp;
+/** lightweight-charts renders UTC; shift to exchange time so axes read in ET. `shift` moves a blind session's times (blindChartShift). */
+export function toChartTime(t: number, shift = 0): UTCTimestamp {
+  return (t + exchangeOffsetSeconds(t) + shift) as UTCTimestamp;
+}
+
+/** The real time of chart time `chart` given by toChartTime with the same `shift`. */
+export function fromChartTime(chart: number, shift = 0): number {
+  const t = chart - shift;
+  return t - exchangeOffsetSeconds(t);
+}
+
+/**
+ * How far a blind session's chart times are moved: whole weeks, between one and five years back,
+ * depending on the session. lightweight-charts chooses and bolds axis labels by calendar boundaries
+ * (year starts first, then month starts), so on real times the labels it picked would give the
+ * date away even when they read "Day N". Moved, those boundaries fall on unrelated days. Every time
+ * the chart shows is converted back first, so only the choice of labelled ticks changes.
+ */
+export function blindChartShift(sessionId: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < sessionId.length; i++) h = Math.imul(h ^ sessionId.charCodeAt(i), 16777619);
+  return -(53 + ((h >>> 0) % 209)) * 7 * 86_400;
 }
 
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
@@ -134,6 +153,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const simEventCount = useTrading((s) => s.simEvents.length);
   const pickTarget = useTrading((s) => s.pickTarget);
   const blind = session?.blind ?? false;
+  const shift = blind && session ? blindChartShift(session.id) : 0;
+  const shiftRef = useRef(shift);
+  shiftRef.current = shift;
+  /** Chart time of real time `t`. */
+  const ct = (t: number) => toChartTime(t, shiftRef.current);
 
   // ---------------------------------------------------------------- create chart once
   useEffect(() => {
@@ -159,7 +183,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         setLegend(null);
         return;
       }
-      const idx = candlesRef.current.findIndex((c) => toChartTime(c.time) === param.time);
+      const idx = candlesRef.current.findIndex((c) => ct(c.time) === param.time);
       if (idx < 0) return;
       const bar = candlesRef.current[idx];
       const prev = idx > 0 ? candlesRef.current[idx - 1].close : bar.open;
@@ -286,7 +310,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       const d = new Date(shifted * 1000);
       return { date: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`, hm: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` };
     };
-    const real = (shifted: number) => shifted - exchangeOffsetSeconds(shifted);
+    const real = (shifted: number) => fromChartTime(shifted, shift);
     chart.applyOptions({
       localization: {
         locale: CHART_LOCALE,
@@ -305,9 +329,20 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
           if (type === TickMarkType.Month) return p.date.slice(0, 7);
           return p.date.slice(5);
         },
+        // Labels on calendar boundaries are bold; in blind mode no label stands out.
+        allowBoldLabels: !blind,
       },
     });
-  }, [blind, timeframe]);
+  }, [blind, timeframe, shift]);
+
+  // A blind session's times are moved on the chart (and back when it ends): every point is re-sent.
+  const shownShift = useRef(shift);
+  useEffect(() => {
+    if (shownShift.current === shift) return;
+    shownShift.current = shift;
+    fullRedraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shift]);
 
   // ---------------------------------------------------------------- watermark (data integrity)
   useEffect(() => {
@@ -493,12 +528,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
           ind.cfg.type === 'vwap' && timeframe !== '1D' && i + 1 < candles.length && exchangeDate(candles[i + 1].time) !== exchangeDate(candles[i].time);
         const point = (i: number) =>
           Number.isNaN(vals[i])
-            ? { time: toChartTime(candles[i].time) }
+            ? { time: ct(candles[i].time) }
             : isHist
-              ? { time: toChartTime(candles[i].time), value: vals[i], color: vals[i] >= 0 ? palRef.current.histUp : palRef.current.histDown }
+              ? { time: ct(candles[i].time), value: vals[i], color: vals[i] >= 0 ? palRef.current.histUp : palRef.current.histDown }
               : endsSession(i)
-                ? { time: toChartTime(candles[i].time), value: vals[i], color: 'rgba(0,0,0,0)' }
-                : { time: toChartTime(candles[i].time), value: vals[i] };
+                ? { time: ct(candles[i].time), value: vals[i], color: 'rgba(0,0,0,0)' }
+                : { time: ct(candles[i].time), value: vals[i] };
         // update() can only touch the newest point, so when a new session starts (which changes how
         // the previous point is drawn) the series is reset instead. That happens once per day.
         if (fromIndex <= 0 || endsSession(fromIndex - 1)) s.setData(candles.map((_, i) => point(i)) as never);
@@ -518,11 +553,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   function volumePoint(c: Bar) {
-    return { time: toChartTime(c.time), value: c.volume, color: c.close >= c.open ? palRef.current.volumeUp : palRef.current.volumeDown };
+    return { time: ct(c.time), value: c.volume, color: c.close >= c.open ? palRef.current.volumeUp : palRef.current.volumeDown };
   }
 
   function candlePoint(c: Bar) {
-    return mainPoint(styleRef.current, toChartTime(c.time), c);
+    return mainPoint(styleRef.current, ct(c.time), c);
   }
 
   function fullRedraw(): void {
@@ -588,7 +623,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (f.symbol !== symbol) continue;
       const buy = f.side === 'buy';
       markers.push({
-        time: toChartTime(bucketFor(f.time, timeframe).start),
+        time: ct(bucketFor(f.time, timeframe).start),
         position: buy ? 'belowBar' : 'aboveBar',
         shape: buy ? 'arrowUp' : 'arrowDown',
         color: buy ? pal.markerBuy : pal.markerSell,
@@ -597,7 +632,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
     for (const ev of getSimEventsFor(symbol)) {
       markers.push({
-        time: toChartTime(bucketFor(ev.time, timeframe).start),
+        time: ct(bucketFor(ev.time, timeframe).start),
         position: 'aboveBar',
         shape: 'circle',
         color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,
@@ -606,7 +641,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     m.setMarkers(markers);
-  }, [fills, symbol, timeframe, simEventCount, seriesVersion, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
+  }, [fills, symbol, timeframe, simEventCount, seriesVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
   useEffect(() => {
