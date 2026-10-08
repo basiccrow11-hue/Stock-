@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useJournal } from '../state/journalStore';
 import { EmptyState, SourceBadge, rowAction } from '../components/common';
 import { JournalEntryDetail } from '../components/JournalEntryDetail';
-import { dateTime, pnlClass, signedMoney } from '../services/format';
+import { pnlClass, signedMoney } from '../services/format';
+import { useEntryTime } from '../components/useEntryTime';
 import { takeFocusRequest } from '../services/focusRequest';
 import type { JournalEntry } from '../../core/journal';
 
@@ -57,6 +58,7 @@ function toCsv(entries: JournalEntry[]): string {
 
 export function JournalPage({ focusId }: { focusId: string | null }) {
   const { entries, loaded, error, remove } = useJournal();
+  const entryTime = useEntryTime();
   const [selected, setSelected] = useState<string | null>(focusId);
   const [query, setQuery] = useState('');
   const [outcome, setOutcome] = useState<'all' | 'win' | 'loss'>('all');
@@ -146,7 +148,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
                       >
                         <td>
                           <b>{e.symbol}</b> <span className={e.direction === 'long' ? 'pos' : 'neg'}>{e.direction === 'long' ? 'L' : 'S'}</span>
-                          <div className="small muted">{dateTime(e.exitTime)}</div>
+                          <div className="small muted">{entryTime(e, e.exitTime)}</div>
                         </td>
                         <td>
                           <SourceBadge source={e.source} />

@@ -15,7 +15,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   const timeframe = useTrading((s) => s.timeframe);
   const loading = useTrading((s) => s.loading);
   const error = useTrading((s) => s.error);
-  const { tool, setTool, color, setColor, clear, drawings, selectedId, remove } = useDrawings();
+  const { tool, setTool, color, setColor, clear, drawings } = useDrawings();
   const isSim = session?.mode === 'sim';
 
   return (
@@ -39,16 +39,14 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
           ))}
         </div>
         <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Drawing color" aria-label="Drawing color" style={{ width: 26, height: 24, padding: 0, border: 0, background: 'none' }} />
-        {selectedId && (
-          <button className="btn sm danger" onClick={() => remove(selectedId)} title="Delete selected drawing (Del)">
-            Delete
-          </button>
-        )}
-        {drawings.length > 0 && (
-          <button className="btn sm ghost" onClick={() => window.confirm('Remove all drawings on this symbol?') && clear()}>
-            Clear drawings
-          </button>
-        )}
+        {/* Always there (disabled when empty): a button that comes and goes would re-wrap the
+            toolbar and move the chart under the pointer. Deleting the selected drawing is a button
+            on the chart itself (ChartView). */}
+        <button className="btn sm ghost icon-btn" disabled={!drawings.length} onClick={() => window.confirm('Remove all drawings on this symbol?') && clear()} aria-label="Clear all drawings" title="Clear all drawings on this symbol">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+            <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5" />
+          </svg>
+        </button>
         <div className="spacer" />
         <button className="btn sm" onClick={() => onNewSession('replay')}>
           New replay

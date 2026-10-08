@@ -85,6 +85,22 @@ describe('journal entry editor', () => {
     expect(m.stored()).toMatchObject({ tag: 'VWAP', notes: { why: 'reclaim' } });
   });
 
+  it('saves edits made inside the debounce when the page is closed or hidden', async () => {
+    const m = await mount();
+    act(() => type(m.why, 'pullback to vwap'));
+    act(() => void window.dispatchEvent(new Event('pagehide')));
+    // Before the debounce would have fired.
+    await act(() => new Promise((r) => setTimeout(r, 100)));
+    expect(m.stored().notes.why).toBe('pullback to vwap');
+    act(() => type(m.tagInput, 'VWAP'));
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    act(() => void document.dispatchEvent(new Event('visibilitychange')));
+    await act(() => new Promise((r) => setTimeout(r, 100)));
+    expect(m.stored().tag).toBe('VWAP');
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    m.done();
+  });
+
   it('takes in a tag saved in another tab and never writes the old one back', async () => {
     const m = await mount();
     db.set('t1', { ...m.stored(), tag: 'ORB' });

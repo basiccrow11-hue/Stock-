@@ -78,3 +78,61 @@ describe('journal in two tabs', () => {
     vi.doUnmock('../services/idb');
   });
 });
+
+describe('journal edits cut off by closing the tab', () => {
+  const entry = (notes: Partial<typeof EMPTY_NOTES> = {}, tag = '') => ({ id: 't1', exitTime: 1, createdAt: 1, tag, notes: { ...EMPTY_NOTES, ...notes } }) as JournalEntry;
+
+  /** A store whose IndexedDB writes either never finish (the tab closed mid-write) or work. */
+  async function tab(db: Map<string, unknown>, writes: 'hang' | 'work') {
+    vi.resetModules();
+    vi.doMock('../services/idb', () => ({
+      idb: {
+        all: async () => [...db.values()].map((v) => structuredClone(v)),
+        get: async (_s: string, k: string) => structuredClone(db.get(k)),
+        set: async (_s: string, k: string, v: unknown) => void db.set(k, structuredClone(v)),
+        delete: async (_s: string, k: string) => void db.delete(k),
+        modify: (_s: string, k: string, fn: (v: unknown) => unknown) => {
+          if (writes === 'hang') return new Promise(() => undefined);
+          const next = fn(structuredClone(db.get(k)));
+          if (next !== undefined) db.set(k, structuredClone(next));
+          return Promise.resolve(next);
+        },
+      },
+    }));
+    const { useJournal } = await import('./journalStore');
+    await useJournal.getState().load();
+    return useJournal;
+  }
+
+  it('finishes the edit on the next load', async () => {
+    const db = new Map<string, unknown>([['t1', entry({ why: 'breakout' })]]);
+    const closing = await tab(db, 'hang');
+    void closing.getState().updateNotes('t1', { why: 'breakout, retest' }, 'ORB');
+    expect((db.get('t1') as JournalEntry).notes.why).toBe('breakout');
+    const next = await tab(db, 'work');
+    expect(db.get('t1')).toMatchObject({ tag: 'ORB', notes: { why: 'breakout, retest' } });
+    expect(next.getState().entries[0]).toMatchObject({ tag: 'ORB', notes: { why: 'breakout, retest' } });
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    vi.doUnmock('../services/idb');
+  });
+
+  it('never puts an old edit over a newer one saved in another tab', async () => {
+    const db = new Map<string, unknown>([['t1', entry({ why: 'breakout' })]]);
+    const closing = await tab(db, 'hang');
+    void closing.getState().updateNotes('t1', { why: 'first thought', other: 'note' });
+    // Another tab saves the same field meanwhile.
+    db.set('t1', entry({ why: 'second thought' }));
+    await tab(db, 'work');
+    expect((db.get('t1') as JournalEntry).notes).toMatchObject({ why: 'second thought', other: 'note' });
+    vi.doUnmock('../services/idb');
+  });
+
+  it('leaves nothing behind once a write lands', async () => {
+    const db = new Map<string, unknown>([['t1', entry()]]);
+    const ok = await tab(db, 'work');
+    await ok.getState().updateNotes('t1', { why: 'breakout' });
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
+    expect((db.get('t1') as JournalEntry).notes.why).toBe('breakout');
+    vi.doUnmock('../services/idb');
+  });
+});

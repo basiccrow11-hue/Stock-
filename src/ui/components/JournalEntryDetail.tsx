@@ -5,10 +5,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
 import { loadSnapshot, useJournal } from '../state/journalStore';
-import { blindDayLabel, useTrading } from '../state/tradingStore';
-import { formatExchangeTime } from '../../core/time';
 import { SourceBadge, Stat } from './common';
-import { dateTime, money, pct, pnlClass, price, qty, signedMoney } from '../services/format';
+import { money, pct, pnlClass, price, qty, signedMoney } from '../services/format';
+import { useEntryTime } from './useEntryTime';
 import { formatDuration } from '../../core/time';
 import type { TradeReview } from '../../core/learning/review';
 
@@ -41,6 +40,30 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   useEffect(() => {
     pending.current = saved ? null : { id: entry.id, notes, tag };
   }, [notes, tag, saved, entry.id]);
+  const flush = () => {
+    const p = pending.current;
+    pending.current = null;
+    if (p) void useJournal.getState().updateNotes(p.id, edited(p.notes, base.current.notes), p.tag !== base.current.tag ? p.tag : undefined);
+  };
+
+  // Closing or reloading the tab, or a phone sending it to the background (where it may be killed
+  // without another event), unmounts nothing and may never run the debounce timer: save now.
+  useEffect(() => {
+    const leave = () => {
+      if (!pending.current) return;
+      flush();
+      setSaved(true);
+    };
+    const onVisibility = () => document.visibilityState === 'hidden' && leave();
+    window.addEventListener('pagehide', leave);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', leave);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+    // flush reads only refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     base.current = { notes: entry.notes, tag: entry.tag };
@@ -55,9 +78,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
         .catch(() => undefined);
     return () => {
       alive = false;
-      const p = pending.current;
-      pending.current = null;
-      if (p) void useJournal.getState().updateNotes(p.id, edited(p.notes, base.current.notes), p.tag !== base.current.tag ? p.tag : undefined);
+      flush();
     };
     // Reset local edits only when switching to another entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -89,9 +110,8 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   }, [notes, tag, saved, entry.id, updateNotes]);
 
   const r = entry.review;
-  // Keep the calendar date hidden while the blind session that produced this trade is still running.
-  const hideDate = useTrading((s) => !!entry.blind && s.session?.id === entry.sessionId);
-  const when = (t: number) => (hideDate ? `${blindDayLabel(t)} ${formatExchangeTime(t)}` : dateTime(t));
+  const entryTime = useEntryTime();
+  const when = (t: number) => entryTime(entry, t);
   return (
     <div className="stack" style={{ gap: 14 }}>
       <div className="row wrap">

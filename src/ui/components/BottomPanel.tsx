@@ -396,7 +396,9 @@ function TradesTab({ onOpenJournal }: { onOpenJournal: (id: string) => void }) {
       <tbody>
         {closed.map((t) => {
           const entryId = session ? `${session.id}:${t.id}` : '';
-          const has = entries.some((e) => e.id === entryId);
+          const entry = entries.find((e) => e.id === entryId);
+          // A tag set or changed in the review or the journal is stored on the journal entry.
+          const tag = entry ? entry.tag : t.tag;
           return (
             <tr key={t.id}>
               <td>{t.symbol}</td>
@@ -408,9 +410,9 @@ function TradesTab({ onOpenJournal }: { onOpenJournal: (id: string) => void }) {
               <td className="num">{price(t.avgExit)}</td>
               <td className={`num ${pnlClass(t.pnl)}`}>{signedMoney(t.pnl)}</td>
               <td>{formatDuration(t.exitTime! - t.entryTime)}</td>
-              <td>{t.tag || <span className="muted">—</span>}</td>
+              <td>{tag || <span className="muted">—</span>}</td>
               <td className="num">
-                {has && (
+                {entry && (
                   <button className="btn sm ghost" onClick={() => onOpenJournal(entryId)}>
                     Journal
                   </button>

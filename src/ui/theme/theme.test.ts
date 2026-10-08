@@ -172,10 +172,20 @@ describe('appearance', () => {
         if (r.pnlUsesCandles) {
           expect(chroma(r.vars['--pos']), `${theme} ${up}`).toBeGreaterThanOrEqual(COLOURFUL);
           expect(distance(r.vars['--pos'], r.vars['--neg']), `${theme} ${up}`).toBeGreaterThanOrEqual(60);
+          // Never a near-white tint beside the body text of a dark theme.
+          expect(distance(r.vars['--pos'], r.vars['--text']), `${theme} ${up}`).toBeGreaterThanOrEqual(60);
+          expect(distance(r.vars['--neg'], r.vars['--text']), `${theme} ${down}`).toBeGreaterThanOrEqual(60);
         }
       }
       expect(resolveTheme(sanitizeAppearance({ theme: 'light', colors: { up, down } })).pnlUsesCandles, up).toBe(false);
     }
+    // Pale enough to read as body text on the dark themes too.
+    for (const [up, down] of [
+      ['#b2dfdb', '#ffcdd2'],
+      ['#c8e6c9', '#ffcdd2'],
+      ['#bbdefb', '#ffccbc'],
+    ])
+      for (const theme of THEME_IDS) expect(resolveTheme(sanitizeAppearance({ theme, colors: { up, down } })).pnlUsesCandles, `${theme} ${up}/${down}`).toBe(false);
   });
 
   it('keeps deep, clearly coloured candles as P/L colours on every theme', () => {

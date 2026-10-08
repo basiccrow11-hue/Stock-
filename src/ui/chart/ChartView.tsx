@@ -133,6 +133,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const positions = useTrading((s) => s.positions);
   const simEventCount = useTrading((s) => s.simEvents.length);
   const pickTarget = useTrading((s) => s.pickTarget);
+  const selectedDrawing = useDrawings((s) => s.selectedId);
+  const removeDrawing = useDrawings((s) => s.remove);
   const blind = session?.blind ?? false;
   const tfSeconds = TIMEFRAME_MINUTES[timeframe] * 60;
 
@@ -194,24 +196,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     syncTouch();
     stacked.addEventListener('change', syncTouch);
 
-    // A click or tap on the bare chart (not a drag that pans it) lets go of the selected drawing.
-    // Read from pointer events: the chart's own click event skips a second click within half a
-    // second, and a tap fires no DOM click.
-    let downAt: { id: number; x: number; y: number } | null = null;
-    const onDown = (e: PointerEvent) => (downAt = e.button === 0 ? { id: e.pointerId, x: e.clientX, y: e.clientY } : null);
-    const onUp = (e: PointerEvent) => {
-      const still = downAt?.id === e.pointerId && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) < 6;
-      downAt = null;
-      if (still && !useTrading.getState().pickTarget && useDrawings.getState().selectedId) useDrawings.getState().select(null);
-    };
-    el.addEventListener('pointerdown', onDown);
-    el.addEventListener('pointerup', onUp);
-
     registerSnapshotProvider(async () => snapshot(chart, el));
     return () => {
       registerSnapshotProvider(null);
-      el.removeEventListener('pointerdown', onDown);
-      el.removeEventListener('pointerup', onUp);
       stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
       chart.remove();
@@ -648,7 +635,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const geometry: ChartGeometry | null = useMemo(() => {
     const chart = chartRef.current;
     const series = candleRef.current;
-    if (!chart || !series) return null;
+    const container = containerRef.current;
+    if (!chart || !series || !container) return null;
     return {
       chart,
       series,
@@ -656,6 +644,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       tfSeconds,
       paneHeight: () => chart.panes()[0]?.getHeight() ?? 0,
       paneWidth: () => chart.timeScale().width(),
+      container,
     };
     // geometryVersion forces consumers to re-render on scroll/zoom/resize/data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -666,6 +655,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     <div className={`chart-wrap${pickTarget ? ' picking' : ''}`}>
       <div ref={containerRef} className="chart-canvas" />
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
+      {/* In the price pane's bottom corner (clear of the legend) rather than in the toolbar, where it
+          would re-wrap the toolbar and move the chart under the pointer on every select. */}
+      {geometry && selectedDrawing && (
+        <button className="btn sm danger drawing-delete" style={{ left: geometry.paneWidth() - 8, top: geometry.paneHeight() - 8 }} onClick={() => removeDrawing(selectedDrawing)} title="Delete selected drawing (Del)">
+          Delete
+        </button>
+      )}
       {lb && (
         <div className="chart-legend">
           <span className="legend-sym">{symbol}</span>

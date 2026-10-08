@@ -77,14 +77,21 @@ export function OrderTicket() {
     return () => window.removeEventListener('keydown', k);
   }, []);
 
-  useEffect(() => setResult(null), [symbol, action, type]);
+  // A new session (the ticket stays mounted) starts without the last session's order result.
+  const sessionId = session?.id;
+  useEffect(() => setResult(null), [symbol, action, type, sessionId]);
+  // The result sits below the submit button, which can be at the bottom edge of a scrolled panel.
+  const resultRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (result) resultRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [result]);
 
-  // Stop and target prices only make sense for one direction and one symbol: clear them when either changes.
+  // Stop and target prices only make sense for one direction, one symbol and one session: clear them when any changes.
   const direction = action === 'buy' || action === 'sell' ? 'long' : 'short';
   useEffect(() => {
     setSl('');
     setTp('');
-  }, [symbol, direction]);
+  }, [symbol, direction, sessionId]);
 
   // Estimated fill price used for risk math.
   const entry = useMemo(() => {
@@ -304,7 +311,7 @@ export function OrderTicket() {
         {label}
       </button>
       {result && (
-        <div className={`alert ${result.tone}`} aria-hidden="true">
+        <div ref={resultRef} className={`alert ${result.tone}`} aria-hidden="true">
           {result.text}
         </div>
       )}

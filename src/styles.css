@@ -174,7 +174,9 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   grid-template-areas: 'watch chart right' 'bottom bottom right';
   gap: 1px; background: var(--border);
 }
-.panel { background: var(--panel); min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+/* Panels and pages are the containing block of anything absolutely positioned inside them (screen
+   reader text included), so it never stretches the document and lets the whole app scroll away. */
+.panel { position: relative; background: var(--panel); min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .panel-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); min-height: 34px; }
 .panel-body { padding: 10px; overflow: auto; min-height: 0; flex: 1; }
 .area-watch { grid-area: watch; }
@@ -207,17 +209,27 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .chart-legend .neg { color: var(--chart-neg); }
 .chart-legend .muted { color: var(--chart-text); }
 .pick-hint { position: absolute; top: 34px; left: 50%; transform: translateX(-50%); background: var(--accent-2); color: var(--on-accent); padding: 4px 10px; border-radius: 999px; font-size: 12px; z-index: 4; pointer-events: none; }
-/* A finger first selects a drawing; a swipe over an unselected one scrolls the page. While a
-   drawing is selected or being placed, touch-action: none lets a finger drag instead of scroll. It
-   sits on the svg because browsers ignore it on the shapes inside; touches on the bare chart fall
-   through to the chart. */
+/* While a drawing is selected or being placed, touch-action: none lets a finger drag instead of
+   scroll. It sits on the svg because browsers ignore it on the shapes inside; touches on the bare
+   chart fall through to the chart. */
 .drawing-layer { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; overflow: hidden; }
 .drawing-layer.active, .drawing-layer.editing { touch-action: none; }
 .drawing-layer.active { pointer-events: all; cursor: crosshair; }
-.drawing-layer .shape, .drawing-layer .handle { pointer-events: visiblePainted; cursor: move; }
+.drawing-layer .shape { pointer-events: visiblePainted; cursor: move; }
+.drawing-layer .handle { pointer-events: none; }
+.drawing-layer .handle-hit { fill: transparent; pointer-events: all; cursor: move; }
 .drawing-layer .hit { stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: move; }
 .drawing-layer .shape-label { pointer-events: none; font-family: var(--mono); }
 .drawing-layer .shape-fill { pointer-events: none; }
+/* On a touch screen only the selected drawing takes touches, through a fingertip-wide outline: a
+   swipe or pinch over any other drawing pans, zooms or scrolls, and a tap picks a drawing by
+   where its lines are (DrawingLayer hitTest). */
+@media (pointer: coarse) {
+  .drawing-layer .drawing:not(.selected) .shape, .drawing-layer .drawing:not(.selected) .hit { pointer-events: none; }
+  .drawing-layer .hit { stroke-width: 24; }
+}
+.drawing-delete { position: absolute; transform: translate(-100%, -100%); z-index: 4; background: var(--panel); box-shadow: 0 2px 8px var(--shadow); }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 6px; padding-right: 6px; }
 /* While a price is being picked, every click goes to the chart, even over a drawing. */
 .chart-wrap.picking .drawing-layer, .chart-wrap.picking .drawing-layer * { pointer-events: none; }
 .chart-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 5; background: var(--panel); }
@@ -268,7 +280,7 @@ table.grid tr.clickable:focus-visible { outline: 2px solid var(--accent); outlin
 .empty h3 { color: var(--text-2); margin-bottom: 6px; text-transform: none; letter-spacing: 0; font-size: 14px; }
 
 /* ---------- cards / pages ---------- */
-.page { flex: 1; overflow: auto; padding: 16px; min-height: 0; }
+.page { position: relative; flex: 1; overflow: auto; padding: 16px; min-height: 0; }
 .page-inner { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; min-width: 0; }
 .card[tabindex='-1']:focus { outline: none; }

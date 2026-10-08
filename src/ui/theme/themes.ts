@@ -408,7 +408,13 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const decide = (m: number, held: boolean | undefined) => (held !== undefined && Math.abs(m) < PNL_HOLD_BAND ? held : m >= 0);
   // Each surface decides for itself. The panels (P/L columns, buy and sell buttons) only depend on
   // the theme, where green and red always work.
-  const pnlMargin = margin(text(c.up), text(c.down), [ui.text, ui.text2, muted]);
+  // On the panels P/L text must also sit well away from the body text in plain RGB: pastels on a
+  // dark theme pass the chroma and hue limits yet read as near-white body text. Not on the chart,
+  // where candle colours darkened for a light background sit close to its dark text in RGB yet read
+  // plainly as colours; the chart only keeps candle colours when the panels do anyway.
+  const upText = text(c.up);
+  const downText = text(c.down);
+  const pnlMargin = Math.min(margin(upText, downText, [ui.text, ui.text2, muted]), distance(upText, ui.text) / 60 - 1, distance(downText, ui.text) / 60 - 1);
   const pnlUsesCandles = a.pnlFollowsCandles && decide(pnlMargin, a.pnlHold?.panel);
   // The chart legend also depends on the chart background. Falling back there only helps when green
   // and red pass where the candles fail (a custom background can defeat both).
