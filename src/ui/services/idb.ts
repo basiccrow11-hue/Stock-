@@ -50,6 +50,29 @@ export const idb = {
   delete(store: StoreName, key: string): Promise<undefined> {
     return tx(store, 'readwrite', (s) => s.delete(key) as IDBRequest<undefined>);
   },
+  /**
+   * Read, change and write one value in a single transaction, so a write from another tab cannot
+   * land between the read and the write. `fn` returning undefined writes nothing. Resolves with the
+   * written value once the transaction has committed.
+   */
+  modify<T>(store: StoreName, key: string, fn: (current: T | undefined) => T | undefined): Promise<T | undefined> {
+    return open().then(
+      (db) =>
+        new Promise<T | undefined>((resolve, reject) => {
+          const t = db.transaction(store, 'readwrite');
+          const s = t.objectStore(store);
+          let next: T | undefined;
+          const req = s.get(key) as IDBRequest<T | undefined>;
+          req.onsuccess = () => {
+            next = fn(req.result);
+            if (next !== undefined) s.put(next, key);
+          };
+          t.oncomplete = () => resolve(next);
+          t.onerror = () => reject(t.error ?? new Error('IndexedDB request failed'));
+          t.onabort = () => reject(t.error ?? new Error('IndexedDB transaction aborted'));
+        }),
+    );
+  },
   all<T>(store: StoreName): Promise<T[]> {
     return tx<T[]>(store, 'readonly', (s) => s.getAll() as IDBRequest<T[]>);
   },

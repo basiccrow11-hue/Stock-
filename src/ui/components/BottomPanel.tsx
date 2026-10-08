@@ -48,6 +48,8 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
     { id: 'news', label: 'News (simulated)', count: simEvents.length, hide: session?.mode !== 'sim' },
     { id: 'log', label: 'Activity log' },
   ];
+  // A tab that went away (News, when a replay replaces the simulated market) falls back to Positions.
+  const shown: Tab = tabs.some((t) => t.id === tab && !t.hide) ? tab : 'positions';
 
   return (
     <div className="panel area-bottom" ref={panelRef} onFocus={(e) => (lastFocus.current = e.target)}>
@@ -55,7 +57,7 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
         {tabs
           .filter((t) => !t.hide)
           .map((t) => (
-            <button key={t.id} className={tab === t.id ? 'on' : ''} aria-pressed={tab === t.id} onClick={() => setTab(t.id)}>
+            <button key={t.id} className={shown === t.id ? 'on' : ''} aria-pressed={shown === t.id} onClick={() => setTab(t.id)}>
               {t.label}
               {t.count ? <span className="count">{t.count}</span> : null}
             </button>
@@ -64,15 +66,15 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
       <div className="panel-body">
         {!session ? (
           <EmptyState title="No active session">Start a replay or the simulated market to trade.</EmptyState>
-        ) : tab === 'positions' ? (
+        ) : shown === 'positions' ? (
           <PositionsTab />
-        ) : tab === 'orders' ? (
+        ) : shown === 'orders' ? (
           <OrdersTab orders={orders} />
-        ) : tab === 'history' ? (
+        ) : shown === 'history' ? (
           <FillsTab />
-        ) : tab === 'trades' ? (
+        ) : shown === 'trades' ? (
           <TradesTab onOpenJournal={onOpenJournal} />
-        ) : tab === 'news' ? (
+        ) : shown === 'news' ? (
           <NewsTab />
         ) : (
           <LogTab />
@@ -150,34 +152,54 @@ function PositionsTab() {
 
 type PriceField = 'limitPrice' | 'stopPrice';
 
-function OrderPriceEditor({ order }: { order: Order }) {
-  const field: PriceField | null = order.type === 'limit' || (order.type === 'stop_limit' && order.triggered) ? 'limitPrice' : order.type === 'market' ? null : 'stopPrice';
-  const current = field ? order[field] : undefined;
-  // The field being edited, fixed when editing starts: a typed price only ever goes to that field.
-  const [editing, setEditing] = useState<PriceField | null>(null);
+/** The working order's prices, each a button that edits it. A stop-limit shows both legs. */
+function OrderPrices({ order }: { order: Order }) {
+  if (order.type === 'market') return <>MKT</>;
+  if (order.type === 'limit') return <OrderPriceEditor order={order} field="limitPrice" />;
+  if (order.type === 'stop') return <OrderPriceEditor order={order} field="stopPrice" />;
+  return (
+    <span className="price-legs">
+      <span className="muted small">STP</span>
+      {/* Once triggered the stop is history and only the limit can change. */}
+      <OrderPriceEditor order={order} field="stopPrice" done={order.triggered} />
+      <span className="muted small">LMT</span>
+      <OrderPriceEditor order={order} field="limitPrice" />
+    </span>
+  );
+}
+
+function OrderPriceEditor({ order, field, done = false }: { order: Order; field: PriceField; done?: boolean }) {
+  const current = order[field];
+  const [editing, setEditing] = useState(false);
   const [val, setVal] = useState<string>('');
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   // Enter and Escape hand focus back to the price; leaving the box by clicking elsewhere does not.
   const refocus = useRef(false);
-  const open = editing !== null && editing === field;
+  /** The typed value no longer applies, so the blur that closes the box must not save it. */
+  const discard = useRef(false);
   useEffect(() => {
-    if (editing && editing !== field) {
-      // A stop-limit's stop triggered while its stop was being edited: it is now a limit order, and
-      // the typed stop must not become its limit price.
-      setEditing(null);
-      refocus.current = document.activeElement === document.body;
+    if (editing && done) {
+      // A stop-limit's stop triggered while its stop was being edited: the typed stop no longer
+      // applies. Focus moves on to the limit price, which can still be changed.
+      const input = inputRef.current;
+      discard.current = true;
+      setEditing(false);
+      if (input && document.activeElement === input) input.closest('.price-legs')?.querySelector<HTMLButtonElement>('button.price-edit')?.focus();
       toast('warning', `${order.symbol} stop triggered while you were editing it, so the change was not applied. The order is now a limit at ${price(order.limitPrice)}.`, 7000);
     }
-  }, [editing, field, order.symbol, order.limitPrice]);
+  }, [editing, done, order.symbol, order.limitPrice]);
   useEffect(() => {
     if (!editing && refocus.current) {
       refocus.current = false;
       buttonRef.current?.focus();
     }
   }, [editing]);
-  if (!field || current === undefined) return <>{order.type === 'market' ? 'MKT' : '—'}</>;
+  if (current === undefined) return <>—</>;
   const what = `${order.symbol} ${order.action} ${field === 'limitPrice' ? 'limit' : 'stop'} price`;
-  if (!open)
+  // While the box is open, the effect above closes it first (dropping the typed value).
+  if (done && !editing) return <span className="mono">{price(current)}</span>;
+  if (!editing)
     return (
       <button
         ref={buttonRef}
@@ -187,7 +209,8 @@ function OrderPriceEditor({ order }: { order: Order }) {
         aria-label={`Change ${what}, now ${price(current)}`}
         onClick={() => {
           setVal(String(current));
-          setEditing(field);
+          discard.current = false;
+          setEditing(true);
         }}
       >
         {price(current)}
@@ -195,13 +218,15 @@ function OrderPriceEditor({ order }: { order: Order }) {
     );
   const commit = () => {
     const n = Number(val);
-    setEditing(null);
+    setEditing(false);
+    if (discard.current) return;
     if (!Number.isFinite(n) || n <= 0 || n === current) return;
-    const r = modifyOrder(order.id, { [editing]: n });
+    const r = modifyOrder(order.id, { [field]: n });
     if (!r.ok) toast('error', r.error ?? 'Modify failed');
   };
   return (
     <input
+      ref={inputRef}
       autoFocus
       type="number"
       step="0.01"
@@ -219,7 +244,7 @@ function OrderPriceEditor({ order }: { order: Order }) {
         }
         if (e.key === 'Escape') {
           refocus.current = true;
-          setEditing(null);
+          setEditing(false);
         }
       }}
     />
@@ -281,7 +306,7 @@ function OrdersTab({ orders }: { orders: Order[] }) {
                 </td>
                 <td className="num">{qty(o.quantity)}</td>
                 <td className="num">{o.filledQty ? `${qty(o.filledQty)} @ ${price(o.avgFillPrice)}` : '—'}</td>
-                <td className="num">{isOpen(o) ? <OrderPriceEditor order={o} /> : orderPriceText(o)}</td>
+                <td className="num">{isOpen(o) ? <OrderPrices order={o} /> : orderPriceText(o)}</td>
                 <td>{o.tif.toUpperCase()}</td>
                 <td>
                   <span className={`badge ${o.status === 'filled' ? 'success' : o.status === 'rejected' ? 'error' : o.status === 'pending' ? 'warn' : 'neutral'}`}>{o.status.replace('_', ' ')}</span>

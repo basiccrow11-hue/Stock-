@@ -5,7 +5,7 @@
  * concrete values every surface needs: CSS variables for the app chrome and a palette for the
  * canvas charts, with text colours adjusted to stay readable whatever colours were picked.
  */
-import { chartLabelFill, chroma, contrast, distance, fillFor, hueDistance, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
+import { blendUntil, chartLabelFill, chroma, contrast, distance, fillFor, hueDistance, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
 
 export type ThemeId = 'midnight' | 'graphite' | 'light';
 export type ChartStyle = 'candles' | 'hollow' | 'bars' | 'line' | 'area';
@@ -44,6 +44,13 @@ export interface Appearance {
   lastPriceLine: boolean;
   /** Chart axis font size in px, 10..14. */
   chartFontSize: number;
+  /**
+   * The P/L colour decisions on screen when the colours last changed. While new colours sit right
+   * at the edge of the rules (within PNL_HOLD_BAND), these stand, so dragging a colour picker
+   * through shades that round either side of a limit does not flicker between candle colours and
+   * green/red. Set by the settings store (holdPnl).
+   */
+  pnlHold?: { panel: boolean; chart: boolean };
 }
 
 interface ThemeDef {
@@ -255,6 +262,7 @@ export function sanitizeAppearance(raw: unknown): Appearance {
     priceScale: oneOf(r.priceScale, ['normal', 'log', 'percent'] as const, d.priceScale),
     lastPriceLine: bool(r.lastPriceLine, d.lastPriceLine),
     chartFontSize: Math.round(range(r.chartFontSize, 10, 14, d.chartFontSize)),
+    ...(r.pnlHold && typeof r.pnlHold.panel === 'boolean' && typeof r.pnlHold.chart === 'boolean' ? { pnlHold: { panel: r.pnlHold.panel, chart: r.pnlHold.chart } } : {}),
   };
 }
 
@@ -312,8 +320,12 @@ export interface PanelChartPalette {
 
 export interface ResolvedTheme {
   scheme: 'dark' | 'light';
-  /** P/L text really uses the candle colours (false when they are too grey or too alike to tell apart). */
+  /** P/L text on the panels really uses the candle colours (false when they are too grey or too alike to tell apart). */
   pnlUsesCandles: boolean;
+  /** The chart legend's P/L uses them too (false when they would be hard to read on the chart background). */
+  chartPnlUsesCandles: boolean;
+  /** How far the candle colours are inside (positive) or outside the panel P/L rules, as a share of the nearest limit. */
+  pnlMargin: number;
   vars: Record<string, string>;
   chart: ChartPalette;
   panel: PanelChartPalette;
@@ -327,11 +339,19 @@ export const COLOURFUL = 0.04;
 
 /**
  * How far P/L text must differ in colour (hueDistance, lightness ignored) from the neutral text
- * around it. The greys are slightly bluish, so a greyish blue can pass COLOURFUL and still read as
- * one more muted label (#5f6982 next to #62697b: 0.012). Clear blues sit at 0.045 and up (Tableau
- * blue on Midnight, Okabe-Ito sky blue on Light), which colour-blind users rely on.
+ * around it. The greys are slightly bluish, so a greyish blue or periwinkle can pass COLOURFUL and
+ * still read as one more muted label (#5f6982 next to #62697b: 0.012; #616790: 0.036). Clear blues
+ * sit at 0.045 and up (Tableau blue on Midnight, Okabe-Ito sky blue on Light), which colour-blind
+ * users rely on.
  */
-export const NEUTRAL_GAP = 0.035;
+export const NEUTRAL_GAP = 0.042;
+
+/**
+ * Within this share of a P/L colour limit (chroma, neutral gap, up/down distance), a decision
+ * already on screen stands (Appearance.pnlHold). Near-grey text sits on few whole RGB values, and a
+ * one-step change moves its chroma by up to about 5% of COLOURFUL.
+ */
+export const PNL_HOLD_BAND = 0.06;
 
 /** Badges and alerts tint their background with this much of their text colour (see styles.css). */
 export const BADGE_TINT = 0.11;
@@ -369,7 +389,10 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   // Coloured text sits on the panel, the raised panels, hovered controls (a danger button, the
   // streak chip), the selected row and the tint badges use.
   const surfaces = [ui.panel2, ui.panel3, ui.hover, rowSelected];
-  const text = (hue: string) => toneText(readableOnAll(hue, surfaces), ui.panel);
+  // Readable on all of them and on its own badge tint, found in one search: rounding only once keeps
+  // neighbouring shades of a colour on neighbouring results (the P/L rules below depend on that).
+  const onAll = (x: string) => [ui.panel, ...surfaces].every((s) => contrast(x, s) >= 4.5) && contrast(x, mix(ui.panel, x, BADGE_TINT)) >= 4.5;
+  const text = (hue: string) => blendUntil(hue, ui.panel, onAll) ?? toneText(readableOnAll(hue, surfaces), ui.panel);
   const muted = readableOnAll(ui.muted, [ui.panel, ...surfaces]);
   const bg = c.background;
   // Candle colours only work as P/L colours when the text actually drawn with them (darkened or
@@ -378,16 +401,23 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   // standard green and red. Colourfulness is OKLCH chroma: HSL saturation would call a deep green
   // lightened for a dark panel "grey" (#1b5e20 becomes #719b74, saturation 0.17), though it still
   // plainly reads as green. `neutrals` is the text P/L sits among, body text first.
-  const standsOut = (x: string, neutrals: string[]) =>
-    chroma(x) >= COLOURFUL && distance(x, neutrals[0]) >= 60 && neutrals.every((n) => hueDistance(x, n) >= NEUTRAL_GAP);
-  const tellApart = (x: string, y: string, neutrals: string[]) => distance(x, y) >= 60 && standsOut(x, neutrals) && standsOut(y, neutrals);
-  const pnlWorks = (up: string, down: string) =>
-    tellApart(text(up), text(down), [ui.text, ui.text2, muted]) && tellApart(readable(up, bg, 4.5), readable(down, bg, 4.5), [readable(ui.text, bg, 7)]);
-  // Falling back only helps when green and red pass where the candles fail (a custom chart
-  // background can defeat both); otherwise the user's colours stay.
-  const pnlUsesCandles = a.pnlFollowsCandles && (pnlWorks(c.up, c.down) || !pnlWorks(LABEL_HUES.pos, LABEL_HUES.neg));
+  // How far a pair of P/L colours is inside (positive) or outside (negative) those rules, as a share
+  // of each limit: both colourful, apart from each other and from every neutral.
+  const margin = (x: string, y: string, neutrals: string[]) =>
+    Math.min(distance(x, y) / 60 - 1, ...[x, y].flatMap((v) => [chroma(v) / COLOURFUL - 1, ...neutrals.map((n) => hueDistance(v, n) / NEUTRAL_GAP - 1)]));
+  const decide = (m: number, held: boolean | undefined) => (held !== undefined && Math.abs(m) < PNL_HOLD_BAND ? held : m >= 0);
+  // Each surface decides for itself. The panels (P/L columns, buy and sell buttons) only depend on
+  // the theme, where green and red always work.
+  const pnlMargin = margin(text(c.up), text(c.down), [ui.text, ui.text2, muted]);
+  const pnlUsesCandles = a.pnlFollowsCandles && decide(pnlMargin, a.pnlHold?.panel);
+  // The chart legend also depends on the chart background. Falling back there only helps when green
+  // and red pass where the candles fail (a custom background can defeat both).
+  const chartMargin = (up: string, down: string) => margin(readable(up, bg, 4.5), readable(down, bg, 4.5), [readable(ui.text, bg, 7)]);
+  const chartPnlUsesCandles = pnlUsesCandles && (decide(chartMargin(c.up, c.down), a.pnlHold?.chart) || chartMargin(LABEL_HUES.pos, LABEL_HUES.neg) < 0);
   const posHue = pnlUsesCandles ? c.up : LABEL_HUES.pos;
   const negHue = pnlUsesCandles ? c.down : LABEL_HUES.neg;
+  const chartPosHue = chartPnlUsesCandles ? c.up : LABEL_HUES.pos;
+  const chartNegHue = chartPnlUsesCandles ? c.down : LABEL_HUES.neg;
   const buyBg = fillFor('#ffffff', posHue, 4.5);
   const sellBg = fillFor('#ffffff', negHue, 4.5);
   const accentUi = readable(a.accent, ui.panel, 3);
@@ -440,8 +470,8 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--legend-bg': withAlpha(bg, 0.82),
     '--chart-text': axisText,
     '--chart-strong': readable(ui.text, bg, 7),
-    '--chart-pos': readable(posHue, bg, 4.5),
-    '--chart-neg': readable(negHue, bg, 4.5),
+    '--chart-pos': readable(chartPosHue, bg, 4.5),
+    '--chart-neg': readable(chartNegHue, bg, 4.5),
     '--streak': text('#ff8a3d'),
     '--freeze': text('#5ec8f2'),
     'color-scheme': t.scheme,
@@ -496,5 +526,13 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     borderDown: c.borderDown,
   };
 
-  return { scheme: t.scheme, pnlUsesCandles, vars, chart, panel };
+  return { scheme: t.scheme, pnlUsesCandles, chartPnlUsesCandles, pnlMargin, vars, chart, panel };
+}
+
+/** The next appearance, carrying the P/L decisions now on screen (see Appearance.pnlHold). */
+export function holdPnl(prev: Appearance, next: Appearance): Appearance {
+  const { pnlHold: _, ...rest } = next;
+  if (!prev.pnlFollowsCandles || !next.pnlFollowsCandles) return rest;
+  const r = resolveTheme(prev);
+  return { ...rest, pnlHold: { panel: r.pnlUsesCandles, chart: r.chartPnlUsesCandles } };
 }

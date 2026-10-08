@@ -13,6 +13,7 @@ import {
   candlePresets,
   defaultLineColor,
   sanitizeAppearance,
+  holdPnl,
   themeChartSurface,
   type Appearance,
   type ChartColors,
@@ -136,7 +137,7 @@ export const useSettings = create<SettingsStore>()(
             const c = s.appearance.colors;
             next.colors = { ...c, wickUp: c.up, borderUp: c.up, wickDown: c.down, borderDown: c.down };
           }
-          return { appearance: sanitizeAppearance(next) };
+          return { appearance: holdPnl(s.appearance, sanitizeAppearance(next)) };
         }),
       setChartColor: (key, value) =>
         set((s) => {
@@ -144,7 +145,7 @@ export const useSettings = create<SettingsStore>()(
           const colors = { ...a.colors, [key]: value };
           if (a.linkCandleParts && key === 'up') Object.assign(colors, { wickUp: value, borderUp: value });
           if (a.linkCandleParts && key === 'down') Object.assign(colors, { wickDown: value, borderDown: value });
-          return { appearance: sanitizeAppearance({ ...a, colors }) };
+          return { appearance: holdPnl(a, sanitizeAppearance({ ...a, colors })) };
         }),
       applyTheme: (theme) =>
         set((s) => {
@@ -155,14 +156,14 @@ export const useSettings = create<SettingsStore>()(
           const now = was && candlePresets(THEMES[theme].scheme).find((p) => p.id === was.id);
           if (now && a.linkCandleParts) Object.assign(colors, { up: now.up, down: now.down, wickUp: now.up, wickDown: now.down, borderUp: now.up, borderDown: now.down });
           if (a.colors.line === defaultLineColor(THEMES[a.theme].scheme)) colors.line = defaultLineColor(THEMES[theme].scheme);
-          return { appearance: sanitizeAppearance({ ...a, theme, colors }) };
+          return { appearance: holdPnl(a, sanitizeAppearance({ ...a, theme, colors })) };
         }),
       applyCandlePreset: (presetId) =>
         set((s) => {
           const p = candlePresets(THEMES[s.appearance.theme].scheme).find((x) => x.id === presetId);
           if (!p) return {};
           const colors = { ...s.appearance.colors, up: p.up, down: p.down, wickUp: p.up, wickDown: p.down, borderUp: p.up, borderDown: p.down };
-          return { appearance: sanitizeAppearance({ ...s.appearance, colors, linkCandleParts: true }) };
+          return { appearance: holdPnl(s.appearance, sanitizeAppearance({ ...s.appearance, colors, linkCandleParts: true })) };
         }),
       resetAppearance: () => set({ appearance: DEFAULT_APPEARANCE }),
       reset: () => set({ ...DEFAULT_SETTINGS }),

@@ -82,6 +82,25 @@ export function readable(fg: string, bg: string, min = 4.5): string {
 }
 
 /**
+ * Blend `fg` toward white (on a dark `bg`) or black (on a light one) just far enough for `ok` to
+ * accept it, in one search, so the result is rounded once instead of after every adjustment. `ok`
+ * must only get easier to satisfy further along. Null when even pure white or black is refused.
+ */
+export function blendUntil(fg: string, bg: string, ok: (c: string) => boolean): string | null {
+  if (ok(normHex(fg))) return normHex(fg);
+  const target = isDark(bg) ? '#ffffff' : '#000000';
+  if (!ok(target)) return null;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 18; i++) {
+    const mid = (lo + hi) / 2;
+    if (ok(mix(fg, target, mid))) hi = mid;
+    else lo = mid;
+  }
+  return mix(fg, target, hi);
+}
+
+/**
  * How colourful a colour looks: OKLCH chroma, about 0 for greys and 0.1 to 0.3 for clear colours.
  * Unlike HSL saturation it does not collapse when a colour is lightened, so a deep green made
  * lighter for contrast still counts as green.

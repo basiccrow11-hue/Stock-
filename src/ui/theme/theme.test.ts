@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chartLabelFill, chartLabelText, chroma, contrast, deltaE, distance, fillFor, hueDistance, isHex, mix, normHex, parseHex, readable, toHex, withAlpha } from './color';
-import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, NEUTRAL_GAP, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
+import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, NEUTRAL_GAP, THEMES, THEME_IDS, candlePresets, holdPnl, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
 import { lastPriceColor } from '../chart/chartTheme';
 
 describe('colour helpers', () => {
@@ -204,11 +204,72 @@ describe('appearance', () => {
     expect(resolveTheme(sanitizeAppearance({ theme: 'graphite', colors: { background: '#5d606b' } })).pnlUsesCandles).toBe(true);
   });
 
+  it('decides P/L colours for the panels and the chart legend separately', () => {
+    // The panels never take monochrome or identical candles, whatever the chart background does to green and red.
+    for (const background of ['#cccccc', '#c0c0c0', '#9e9e9e', '#787b86']) {
+      const standard = resolveTheme(sanitizeAppearance({ theme: 'midnight', pnlFollowsCandles: false, colors: { background } }));
+      for (const [up, down] of [
+        ['#d1d4dc', '#5d606b'],
+        ['#2962ff', '#2962ff'],
+      ]) {
+        const r = resolveTheme(sanitizeAppearance({ theme: 'midnight', colors: { up, down, background } }));
+        expect(r.pnlUsesCandles, `${background} ${up}/${down}`).toBe(false);
+        expect(r.vars['--pos']).toBe(standard.vars['--pos']);
+        expect(r.vars['--neg']).toBe(standard.vars['--neg']);
+      }
+    }
+    // Plainly green and red candles stay on a near-white chart.
+    for (const background of ['#ffffff', '#fafafa', '#f0f3fa', '#e0e3eb'])
+      expect(resolveTheme(sanitizeAppearance({ theme: 'midnight', colors: { up: '#4caf50', down: '#f44336', background } })).chartPnlUsesCandles, background).toBe(true);
+    // Yellows that are distinct on a dark panel but too alike darkened for a white chart: the panels
+    // keep them, the chart legend shows green and red.
+    const r = resolveTheme(sanitizeAppearance({ theme: 'midnight', colors: { up: '#a7ae28', down: '#e7fb0f', background: '#ffffff' } }));
+    expect(r.pnlUsesCandles).toBe(true);
+    expect(r.chartPnlUsesCandles).toBe(false);
+    expect(r.vars['--chart-pos']).toBe(readable('#26a69a', '#ffffff', 4.5));
+  });
+
+  it('keeps the P/L decision on screen while a colour picker drags through shades at the edge of the rules', () => {
+    const hsv = (h: number, s: number, v: number) => {
+      const f = (n: number) => {
+        const k = (n + h / 60) % 6;
+        return Math.round((v - v * s * Math.max(0, Math.min(k, 4 - k, 1))) * 255);
+      };
+      return toHex([f(5), f(3), f(1)]);
+    };
+    // Dragging brightness at a fixed hue: these all darken to nearly the same greyish text, which
+    // rounds either side of the limits.
+    for (const [theme, h, s] of [
+      ['light', 160, 0.3],
+      ['light', 110, 0.2],
+      ['midnight', 70, 0.15],
+      ['graphite', 80, 0.15],
+    ] as const)
+      for (const dir of [1, -1]) {
+        let a = sanitizeAppearance({ theme, colors: { up: hsv(h, s, dir > 0 ? 0.1 : 1), down: '#ff9800' } });
+        let prev = resolveTheme(a).pnlUsesCandles;
+        let flips = 0;
+        for (let i = 1; i <= 90; i++) {
+          a = holdPnl(a, sanitizeAppearance({ ...a, colors: { ...a.colors, up: hsv(h, s, dir > 0 ? 0.1 + i * 0.01 : 1 - i * 0.01) } }));
+          const now = resolveTheme(a).pnlUsesCandles;
+          if (now !== prev) flips++;
+          prev = now;
+        }
+        expect(flips, `${theme} h${h} s${s} ${dir > 0 ? 'up' : 'down'}`).toBeLessThanOrEqual(2);
+      }
+    // A held decision only counts at the edge: clear cases are decided on their merits.
+    expect(resolveTheme(sanitizeAppearance({ colors: { up: '#d1d4dc', down: '#5d606b' }, pnlHold: { panel: true, chart: true } })).pnlUsesCandles).toBe(false);
+    expect(resolveTheme(sanitizeAppearance({ colors: { up: '#2962ff', down: '#ff9800' }, pnlHold: { panel: false, chart: false } })).pnlUsesCandles).toBe(true);
+    expect(sanitizeAppearance({ pnlHold: { panel: 'yes' } }).pnlHold).toBeUndefined();
+  });
+
   it('falls back when P/L text would look like the grey labels next to it', () => {
     // Greyish blues are colourful enough on their own but read as one more muted label.
     for (const [theme, up] of [
       ['light', '#8899bb'],
       ['light', '#bbccff'],
+      ['light', '#909cd8'],
+      ['light', '#81d4fa'],
       ['midnight', '#002255'],
       ['midnight', '#446688'],
       ['midnight', '#8899bb'],

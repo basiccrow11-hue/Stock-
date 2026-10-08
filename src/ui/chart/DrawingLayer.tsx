@@ -62,14 +62,16 @@ function projector(g: ChartGeometry): Projector {
   };
 }
 
-type DragState = { id: string; pointIndex: number | 'all'; startX: number; startY: number; orig: DrawPoint[] } | null;
+type DragState = { id: string; pointerId: number; pointIndex: number | 'all'; startX: number; startY: number; orig: DrawPoint[] } | null;
 
 export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; version: number }) {
-  const { tool, drawings, selectedId, color, add, update, remove, select, setTool } = useDrawings();
+  const { tool, drawings, selectedId, color, add, update, remove, select, setTool, symbol } = useDrawings();
   const [pending, setPending] = useState<DrawPoint[]>([]);
   const [hover, setHover] = useState<DrawPoint | null>(null);
   const [drag, setDrag] = useState<DragState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  /** A finger or pen down on a drawing that is not selected: a tap (lifted in place) selects it. */
+  const tapRef = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
   const background = useSettings((s) => s.appearance.colors.background);
   void version;
 
@@ -97,7 +99,11 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId, remove, select, setTool, tool]);
 
-  useEffect(() => setPending([]), [tool]);
+  // A half-placed drawing belongs to the tool and symbol it was started on.
+  useEffect(() => {
+    setPending([]);
+    setHover(null);
+  }, [tool, symbol]);
 
   const pointFromEvent = (e: React.PointerEvent): DrawPoint | null => {
     const rect = svgRef.current!.getBoundingClientRect();
@@ -109,7 +115,8 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (tool === 'select') return;
+    // Only the main button or first finger places points: not a right-click, nor the second finger of a pinch.
+    if (tool === 'select' || e.button !== 0 || !e.isPrimary) return;
     const pt = pointFromEvent(e);
     if (!pt) return;
     const needed = POINTS_NEEDED[tool as DrawingType];
@@ -125,6 +132,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (drag) {
+      if (e.pointerId !== drag.pointerId) return;
       const rect = svgRef.current!.getBoundingClientRect();
       const dx = e.clientX - rect.left;
       const dy = e.clientY - rect.top;
@@ -144,15 +152,29 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   };
 
   const startDrag = (e: React.PointerEvent, d: Drawing, pointIndex: number | 'all') => {
-    if (tool !== 'select' || e.button !== 0) return;
+    if (tool !== 'select' || e.button !== 0 || !e.isPrimary || drag) return;
     e.stopPropagation();
+    // A finger or pen first taps a drawing to select it and only moves a selected one, so a swipe
+    // that starts on a drawing scrolls the page instead of moving or selecting it (see
+    // .drawing-layer.editing).
+    if (e.pointerType !== 'mouse' && d.id !== selectedId) {
+      tapRef.current = { id: d.id, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+      return;
+    }
     select(d.id);
     const rect = svgRef.current!.getBoundingClientRect();
     (e.target as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ id: d.id, pointIndex, startX: e.clientX - rect.left, startY: e.clientY - rect.top, orig: d.points });
+    setDrag({ id: d.id, pointerId: e.pointerId, pointIndex, startX: e.clientX - rect.left, startY: e.clientY - rect.top, orig: d.points });
   };
 
-  const endDrag = () => setDrag(null);
+  const endDrag = (e: React.PointerEvent) => {
+    const tap = tapRef.current;
+    if (tap && tap.pointerId === e.pointerId) {
+      tapRef.current = null;
+      if (e.type === 'pointerup' && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 10) select(tap.id);
+    }
+    setDrag((cur) => (cur && cur.pointerId === e.pointerId ? null : cur));
+  };
 
   const preview: Drawing | null =
     tool !== 'select' && pending.length && hover ? { id: 'preview', type: tool as DrawingType, points: [...pending, hover], color } : null;
@@ -160,7 +182,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   return (
     <svg
       ref={svgRef}
-      className={`drawing-layer${tool !== 'select' ? ' active' : ''}`}
+      className={`drawing-layer${tool !== 'select' ? ' active' : ''}${selectedId ? ' editing' : ''}`}
       width={width}
       height={height}
       onPointerDown={onPointerDown}
@@ -295,7 +317,9 @@ function Shape({
             return (
               <g key={lvl}>
                 <line x1={left} x2={right} y1={y} y2={y} stroke={d.color} strokeWidth={lvl === 0.5 || lvl === 0.618 ? 1.25 : 0.75} opacity={0.9} />
-                <line x1={left} x2={right} y1={y} y2={y} className="hit" onPointerDown={(e) => onDragStart(e, d, 'all')} />
+                {/* Levels are grabbable only once selected: until then the crosshair, legend and
+                    wheel zoom keep working where prices are read. */}
+                {selected && <line x1={left} x2={right} y1={y} y2={y} className="hit" onPointerDown={(e) => onDragStart(e, d, 'all')} />}
                 {label(right + 4, y + 3, `${(lvl * 100).toFixed(1)}%  ${fmtPrice(pr)}`)}
               </g>
             );

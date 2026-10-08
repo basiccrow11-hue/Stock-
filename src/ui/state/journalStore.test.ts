@@ -3,7 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_NOTES, type JournalEntry } from '../../core/journal';
 
 vi.mock('../services/idb', () => ({
-  idb: { all: async () => [], set: async () => undefined, delete: async () => undefined, get: async () => undefined },
+  idb: {
+    all: async () => [],
+    set: async () => undefined,
+    delete: async () => undefined,
+    get: async () => undefined,
+    modify: async (_s: string, _k: string, fn: (v: unknown) => unknown) => fn(undefined),
+  },
 }));
 
 afterEach(() => {
@@ -43,6 +49,11 @@ describe('journal in two tabs', () => {
           get: async (_s: string, k: string) => db.get(k),
           set: async (_s: string, k: string, v: unknown) => void db.set(k, structuredClone(v)),
           delete: async (_s: string, k: string) => void db.delete(k),
+          modify: async (_s: string, k: string, fn: (v: unknown) => unknown) => {
+            const next = fn(structuredClone(db.get(k)));
+            if (next !== undefined) db.set(k, structuredClone(next));
+            return next;
+          },
         },
       };
     });

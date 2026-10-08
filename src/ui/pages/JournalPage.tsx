@@ -4,6 +4,7 @@ import { useJournal } from '../state/journalStore';
 import { EmptyState, SourceBadge, rowAction } from '../components/common';
 import { JournalEntryDetail } from '../components/JournalEntryDetail';
 import { dateTime, pnlClass, signedMoney } from '../services/format';
+import { takeFocusRequest } from '../services/focusRequest';
 import type { JournalEntry } from '../../core/journal';
 
 function download(name: string, text: string, type: string) {
@@ -64,6 +65,11 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
   useEffect(() => {
     if (focusId) setSelected(focusId);
   }, [focusId]);
+  // Opened from a closed trade's Journal button: focus lands on that trade's row.
+  const rowsRef = useRef<HTMLTableSectionElement>(null);
+  useEffect(() => {
+    if (loaded && takeFocusRequest('journal')) rowsRef.current?.querySelector<HTMLElement>('tr[aria-current="true"]')?.focus();
+  }, [loaded]);
 
   const list = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -129,7 +135,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
               </div>
               <div style={{ maxHeight: '70vh', overflow: 'auto' }}>
                 <table className="grid">
-                  <tbody>
+                  <tbody ref={rowsRef}>
                     {list.map((e) => (
                       <tr
                         key={e.id}

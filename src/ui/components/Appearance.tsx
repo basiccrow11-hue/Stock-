@@ -321,7 +321,7 @@ export function AppearanceCard() {
   const a = useSettings((s) => s.appearance);
   const update = useSettings((s) => s.updateAppearance);
   const reset = useSettings((s) => s.resetAppearance);
-  const pnlUsesCandles = useTheme().pnlUsesCandles;
+  const { pnlUsesCandles, chartPnlUsesCandles } = useTheme();
   const cardRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // The settings page loads lazily, so this runs whenever it arrives, however slow the network.
@@ -380,6 +380,11 @@ export function AppearanceCard() {
       {a.pnlFollowsCandles && !pnlUsesCandles && (
         <p className="small muted" style={{ margin: 0 }}>
           These candle colours would be hard to tell from each other or from the grey text around them, so profit and loss stays green and red.
+        </p>
+      )}
+      {a.pnlFollowsCandles && pnlUsesCandles && !chartPnlUsesCandles && (
+        <p className="small muted" style={{ margin: 0 }}>
+          On this chart background these candle colours would be hard to read as profit and loss, so the chart legend shows it in green and red.
         </p>
       )}
       <p className="small muted" style={{ margin: 0 }}>

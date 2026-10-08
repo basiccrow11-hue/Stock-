@@ -121,7 +121,7 @@ export function IndicatorMenu() {
               </div>
             ))}
             <div className="row" style={{ borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-              <select value={addType} onChange={(e) => setAddType(e.target.value as IndicatorType)}>
+              <select value={addType} onChange={(e) => setAddType(e.target.value as IndicatorType)} aria-label="Indicator to add">
                 {(Object.keys(LABEL) as IndicatorType[]).map((t) => (
                   <option key={t} value={t}>
                     {LABEL[t]}

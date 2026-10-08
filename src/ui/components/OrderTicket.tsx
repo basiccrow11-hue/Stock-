@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
 import { assessRisk, positionSizeForRisk } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
@@ -53,7 +53,9 @@ export function OrderTicket() {
   const [ext, setExt] = useState(false);
   const [tag, setTag] = useState('');
   const [riskPct, setRiskPct] = useState(String(rules.maxRiskPctPerTrade));
-  const [result, setResult] = useState<{ tone: 'error' | 'success'; text: string } | null>(null);
+  const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; n: number } | null>(null);
+  const resultSeq = useRef(0);
+  const setResult = (r: { tone: 'error' | 'success'; text: string } | null) => setResultState(r && { ...r, n: ++resultSeq.current });
 
   const position = positions.find((p) => p.symbol === symbol);
   const last = quote?.last;
@@ -153,9 +155,16 @@ export function OrderTicket() {
     for (const w of r.warnings.slice(0, -1)) if (!w.startsWith('No stop loss')) toast('warning', w, 6000);
   };
 
-  const pickBtn = (field: PriceField) => (
-    <button className={`btn sm${pickTarget === field ? ' active' : ''}`} title="Pick price from chart" onClick={() => setPickTarget(pickTarget === field ? null : field)}>
-      ⌖
+  /** Pick-from-chart button. The field's input carries its own name, so the button's never joins it. */
+  const pickBtn = (field: PriceField, name: string) => (
+    <button
+      className={`btn sm${pickTarget === field ? ' active' : ''}`}
+      title="Pick price from chart"
+      aria-label={`Pick ${name} from chart`}
+      aria-pressed={pickTarget === field}
+      onClick={() => setPickTarget(pickTarget === field ? null : field)}
+    >
+      <span aria-hidden="true">⌖</span>
     </button>
   );
 
@@ -200,8 +209,8 @@ export function OrderTicket() {
           <label className="field">
             Stop (trigger) price
             <span className="price-input">
-              <input type="number" step={0.01} value={stop} onChange={(e) => setStop(e.target.value)} placeholder={fmtPrice(last)} />
-              {pickBtn('stop')}
+              <input type="number" step={0.01} value={stop} onChange={(e) => setStop(e.target.value)} placeholder={fmtPrice(last)} aria-label="Stop (trigger) price" />
+              {pickBtn('stop', 'stop price')}
             </span>
           </label>
         )}
@@ -209,8 +218,8 @@ export function OrderTicket() {
           <label className="field">
             Limit price
             <span className="price-input">
-              <input type="number" step={0.01} value={limit} onChange={(e) => setLimit(e.target.value)} placeholder={fmtPrice(last)} />
-              {pickBtn('limit')}
+              <input type="number" step={0.01} value={limit} onChange={(e) => setLimit(e.target.value)} placeholder={fmtPrice(last)} aria-label="Limit price" />
+              {pickBtn('limit', 'limit price')}
             </span>
           </label>
         )}
@@ -219,15 +228,15 @@ export function OrderTicket() {
             <label className="field">
               Stop loss
               <span className="price-input">
-                <input type="number" step={0.01} value={sl} onChange={(e) => setSl(e.target.value)} placeholder="optional" />
-                {pickBtn('stopLoss')}
+                <input type="number" step={0.01} value={sl} onChange={(e) => setSl(e.target.value)} placeholder="optional" aria-label="Stop loss" />
+                {pickBtn('stopLoss', 'stop loss')}
               </span>
             </label>
             <label className="field">
               Take profit
               <span className="price-input">
-                <input type="number" step={0.01} value={tp} onChange={(e) => setTp(e.target.value)} placeholder="optional" />
-                {pickBtn('takeProfit')}
+                <input type="number" step={0.01} value={tp} onChange={(e) => setTp(e.target.value)} placeholder="optional" aria-label="Take profit" />
+                {pickBtn('takeProfit', 'take profit')}
               </span>
             </label>
           </>
@@ -236,7 +245,7 @@ export function OrderTicket() {
       {opening && (
         <div className="row" style={{ gap: 4 }}>
           <span className="muted small">Size for</span>
-          <input type="number" step={0.25} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} />
+          <input type="number" step={0.25} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} aria-label="Risk per trade, percent of account" />
           <span className="muted small">% risk</span>
           <button className="btn sm" onClick={sizeByRisk}>
             Size
@@ -294,7 +303,15 @@ export function OrderTicket() {
       <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || !!risk?.errors.length}>
         {label}
       </button>
-      {result && <div className={`alert ${result.tone}`}>{result.text}</div>}
+      {result && (
+        <div className={`alert ${result.tone}`} aria-hidden="true">
+          {result.text}
+        </div>
+      )}
+      {/* Screen readers hear the outcome of every submit, the same message twice included. */}
+      <div className="sr-only" role="status">
+        {result && <span key={result.n}>{result.text}</span>}
+      </div>
 
       {position && (
         <div className="risk-box" style={{ gridTemplateColumns: '1fr auto' }}>

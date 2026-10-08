@@ -46,7 +46,7 @@ export function toChartTime(t: number): UTCTimestamp {
 }
 
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
-const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 520px)';
+const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
 interface IndicatorSeries {
   cfg: IndicatorConfig;
@@ -194,9 +194,24 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     syncTouch();
     stacked.addEventListener('change', syncTouch);
 
+    // A click or tap on the bare chart (not a drag that pans it) lets go of the selected drawing.
+    // Read from pointer events: the chart's own click event skips a second click within half a
+    // second, and a tap fires no DOM click.
+    let downAt: { id: number; x: number; y: number } | null = null;
+    const onDown = (e: PointerEvent) => (downAt = e.button === 0 ? { id: e.pointerId, x: e.clientX, y: e.clientY } : null);
+    const onUp = (e: PointerEvent) => {
+      const still = downAt?.id === e.pointerId && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) < 6;
+      downAt = null;
+      if (still && !useTrading.getState().pickTarget && useDrawings.getState().selectedId) useDrawings.getState().select(null);
+    };
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointerup', onUp);
+
     registerSnapshotProvider(async () => snapshot(chart, el));
     return () => {
       registerSnapshotProvider(null);
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointerup', onUp);
       stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
       chart.remove();

@@ -26,14 +26,44 @@ async function stored(id: string): Promise<JournalEntry | undefined> {
   return idb.get<JournalEntry>('journal', id).catch(() => undefined);
 }
 
+/** This tab's journal writes still in flight, per entry. */
+const inflight = new Map<string, number>();
+
+/**
+ * Show `optimistic` at once, then apply `change` to the stored copy in one transaction, so fields
+ * another tab saved meanwhile are kept. Writes to one entry land in the order they were made, and
+ * the list takes the stored result only after the last of them, so an older write never puts back
+ * text the user has typed since. If storage fails the change applies to this tab's copy only.
+ */
+async function write(id: string, before: JournalEntry, optimistic: JournalEntry, change: (cur: JournalEntry) => JournalEntry): Promise<JournalEntry> {
+  replace(id, optimistic);
+  inflight.set(id, (inflight.get(id) ?? 0) + 1);
+  let next: JournalEntry;
+  try {
+    next = (await idb.modify<JournalEntry>('journal', id, (cur) => change(cur ?? before))) ?? optimistic;
+    announce(id);
+  } catch (err) {
+    useJournal.setState({ error: (err as Error).message });
+    next = change(before);
+  }
+  const left = (inflight.get(id) ?? 1) - 1;
+  if (left > 0) inflight.set(id, left);
+  else {
+    inflight.delete(id);
+    // Not when the entry was deleted here meanwhile (its delete lands after this write).
+    if (useJournal.getState().entries.some((e) => e.id === id)) replace(id, next);
+  }
+  return next;
+}
+
 interface JournalStore {
   entries: JournalEntry[];
   loaded: boolean;
   error: string | null;
   load: () => Promise<void>;
   add: (e: JournalEntry) => Promise<void>;
-  update: (id: string, patch: Partial<JournalEntry>) => Promise<void>;
-  updateNotes: (id: string, notes: Partial<JournalNotes>) => Promise<void>;
+  /** Save note fields and/or the tag. Fields equal to this tab's copy are left alone. */
+  updateNotes: (id: string, notes: Partial<JournalNotes>, tag?: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   removeWhere: (pred: (e: JournalEntry) => boolean) => Promise<number>;
 }
@@ -60,34 +90,24 @@ export const useJournal = create<JournalStore>()((set, get) => ({
       set({ error: (err as Error).message });
     }
   },
-  update: async (id, patch) => {
-    const entry = get().entries.find((e) => e.id === id);
-    if (!entry) return;
-    // Shown at once, then applied to the stored copy, which another tab may have changed meanwhile.
-    replace(id, { ...entry, ...patch });
-    try {
-      const next = { ...((await stored(id)) ?? entry), ...patch };
-      await idb.set('journal', id, next);
-      replace(id, next);
-      announce(id);
-    } catch (err) {
-      set({ error: (err as Error).message });
-    }
-  },
-  updateNotes: async (id, notes) => {
+  updateNotes: async (id, notes, tag) => {
     const entry = get().entries.find((e) => e.id === id);
     if (!entry) return;
     // Only the fields edited here: another tab may have written the others.
-    const changed = (Object.keys(notes) as (keyof JournalNotes)[]).filter((k) => notes[k] !== undefined && notes[k] !== entry.notes[k]);
-    if (!changed.length) return;
-    const base = (await stored(id)) ?? entry;
-    const next = { ...base.notes, ...Object.fromEntries(changed.map((k) => [k, notes[k]])) };
-    // The first note written on a trade counts as a review for the daily practice summary, once a
-    // day: clearing the notes and writing them again is still the same review.
+    const keys = (Object.keys(notes) as (keyof JournalNotes)[]).filter((k) => notes[k] !== undefined && notes[k] !== entry.notes[k]);
+    const edits = Object.fromEntries(keys.map((k) => [k, notes[k]])) as Partial<JournalNotes>;
+    const retag = tag !== undefined && tag !== entry.tag ? { tag } : {};
+    if (!keys.length && !('tag' in retag)) return;
     const today = dayKey(new Date());
-    const reviewed = !hasNotes(base.notes) && hasNotes(next) && base.reviewedOn !== today;
+    let reviewed = false;
+    await write(id, entry, { ...entry, ...retag, notes: { ...entry.notes, ...edits } }, (cur) => {
+      const merged = { ...cur.notes, ...edits };
+      // The first note written on a trade counts as a review for the daily practice summary, once
+      // a day: clearing the notes and writing them again is still the same review.
+      reviewed = !hasNotes(cur.notes) && hasNotes(merged) && cur.reviewedOn !== today;
+      return { ...cur, ...retag, notes: merged, ...(reviewed ? { reviewedOn: today } : {}) };
+    });
     if (reviewed) recordReview();
-    await get().update(id, reviewed ? { notes: next, reviewedOn: today } : { notes: next });
   },
   remove: async (id) => {
     const entry = get().entries.find((e) => e.id === id);
@@ -114,5 +134,7 @@ export async function loadSnapshot(key: string): Promise<string | undefined> {
 channel?.addEventListener('message', (e: MessageEvent) => {
   if (typeof e.data !== 'string' || !useJournal.getState().loaded) return;
   const id = e.data;
+  // This tab's own write in flight reads the stored copy, other tab's change included, when it lands.
+  if (inflight.has(id)) return;
   void stored(id).then((entry) => replace(id, entry));
 });

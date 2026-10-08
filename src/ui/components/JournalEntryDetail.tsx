@@ -23,23 +23,27 @@ const NOTE_FIELDS: { key: keyof JournalNotes; label: string }[] = [
 
 const EXIT_LABEL: Record<string, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual exit', other: 'Other' };
 
+/** The note fields that differ from what the editor last took in from the store. */
+function edited(notes: JournalNotes, base: JournalNotes): Partial<JournalNotes> {
+  return Object.fromEntries(NOTE_FIELDS.filter(({ key }) => notes[key] !== base[key]).map(({ key }) => [key, notes[key]]));
+}
+
 export function JournalEntryDetail({ entry, showReview = true }: { entry: JournalEntry; showReview?: boolean }) {
   const updateNotes = useJournal((s) => s.updateNotes);
-  const update = useJournal((s) => s.update);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [notes, setNotes] = useState<JournalNotes>(entry.notes);
   const [tag, setTag] = useState(entry.tag);
   const [saved, setSaved] = useState(true);
+  /** The stored notes and tag the editor last took in. Only fields that differ from them are saved. */
+  const base = useRef({ notes: entry.notes, tag: entry.tag });
   /** Unsaved edits, so closing the review (or switching entries) inside the debounce still saves them. */
-  const pending = useRef<{ id: string; notes: JournalNotes; tag: string; prevTag: string } | null>(null);
+  const pending = useRef<{ id: string; notes: JournalNotes; tag: string } | null>(null);
   useEffect(() => {
-    pending.current = saved ? null : { id: entry.id, notes, tag, prevTag: entry.tag };
-  }, [notes, tag, saved, entry.id, entry.tag]);
-  /** The stored notes the editor last took in. */
-  const base = useRef(entry.notes);
+    pending.current = saved ? null : { id: entry.id, notes, tag };
+  }, [notes, tag, saved, entry.id]);
 
   useEffect(() => {
-    base.current = entry.notes;
+    base.current = { notes: entry.notes, tag: entry.tag };
     setNotes(entry.notes);
     setTag(entry.tag);
     setSaved(true);
@@ -53,38 +57,36 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
       alive = false;
       const p = pending.current;
       pending.current = null;
-      if (p) {
-        void useJournal.getState().updateNotes(p.id, p.notes);
-        if (p.tag !== p.prevTag) void useJournal.getState().update(p.id, { tag: p.tag });
-      }
+      if (p) void useJournal.getState().updateNotes(p.id, edited(p.notes, base.current.notes), p.tag !== base.current.tag ? p.tag : undefined);
     };
     // Reset local edits only when switching to another entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry.id]);
 
-  // Notes saved elsewhere (another tab, or a save merged with one) replace the fields not being
-  // edited here, so the next save never writes an old value back over them.
+  // Notes or a tag saved elsewhere (another tab, or this editor's own save coming back merged)
+  // replace the fields not being edited here, so the next save never writes an old value back.
   useEffect(() => {
     const prev = base.current;
-    if (prev === entry.notes) return;
-    base.current = entry.notes;
+    if (prev.notes === entry.notes && prev.tag === entry.tag) return;
+    base.current = { notes: entry.notes, tag: entry.tag };
     setNotes((local) => {
       const out = { ...local };
-      for (const { key } of NOTE_FIELDS) if (local[key] === prev[key]) out[key] = entry.notes[key];
+      for (const { key } of NOTE_FIELDS) if (local[key] === prev.notes[key]) out[key] = entry.notes[key];
       return out;
     });
-  }, [entry.notes]);
+    setTag((local) => (local === prev.tag ? entry.tag : local));
+  }, [entry.notes, entry.tag]);
 
-  // Debounced autosave.
+  // Debounced autosave: one write with every field edited since the last one.
   useEffect(() => {
     if (saved) return;
     const h = setTimeout(() => {
-      void updateNotes(entry.id, notes);
-      if (tag !== entry.tag) void update(entry.id, { tag });
+      const { notes: baseNotes, tag: baseTag } = base.current;
+      void updateNotes(entry.id, edited(notes, baseNotes), tag !== baseTag ? tag : undefined);
       setSaved(true);
     }, 600);
     return () => clearTimeout(h);
-  }, [notes, tag, saved, entry.id, entry.tag, updateNotes, update]);
+  }, [notes, tag, saved, entry.id, updateNotes]);
 
   const r = entry.review;
   // Keep the calendar date hidden while the blind session that produced this trade is still running.

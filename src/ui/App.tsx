@@ -9,6 +9,7 @@ import { TradeReviewModal } from "./components/TradeReviewModal";
 import { Toasts } from "./components/common";
 import { StreakCelebration, StreakModal } from "./components/Streak";
 import { requestAppearanceFocus } from "./components/Appearance";
+import { requestFocus } from "./services/focusRequest";
 // Secondary pages load on first visit to keep the trading screen's initial bundle small.
 const BacktestPage = lazy(() =>
   import("./pages/BacktestPage").then((m) => ({ default: m.BacktestPage })),
@@ -86,6 +87,8 @@ export function App() {
         <RightPanel />
         <BottomPanel
           onOpenJournal={(id) => {
+            // The terminal hides; the journal takes focus on that trade's row.
+            requestFocus("journal");
             setJournalFocus(id);
             setView("journal");
           }}
