@@ -12,6 +12,7 @@ import { SIM_STOCKS, type SimConfig } from '../../core/sim/SimMarket';
 import { exchangeDate, isTradingDay, nextTradingDay, parseHHMM, tradingDayOnOrBefore } from '../../core/time';
 import { DEMO_FIRST_DATE } from '../../core/data/demoProvider';
 import { useCredentials } from '../state/credentials';
+import { useLiveBlind } from '../state/liveBlind';
 
 export type SetupMode = 'replay' | 'sim';
 
@@ -46,11 +47,13 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const loading = useTrading((s) => s.loading);
   const [providerId, setProviderId] = useState(r.providerId);
   const [symbol, setSymbol] = useState(r.symbol);
-  const [date, setDate] = useState(r.date);
+  // The saved date may be one a blind replay still running (here or in another tab) is hiding.
+  const [hiddenDate] = useState(() => Object.values(useLiveBlind.getState().sessions).includes(r.date));
+  const [date, setDate] = useState(hiddenDate ? '' : r.date);
   const [startTime, setStartTime] = useState(r.startTime);
   const [endTime, setEndTime] = useState(r.endTime);
   const [multiDay, setMultiDay] = useState(r.multiDay);
-  const [endDate, setEndDate] = useState(r.endDate);
+  const [endDate, setEndDate] = useState(hiddenDate ? '' : r.endDate);
   const [timeframe, setTimeframe] = useState<Timeframe>(r.timeframe);
   const [speed, setSpeed] = useState(r.speed);
   const [balance, setBalance] = useState<number | ''>(settings.defaultBalance);
@@ -106,6 +109,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     const e = parseHHMM(endTime);
     if (s === null || e === null) return 'Enter start and end times as HH:MM.';
     if (multiDay) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return 'Choose an end date.';
       if (endDate < date) return 'End date must be on or after the start date.';
       if (range && endDate > range.to) return `Data ends on ${range.to}.`;
     } else if (e <= s) return 'End time must be after the start time.';
@@ -119,7 +123,9 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const submit = async () => {
     if (validation) return;
     setError(null);
-    settings.updateReplay({ providerId, symbol: symbol.toUpperCase(), date, startTime, endTime, multiDay, endDate, timeframe, speed, includeWatchlist, blind });
+    // A blind replay's dates are not saved as the next default: the next form, here or in another
+    // tab, would show them while the replay is still hiding them.
+    settings.updateReplay({ providerId, symbol: symbol.toUpperCase(), ...(blind ? {} : { date, endDate }), startTime, endTime, multiDay, timeframe, speed, includeWatchlist, blind });
     const ok = await startReplay({
       providerId,
       symbol: symbol.toUpperCase(),
@@ -252,6 +258,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
               : "Downloads real 1-minute bars from the vendor through this app's data proxy."}
         </span>
       </div>
+      {hiddenDate && !date && <div className="small muted">The last date used belongs to a blind replay still running, so it stays hidden. Pick a date or a random one.</div>}
       {range && <div className="small muted">Available data: {range.from} to {range.to}</div>}
       {extraSymbols.length > 0 && <div className="small muted">Also loading: {extraSymbols.slice(0, 7).join(', ')}</div>}
       {validation && <div className="alert warn">{validation}</div>}

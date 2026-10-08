@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { useSettings, type IndicatorConfig, type IndicatorType } from '../state/settingsStore';
 import { newId } from '../../core/util/ids';
 import { usePopover } from './usePopover';
@@ -77,6 +77,16 @@ export function IndicatorMenu() {
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const { indicators, updateIndicator, addIndicator, removeIndicator } = useSettings();
   const [addType, setAddType] = useState<IndicatorType>('sma');
+  // After a row is removed, focus moves to the next row's Remove button (else the previous one's, else
+  // the indicator picker), so it never drops to the page while the menu is still open.
+  const refocusRow = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const k = refocusRow.current;
+    if (k === null) return;
+    refocusRow.current = null;
+    const buttons = popRef.current?.querySelectorAll<HTMLElement>('[data-remove]');
+    (buttons?.length ? buttons[Math.min(k, buttons.length - 1)] : popRef.current?.querySelector<HTMLElement>('select'))?.focus();
+  }, [indicators, popRef]);
 
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
@@ -86,7 +96,7 @@ export function IndicatorMenu() {
       {open && (
         <div ref={popRef} className="card popover" style={{ width: 'min(340px, calc(100vw - 16px))' }} role="dialog" aria-label="Indicators">
           <div className="stack">
-            {indicators.map((i) => (
+            {indicators.map((i, k) => (
               <div key={i.id} className="row" style={{ gap: 6 }}>
                 <label className="check" style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
                   <input type="checkbox" checked={i.enabled} onChange={(e) => updateIndicator(i.id, { enabled: e.target.checked })} />
@@ -115,7 +125,16 @@ export function IndicatorMenu() {
                     style={{ width: 28, height: 26, padding: 0, border: 0, background: 'none' }}
                   />
                 )}
-                <button className="btn ghost sm" aria-label={`Remove ${indicatorName(i)}`} title="Remove" onClick={() => removeIndicator(i.id)}>
+                <button
+                  className="btn ghost sm"
+                  data-remove
+                  aria-label={`Remove ${indicatorName(i)}`}
+                  title="Remove"
+                  onClick={() => {
+                    refocusRow.current = k;
+                    removeIndicator(i.id);
+                  }}
+                >
                   <span aria-hidden="true">✕</span>
                 </button>
               </div>

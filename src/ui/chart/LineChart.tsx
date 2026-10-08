@@ -61,6 +61,8 @@ export function LineChart({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Area' | 'Line'>[]>([]);
   const fittedRef = useRef(false);
+  // Growing data (the session playing) stays fully in view until the user scrolls or zooms the chart.
+  const followRef = useRef(true);
   const linesRef = useRef(lines);
   linesRef.current = lines;
   const xLabelRef = useRef(xLabel);
@@ -101,6 +103,12 @@ export function LineChart({
     });
     chartRef.current = chart;
     fittedRef.current = false;
+    followRef.current = true;
+    const takeOver = () => {
+      followRef.current = false;
+    };
+    el.addEventListener('pointerdown', takeOver);
+    el.addEventListener('wheel', takeOver, { passive: true });
     seriesRef.current = shape.split(';').map((_, k) => {
       const l = linesRef.current[k];
       // The value label (and its title) is filled with priceLineColor: adjusted so its text stays
@@ -111,6 +119,8 @@ export function LineChart({
         : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, ...label });
     });
     return () => {
+      el.removeEventListener('pointerdown', takeOver);
+      el.removeEventListener('wheel', takeOver);
       chart.remove();
       chartRef.current = null;
       seriesRef.current = [];
@@ -127,7 +137,7 @@ export function LineChart({
     const chart = chartRef.current;
     if (!chart) return;
     lines.forEach((l, k) => seriesRef.current[k]?.setData(clean(l.points)));
-    if (!fittedRef.current && lines.some((l) => l.points.length > 1)) {
+    if ((!fittedRef.current || followRef.current) && lines.some((l) => l.points.length > 1)) {
       chart.timeScale().fitContent();
       fittedRef.current = true;
     }

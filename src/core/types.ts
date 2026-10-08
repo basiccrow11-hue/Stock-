@@ -94,6 +94,10 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   /** Session date (YYYY-MM-DD, exchange time) on which a DAY order expires. */
   sessionDate?: string;
   rejectReason?: string;
+  /** Commission charged on this order's fills so far (the per-order fee and minimum apply once). */
+  commission?: number;
+  /** Cancelled at fill time because a position the other way had opened since it was placed. */
+  conflict?: boolean;
 }
 
 export interface Fill {

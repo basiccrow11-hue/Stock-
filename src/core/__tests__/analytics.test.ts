@@ -179,6 +179,101 @@ describe('learning review', () => {
     expect(added.findings[0].detail).toContain('at best +$1000.00 and at worst −$1000.00');
   });
 
+  describe('how the trade was closed', () => {
+    const t0 = et('2025-01-15', '09:30');
+    /** Long 100 at 100 (stop 99, target 104 unless given), then `script` runs with a bar function. */
+    const run = (script: (b: SimBroker, next: (o: number, h: number, l: number, c: number) => void) => void, bracket: { stopLoss?: number; takeProfit?: number } = { stopLoss: 99, takeProfit: 104 }) => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const bars = [bar(t0, 100, 100, 100, 100)];
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, ...bracket });
+      script(b, (o, h, l, c) => {
+        const nb = bar(t0 + 60 * bars.length, o, h, l, c);
+        bars.push(nb);
+        b.onBar('T', nb);
+      });
+      const st = b.state;
+      expect(st.roundTrips[0].closed).toBe(true);
+      const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return { review, titles: review.findings.map((f) => f.title), text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+    };
+    const flat = (next: (o: number, h: number, l: number, c: number) => void, px: number) => next(px, px, px, px);
+
+    it('says the loss was capped as planned only when the stop filled at its price', () => {
+      const planned = run((_, next) => {
+        next(100, 100.2, 98.9, 99);
+        flat(next, 98.8);
+      });
+      expect(planned.titles).toContain('Stop did its job');
+      expect(planned.text).toContain('Your loss was capped where you planned.');
+
+      // The next bar opens at 96, far through the 99 stop.
+      const gapped = run((_, next) => {
+        next(96, 96.5, 95.5, 96.2);
+        flat(next, 96);
+      });
+      expect(gapped.review.exitReason).toBe('stop_loss');
+      expect(gapped.titles).toContain('Stop filled well past its price');
+      expect(gapped.text).toContain('Your stop at 99.00 filled at 96.00, 3.00 past it, so this exit was -4.00R per share instead of the planned -1.00R.');
+      expect(gapped.text).not.toContain('capped');
+    });
+
+    it('describes a stop moved into profit or widened for what it was', () => {
+      const trailed = run((b, next) => {
+        flat(next, 102);
+        b.modify(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id, { stopPrice: 101.5 });
+        next(102, 102, 101, 101.2);
+        flat(next, 101);
+      });
+      expect(trailed.review.outcome).toBe('win');
+      expect(trailed.titles).toContain('Your moved stop closed the trade');
+      expect(trailed.text).toContain('You had moved your stop from 99.00 to 101.50, and it filled at 101.50: +$150.00 on the trade after costs.');
+      expect(trailed.text).not.toContain('capped');
+
+      const widened = run((b, next) => {
+        b.modify(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id, { stopPrice: 98 });
+        next(100, 100, 97.9, 98);
+        flat(next, 97.9);
+      });
+      expect(widened.titles).toContain('You widened your stop');
+      expect(widened.text).toContain('this exit was -2.00R per share instead of the planned -1.00R');
+    });
+
+    it('classifies exits by the closing order, bracket or not', () => {
+      const userStop = run((b, next) => {
+        b.submit({ symbol: 'T', action: 'sell', type: 'stop', quantity: 100, stopPrice: 99 });
+        next(100, 100, 98.9, 99);
+      }, {});
+      expect(userStop.review.exitReason).toBe('stop_loss');
+      expect(userStop.review.findings[0].detail).toContain('via your stop loss');
+
+      const userTarget = run((b, next) => {
+        b.submit({ symbol: 'T', action: 'sell', type: 'limit', quantity: 100, limitPrice: 101 });
+        next(100, 101.2, 100, 101);
+      }, {});
+      expect(userTarget.review.exitReason).toBe('take_profit');
+
+      const limitAtLoss = run((b) => {
+        b.submit({ symbol: 'T', action: 'sell', type: 'limit', quantity: 100, limitPrice: 99.5 });
+      }, {});
+      expect(limitAtLoss.review.exitReason).toBe('other');
+
+      const market = run((b) => void b.closePosition('T'), {});
+      expect(market.review.exitReason).toBe('manual');
+
+      // A target moved closer and filled there did not reach the planned one.
+      const early = run((b, next) => {
+        b.modify(b.state.orders.find((o) => o.parentId && o.type === 'limit')!.id, { limitPrice: 102 });
+        next(100, 102.5, 100, 102.2);
+      });
+      expect(early.review.exitReason).toBe('take_profit');
+      expect(early.titles).not.toContain('Target reached');
+      expect(early.titles).toContain('Target not reached');
+      const target = run((_, next) => next(100, 104.5, 100, 104.2));
+      expect(target.titles).toContain('Target reached');
+    });
+  });
+
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
     // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
     const avgEntry = (100.1 + 100.1 + 100.1) / 3;

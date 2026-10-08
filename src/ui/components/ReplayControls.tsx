@@ -31,7 +31,9 @@ function speedLabel(s: number): string {
 function confirmRewind(target: number | null, restart = false): boolean {
   if (target === null) return false;
   const { open, closed } = tradesUndoneBy(target, restart);
-  const first = useTrading.getState().rewinds === 0;
+  const { rewinds, now } = useTrading.getState();
+  // Restart at the start time goes back over nothing, so it is not a rewind.
+  const first = rewinds === 0 && target < now;
   const parts: string[] = [];
   if (first) parts.push('Going back in time means you have seen what happens next. This session will be marked "rewound": challenges become unofficial and journal entries are flagged.');
   if (closed > 0) parts.push(`This will undo ${closed} closed trade(s) and permanently delete ${closed === 1 ? 'its journal entry' : 'their journal entries'}, notes included.`);
@@ -52,7 +54,8 @@ function confirmStepBack(): void {
  * place a second order. Enter presses a focused button as usual.
  */
 function isReplayShortcut(e: KeyboardEvent): boolean {
-  if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
+  // An open toolbar menu keeps the keys, even once focus is no longer inside it.
+  if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || document.querySelector('.popover')) return false;
   const el = e.target instanceof Element ? e.target : null;
   if (!el) return true;
   if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"], [role="combobox"]')) return false;
@@ -69,6 +72,8 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const rewinds = useTrading((s) => s.rewinds);
   const quote = useTrading((s) => s.quotes[s.activeSymbol]);
   const timeframe = useTrading((s) => s.timeframe);
+  // Restart also clears orders placed at the start, so it stays available there once there are any.
+  const ordered = useTrading((s) => s.orders.length > 0);
   // The jump fields show the replay clock until the user edits them; a jump or a new session clears the edits.
   const [edited, setEdited] = useState<{ session?: string; date?: string; time?: string }>({});
   // Set when Space was used for play/pause, so its keyup cannot press the focused button either
@@ -127,7 +132,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
     <div className="replay-bar">
       {isReplay ? (
         <>
-          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start, true) && restart()} disabled={now <= session.start}>
+          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start, true) && restart()} disabled={now <= session.start && !ordered}>
             <span aria-hidden="true">⏮</span>
           </button>
           <button className="btn icon" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= session.start}>

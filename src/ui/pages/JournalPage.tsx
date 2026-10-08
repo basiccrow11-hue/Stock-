@@ -177,7 +177,16 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
                     <button
                       className="btn sm danger"
                       onClick={() => {
-                        if (window.confirm('Delete this journal entry? Analytics will no longer include it.')) void remove(current.id);
+                        if (!window.confirm('Delete this journal entry? Analytics will no longer include it.')) return;
+                        // The next entry in the list is shown next, and focus goes to its row (or, with none
+                        // left, to the Journal tab) rather than dropping to the page.
+                        const i = list.findIndex((e) => e.id === current.id);
+                        const next = list[i + 1] ?? list[i - 1];
+                        setSelected(next?.id ?? null);
+                        void remove(current.id);
+                        requestAnimationFrame(() =>
+                          (rowsRef.current?.querySelector<HTMLElement>('tr[aria-current="true"]') ?? document.querySelector<HTMLElement>('[aria-current="page"]'))?.focus(),
+                        );
                       }}
                     >
                       Delete entry

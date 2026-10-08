@@ -330,6 +330,52 @@ describe('order validation', () => {
   });
 });
 
+describe('opening orders that meet a position the other way', () => {
+  it('cancels a working Short limit that would fill while long, instead of booking it as an exit', () => {
+    const { broker, next } = setup();
+    expect(broker.submit({ symbol: S, action: 'short', type: 'limit', quantity: 300, limitPrice: 101 }).ok).toBe(true);
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 });
+    next(100, 101.5, 100, 101.4);
+    const short = broker.state.orders[0];
+    expect(short.status).toBe('cancelled');
+    expect(short.conflict).toBe(true);
+    expect(short.rejectReason).toBe('You were long 100 TEST when it would have filled. Sell the long before shorting.');
+    expect(broker.position(S)).toMatchObject({ quantity: 100, avgPrice: 100 });
+    expect(broker.state.fills).toHaveLength(1);
+    const [trip] = broker.state.roundTrips;
+    expect(trip).toMatchObject({ direction: 'long', entryQtyTotal: 100, exitQtyTotal: 0, closed: false });
+    expect(broker.state.events.at(-1)?.message).toBe('SHORT 300 TEST LMT 101.00 cancelled: you were long 100 TEST when it would have filled');
+    identity(broker);
+  });
+
+  it('cancels a working Buy (and its bracket) that would fill while short', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 100, limitPrice: 98, stopLoss: 97 });
+    broker.submit({ symbol: S, action: 'short', type: 'market', quantity: 40 });
+    next(100, 100, 97.5, 98.5);
+    expect(broker.state.orders[0]).toMatchObject({ status: 'cancelled', conflict: true });
+    expect(broker.state.orders.some((o) => o.parentId)).toBe(false);
+    expect(broker.position(S)).toMatchObject({ quantity: -40, avgPrice: 100 });
+    expect(broker.state.roundTrips).toHaveLength(1);
+    expect(broker.state.roundTrips[0]).toMatchObject({ direction: 'short', entryQtyTotal: 40, exitQtyTotal: 0 });
+    identity(broker);
+  });
+
+  it('still fills a Buy placed while flat once the opposite trade has closed', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 100, limitPrice: 98 });
+    broker.submit({ symbol: S, action: 'short', type: 'market', quantity: 40 });
+    broker.submit({ symbol: S, action: 'cover', type: 'market', quantity: 40 });
+    next(100, 100, 97.5, 98.5);
+    expect(broker.state.orders[0].status).toBe('filled');
+    expect(broker.position(S)).toMatchObject({ quantity: 100, avgPrice: 98 });
+    expect(broker.state.roundTrips.map((t) => [t.direction, t.closed])).toEqual([
+      ['short', true],
+      ['long', false],
+    ]);
+  });
+});
+
 describe('brackets (stop loss / take profit)', () => {
   it('creates OCO exits on fill; target fill cancels the stop', () => {
     const { broker, next } = setup();
@@ -413,6 +459,32 @@ describe('liquidity, partial fills and time in force', () => {
     next(100, 100, 100, 100, 1000);
     expect(broker.position(S).quantity).toBe(250);
     expect(broker.state.orders[0].status).toBe('filled');
+  });
+
+  it('charges the per-order fee and minimum once for an order that fills in pieces', () => {
+    const { broker, next } = setup({
+      maxParticipation: 0.25,
+      marketOrderFill: 'next_bar_open',
+      commission: { perShare: 0.001, perOrder: 1, minimumPerOrder: 2.5, maxPctOfValue: 0 },
+    });
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000 });
+    next(100, 100, 100, 100, 2000);
+    next(100, 100, 100, 100, 2000);
+    const fills = broker.state.fills.map((f) => [f.quantity, f.commission]);
+    // One order of 1000 shares: $1 + $1 = $2, raised to the $2.50 minimum, once.
+    expect(fills).toEqual([
+      [500, 2.5],
+      [500, 0],
+    ]);
+    expect(broker.account().commissionsPaid).toBe(2.5);
+    expect(broker.state.orders[0].commission).toBe(2.5);
+    // Once the per-share part passes the minimum, later pieces pay only their own shares.
+    const big = setup({ maxParticipation: 0.25, marketOrderFill: 'next_bar_open', commission: { perShare: 0.01, perOrder: 1, minimumPerOrder: 0, maxPctOfValue: 0 } });
+    big.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000 });
+    big.next(100, 100, 100, 100, 2000);
+    big.next(100, 100, 100, 100, 2000);
+    expect(big.broker.state.fills.map((f) => f.commission)).toEqual([6, 5]);
+    identity(big.broker);
   });
 
   it('DAY orders expire at the regular close; GTC orders survive', () => {

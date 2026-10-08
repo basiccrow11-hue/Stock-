@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 import type { AccountSnapshot, Bar, DataSourceKind, EquityPoint, Fill, Order, OrderRequest, Position, RoundTrip, Timeframe, UnixSeconds } from '../../core/types';
 import { ReplaySession, type ReplaySetup } from '../../core/replay/ReplaySession';
-import { SimBroker, type BrokerEvent, type SubmitResult } from '../../core/broker/SimBroker';
+import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
@@ -105,6 +105,8 @@ interface Engines {
   sim: SimulationDataProvider | null;
   simBroker: SimBroker | null;
   processedTrips: Set<string>;
+  /** Orders whose cancellation (a position the other way opened before they filled) was announced. */
+  noticedConflicts: Set<string>;
   timer: ReturnType<typeof setInterval> | null;
   lastTick: number;
   lastPublish: number;
@@ -118,6 +120,7 @@ const eng: Engines = {
   sim: null,
   simBroker: null,
   processedTrips: new Set(),
+  noticedConflicts: new Set(),
   timer: null,
   lastTick: 0,
   lastPublish: 0,
@@ -233,6 +236,30 @@ function computeQuotes(): Record<string, Quote> {
 
 let trailingPublish: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The broker extends its equity curve and updates the latest point in place, so the UI gets a copy,
+ * new whenever the curve changed (charts redraw only when the array does).
+ */
+let curveSeen: { src: EquityPoint[]; length: number; time?: number; equity?: number; copy: EquityPoint[] } | null = null;
+function publishedCurve(src: EquityPoint[]): EquityPoint[] {
+  const last = src[src.length - 1];
+  const c = curveSeen;
+  if (c && c.src === src && c.length === src.length && c.time === last?.time && c.equity === last?.equity) return c.copy;
+  const copy = src.slice();
+  if (last) copy[copy.length - 1] = { ...last };
+  curveSeen = { src, length: src.length, time: last?.time, equity: last?.equity, copy };
+  return copy;
+}
+
+/** Tells the user about working orders the broker cancelled because a position the other way opened first. */
+function announceConflicts(orders: readonly Order[]): void {
+  for (const o of orders) {
+    if (!o.conflict || eng.noticedConflicts.has(o.id)) continue;
+    eng.noticedConflicts.add(o.id);
+    toast('warning', `${describeOrder(o)} cancelled. ${o.rejectReason ?? ''}`, 8000);
+  }
+}
+
 function publish(force = false): void {
   const b = broker();
   const nowMs = performance.now();
@@ -263,11 +290,12 @@ function publish(force = false): void {
     fills: st.fills.slice(),
     trips: st.roundTrips.map((t) => ({ ...t })),
     events: st.events.slice(-200),
-    equityCurve: st.equityCurve,
+    equityCurve: publishedCurve(st.equityCurve),
     quotes: computeQuotes(),
     simEvents: eng.sim ? eng.sim.market.events.slice(-100) : [],
     version: st.version,
   });
+  announceConflicts(st.orders);
   // A blind replay that has run to its end gives its date back: clock, chart, journal and exports.
   const meta = useTrading.getState().session;
   const revealed = finished && !!meta?.blind;
@@ -423,6 +451,7 @@ function resetEngines(): void {
   eng.sim = null;
   eng.simBroker = null;
   eng.processedTrips = new Set();
+  eng.noticedConflicts = new Set();
   eng.simCarry = 0;
   eng.prevClose = {};
 }
@@ -585,6 +614,9 @@ async function afterRewind(): Promise<void> {
   // Journal entries for trades that no longer exist in this timeline are removed.
   await useJournal.getState().removeWhere((e) => e.sessionId === session.id && !alive.has(e.trip.id));
   eng.processedTrips = new Set([...eng.processedTrips].filter((id) => alive.has(id)));
+  // An order working again after the rewind is announced again if it is cancelled again.
+  const conflicts = new Set(b.state.orders.filter((o) => o.conflict).map((o) => o.id));
+  eng.noticedConflicts = new Set([...eng.noticedConflicts].filter((id) => conflicts.has(id)));
   emitChart({ type: 'reset' });
   publish(true);
 }

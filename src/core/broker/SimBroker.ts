@@ -734,6 +734,20 @@ export class SimBroker {
    */
   private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>): number {
     const side = actionSide(o.action);
+    const pos = this.position(o.symbol);
+
+    // Buy and Short only open or add, as at submit. One placed while flat can meet a position opened
+    // the other way since (two-sided entries around a range); it is cancelled, not turned into an exit.
+    if ((o.action === 'buy' && pos.quantity < 0) || (o.action === 'short' && pos.quantity > 0)) {
+      const held = `${pos.quantity > 0 ? 'long' : 'short'} ${Math.abs(pos.quantity)} ${o.symbol}`;
+      o.status = 'cancelled';
+      o.rejectReason = `You were ${held} when it would have filled. ${o.action === 'buy' ? 'Cover the short before buying.' : 'Sell the long before shorting.'}`;
+      o.conflict = true;
+      o.updatedAt = time;
+      this.log('cancelled', `${describe(o)} cancelled: you were ${held} when it would have filled`, o.id);
+      skip.add(o.id);
+      return 0;
+    }
 
     if (o.type === 'stop_limit' && !o.triggered) {
       o.triggered = true;
@@ -743,7 +757,6 @@ export class SimBroker {
     }
 
     // Exits can never exceed the current position (protects against orphaned exit orders).
-    const pos = this.position(o.symbol);
     let remaining = o.quantity - o.filledQty;
     if (o.action === 'sell') remaining = Math.min(remaining, Math.max(0, pos.quantity));
     if (o.action === 'cover') remaining = Math.min(remaining, Math.max(0, -pos.quantity));
@@ -786,7 +799,12 @@ export class SimBroker {
 
   private applyFill(o: Order, qty: number, price: number, time: UnixSeconds, slippage: number, spreadCost: number): void {
     const side: Side = actionSide(o.action);
-    const commission = commissionFor(this.cfg, qty, price);
+    // The fee for everything this order has filled, less what its earlier partial fills paid: the
+    // per-order fee and minimum are charged once per order, not once per fill.
+    const filled = o.filledQty + qty;
+    const paid = o.commission ?? 0;
+    const commission = Math.max(0, Math.round((commissionFor(this.cfg, filled, (o.avgFillPrice * o.filledQty + price * qty) / filled) - paid) * 100) / 100);
+    o.commission = money(paid + commission);
     const symbol = o.symbol;
     const pos = this.s.positions[symbol] ?? { symbol, quantity: 0, avgPrice: 0, realizedPnl: 0 };
     const signed = side === 'buy' ? qty : -qty;

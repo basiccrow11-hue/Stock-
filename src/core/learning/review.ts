@@ -79,13 +79,23 @@ export interface TradeReview {
   rules: RuleCheck[];
 }
 
-export function exitReasonOf(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): ExitReason {
+/** The trade's last fill and the order it came from. */
+function closingFill(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): { fill?: Fill; order?: Order } {
   const lastFillId = trip.fills[trip.fills.length - 1];
   const fill = fills.find((f) => f.id === lastFillId);
-  const order = fill ? orders.find((o) => o.id === fill.orderId) : undefined;
-  if (!order) return 'other';
-  if (order.parentId && order.type === 'stop') return 'stop_loss';
-  if (order.parentId && order.type === 'limit') return 'take_profit';
+  return { fill, order: fill ? orders.find((o) => o.id === fill.orderId) : undefined };
+}
+
+/**
+ * How the trade was closed, by the closing order: a stop order (bracket or placed separately) is
+ * the stop loss, a limit that took profit is the target, a market order is a manual exit, and a
+ * limit that closed at a loss is just an exit order.
+ */
+export function exitReasonOf(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): ExitReason {
+  const { fill, order } = closingFill(trip, fills, orders);
+  if (!order || !fill) return 'other';
+  if (order.type === 'stop' || order.type === 'stop_limit') return 'stop_loss';
+  if (order.type === 'limit') return (trip.direction === 'long' ? fill.price > trip.avgEntry : fill.price < trip.avgEntry) ? 'take_profit' : 'other';
   return 'manual';
 }
 
@@ -198,9 +208,44 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     });
   }
 
-  if (exitReason === 'stop_loss' && afterExit && riskPerShare) {
-    const recovered = afterExit.favorableMove / riskPerShare;
-    if (afterExit.reachedOriginalTarget || recovered >= 1) {
+  // Where the closing stop sat when it filled (it may have been moved since entry) and the fill.
+  const closing = closingFill(trip, input.fills, input.orders);
+  const stopAt = closing.order?.stopPrice;
+  const exitPx = closing.fill?.price;
+  if (exitReason === 'stop_loss' && riskPerShare && stopAt !== undefined && exitPx !== undefined) {
+    const dir = long ? 1 : -1;
+    const inR = (px: number) => ((px - trip.avgEntry) * dir) / riskPerShare;
+    const fmtR = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`;
+    // How far past the stop it filled: more than a quarter of the planned risk is not slippage noise.
+    const past = (stopAt - exitPx) * dir;
+    const filledPast = past >= 0.02 - 1e-9 && past > 0.25 * riskPerShare;
+    const moved = Math.abs(stopAt - trip.initialStop!) > 1e-9;
+    if (inR(exitPx) >= 0) {
+      findings.push({
+        tone: trip.pnl > 0.005 ? 'good' : 'neutral',
+        title: 'Your moved stop closed the trade',
+        detail: `You had moved your stop from ${trip.initialStop!.toFixed(2)} to ${stopAt.toFixed(2)}, and it filled at ${exitPx.toFixed(2)}${
+          filledPast ? `, ${past.toFixed(2)} past it` : ''
+        }: ${signed(trip.pnl)} on the trade after costs.${
+          afterExit ? ` Since then price has moved ${afterExit.favorableMove.toFixed(2)} further your way over the ${afterExit.barsObserved} bars revealed (so far).` : ''
+        }`,
+      });
+    } else if (filledPast) {
+      findings.push({
+        tone: 'bad',
+        title: 'Stop filled well past its price',
+        detail: `Your stop at ${stopAt.toFixed(2)} filled at ${exitPx.toFixed(2)}, ${past.toFixed(2)} past it, so this exit was ${fmtR(inR(exitPx))} per share instead of ${
+          moved ? `the ${fmtR(inR(stopAt))} your moved stop allowed` : `the planned ${fmtR(-1)}`
+        }. A stop turns into a market order when price reaches it and fills at the next price available, which can be far away after a gap or for a large order in a thin bar.`,
+      });
+    } else if (inR(stopAt) < -1 - 1e-9) {
+      findings.push({
+        tone: 'bad',
+        title: 'You widened your stop',
+        detail: `You moved your stop from ${trip.initialStop!.toFixed(2)} to ${stopAt.toFixed(2)}, further from your entry, so this exit was ${fmtR(inR(exitPx))} per share instead of the planned ${fmtR(-1)}. Moving a stop away to avoid being stopped out turns a planned loss into a bigger one.`,
+      });
+    } else if (afterExit && (afterExit.reachedOriginalTarget || afterExit.favorableMove / riskPerShare >= 1)) {
+      const recovered = afterExit.favorableMove / riskPerShare;
       findings.push({
         tone: 'bad',
         title: 'Stopped out, then price went your way (so far)',
@@ -208,13 +253,21 @@ export function reviewTrade(input: ReviewInput): TradeReview {
           afterExit.reachedOriginalTarget ? ', and reached your original target' : ''
         }. That pattern suggests the stop was placed where normal noise could reach it, not that the idea was wrong. It is one trade, so treat it as a data point, not a rule.`,
       });
-    } else {
-      findings.push({ tone: 'good', title: 'Stop did its job', detail: `Since you exited, price has not recovered meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction so far). Your loss was capped where you planned.` });
+    } else if (afterExit) {
+      findings.push({
+        tone: 'good',
+        title: 'Stop did its job',
+        detail: `Since you exited, price has not recovered meaningfully (best ${afterExit.favorableMove.toFixed(2)} in your direction so far). Your loss was capped ${
+          moved ? `at your moved stop (${stopAt.toFixed(2)}; planned at ${trip.initialStop!.toFixed(2)})` : 'where you planned'
+        }.`,
+      });
     }
   }
 
   if (targetDistance !== null) {
-    if (exitReason === 'take_profit') {
+    // A limit that took profit short of the original target (or a target moved closer) did not reach it.
+    const atTarget = exitReason === 'take_profit' && exitPx !== undefined && (exitPx - trip.initialTarget!) * (long ? 1 : -1) >= -1e-9;
+    if (atTarget) {
       findings.push({ tone: 'good', title: 'Target reached', detail: `Your target ${targetDistanceAtr !== null ? `(${targetDistanceAtr.toFixed(1)}× ATR away) ` : ''}was realistic for this move.` });
     } else {
       const reach = targetDistance > 0 ? (bestMove / targetDistance) * 100 : 0;

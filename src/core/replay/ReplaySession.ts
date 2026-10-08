@@ -328,6 +328,8 @@ export class ReplaySession {
 
   /** Rewind to `time`: the account as it was then, including orders placed at that moment (not with `restart`). */
   private rewindTo(time: UnixSeconds, restart = false): void {
+    // Restart at the start only clears the account: nothing after the start has been seen.
+    const back = time < this.now;
     for (const e of this.engines.values()) e.rewindTo(time);
     const cursors = this.cursors();
     const i = restart ? 0 : this.checkpointAt(cursors);
@@ -335,6 +337,12 @@ export class ReplaySession {
     this.checkpoints.length = i + 1;
     this.broker.rollback(cp.broker);
     this.replayFrom(this.broker, cp, cursors);
+    // Settings changed since `cp` apply from here on, so a later rewind past here must know it.
+    if (this.broker.cfg !== cp.config) this.checkpoint();
+    if (!back) {
+      this.broker.logInfo('Back to the start: orders and trades cleared.');
+      return;
+    }
     // No date: the log's time column already gives the day, and hides it in blind mode.
     this.broker.logInfo(`Rewound to ${formatExchangeTime(time)} ET. Results after a rewind are not blind.`);
     this.rewinds += 1;

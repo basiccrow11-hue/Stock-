@@ -67,4 +67,25 @@ describe('indicator settings', () => {
     expect(names.filter((n) => n === 'Period' || n === '✕')).toEqual([]);
     act(() => root.unmount());
   });
+
+  it('keeps focus in the menu when an indicator is removed', () => {
+    const { host, root } = setup();
+    const removes = () => [...host.querySelectorAll<HTMLButtonElement>('[data-remove]')];
+    const names = () => removes().map((b) => b.getAttribute('aria-label'));
+    const first = names();
+    expect(first.length).toBeGreaterThan(2);
+    // Removing a row in the middle hands focus to the row that takes its place...
+    act(() => removes()[1].focus());
+    act(() => removes()[1].click());
+    expect(document.activeElement).toBe(removes()[1]);
+    expect(document.activeElement!.getAttribute('aria-label')).toBe(first[2]);
+    // ...the last row to the one above it, and the only one left to the indicator picker.
+    act(() => removes().at(-1)!.click());
+    expect(document.activeElement).toBe(removes().at(-1));
+    while (removes().length > 1) act(() => removes()[0].click());
+    act(() => removes()[0].click());
+    expect(document.activeElement).toBe(host.querySelector('select[aria-label="Indicator to add"]'));
+    expect(host.querySelector('.popover')).not.toBeNull();
+    act(() => root.unmount());
+  });
 });

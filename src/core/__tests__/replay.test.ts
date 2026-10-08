@@ -290,6 +290,48 @@ describe('ReplaySession: undo is exact', () => {
     expect(s.broker.state.fills).toEqual([]);
   });
 
+  it('settings changed after a point stay in force there when a later rewind replays it', () => {
+    const FEES: ExecutionConfig = { ...ZERO_COST_CONFIG, commission: { perShare: 0, perOrder: 5, minimumPerOrder: 0, maxPctOfValue: 0 } };
+    const session = () => {
+      const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+      s.jumpTo(T('09:40'));
+      const px = s.engine.lastPrice()!;
+      s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 10, stopLoss: px - 3, takeProfit: px + 3 });
+      return s;
+    };
+    const s = session();
+    s.jumpTo(T('09:45'));
+    s.setConfig(FEES);
+    s.jumpTo(T('09:50'));
+    // Back before the change: the new settings apply from here on...
+    s.jumpTo(T('09:44'));
+    expect(s.broker.cfg).toBe(FEES);
+    s.jumpTo(T('11:30'));
+    expect(s.broker.state.roundTrips[0].closed).toBe(true);
+    expect(s.broker.state.fills.at(-1)!.commission).toBe(5);
+    // ...so stepping back replays those bars with them too, and undoes nothing but the last bar.
+    const target = s.stepBackTarget()!;
+    expect(s.undoneBy(target)).toEqual({ open: 0, closed: 0 });
+    s.stepBack();
+    const ref = session();
+    ref.jumpTo(T('09:44'));
+    ref.setConfig(FEES);
+    ref.jumpTo(target);
+    expect(account(s)).toEqual(account(ref));
+  });
+
+  it('Restart at the start time clears what was done there, and is not a rewind', () => {
+    const s = new ReplaySession(engineWith(bars, T('10:00')), { ...setupFor(), startTime: '10:00' }, ZERO_COST_CONFIG, 's', 'DEMO');
+    s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });
+    expect(s.broker.position('TEST').quantity).toBe(100);
+    expect(s.undoneBy(s.start, true)).toEqual({ open: 1, closed: 0 });
+    s.restart();
+    expect(s.broker.state.orders).toEqual([]);
+    expect(s.broker.account().cash).toBe(100_000);
+    expect(s.rewound).toBe(false);
+    expect(s.broker.state.events.map((e) => e.message)).toEqual(['Back to the start: orders and trades cleared.']);
+  });
+
   it('keeps few, small checkpoints however long the session and however many trades', () => {
     const s = new ReplaySession(engineWith(randomBars(3000, 7, et(D, '04:00')), et(D, '04:00'), et('2025-01-17', '20:00')), { ...setupFor(), startTime: '04:00' }, ZERO_COST_CONFIG, 's', 'DEMO');
     let actions = 0;
