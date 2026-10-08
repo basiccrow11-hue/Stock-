@@ -164,9 +164,14 @@ export class ReplayEngine {
     return Math.min(this.#ends[this.#cursor + 1], this.end);
   }
 
-  /** Duration of one base bar in seconds (for 1D, a regular session). */
-  get baseSeconds(): number {
-    return TIMEFRAME_MINUTES[this.baseTimeframe] * 60;
+  /** How long `bar` trades, in seconds: its timeframe, or for 1D its regular session (shorter on early closes). */
+  barSeconds(bar: Bar): number {
+    return barEndTime(bar, this.baseTimeframe) - bar.time;
+  }
+
+  /** Copies of the revealed bars with index in [from, to); `to` stops at what has been revealed. */
+  revealedBars(from: number, to: number): Bar[] {
+    return this.#bars.slice(Math.max(0, from), Math.min(to, this.#cursor + 1)).map((b) => ({ ...b }));
   }
 
   /** Incremental aggregator primed with all revealed bars; useful for efficient chart updates. */

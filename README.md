@@ -37,7 +37,7 @@ To practise on real price action, import a CSV or add a vendor key (see below).
 
 ## Features
 
-**Historical replay.** Pick a ticker, date, start and end time (ET), single or multi-day, chart timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D), starting balance and speed. Play, pause, step one minute, step one candle, step back, restart, change speed, jump to a time. Watchlist symbols can replay on the same clock. **Blind mode** hides the calendar date everywhere (clock, chart axis, crosshair, journal) until the session ends; **Random date** picks a day for you.
+**Historical replay.** Pick a ticker, date, start and end time (ET), single or multi-day, chart timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D), starting balance and speed. Play, pause, step one minute, step one candle, step back, restart, change speed, jump to a time. Watchlist symbols can replay on the same clock. **Blind mode** hides the calendar date everywhere (clock, chart axis, crosshair, journal, exports, in every open tab of the app) until the session ends: the replay reaches its end time, you start another session or you close the tab. **Random date** picks a day for you.
 
 **No look-ahead.** Future bars live in private fields of the replay engine and are only handed out once their bar has *completed* on the replay clock. Higher-timeframe candles are built from revealed 1-minute bars, so a forming 15m candle only shows what has happened so far. Indicators are causal (value at bar *i* uses bars 0..*i* only). Tests prove that two datasets with identical pasts and different futures produce identical charts, indicators, fills and backtest results up to the present.
 
@@ -121,7 +121,7 @@ The repository deploys as is: `vercel.json` builds the Vite app into `dist/` and
 - **Fills are modelled from bars, not an order book.** The engine knows each bar's open, high, low, close and volume, not the order in which prices traded inside it, so it assumes a path. Queue position for limit orders is not modelled ("touch" fills as soon as price reaches your limit; choose "trade through" for a stricter rule). Spreads are a configurable model, not historical quotes.
 - **Price level can hint at the era in blind mode.** Blind mode hides dates, but a real ticker's price level (for example SPY near 590) still narrows down when it was.
 - **Sessions do not survive a page reload.** The journal, analytics, imported data, settings and drawings persist; an in-progress replay or simulated market does not.
-- **Rewinding rewrites history.** Stepping back past a closed trade undoes it and removes its journal entry (you are asked first), and the session is flagged as not blind.
+- **Rewinding rewrites history.** Stepping back past a closed trade undoes it and removes its journal entry (you are asked first), and the session is flagged as not blind. Jumping back to a time restores the account as it was at that moment, orders placed then included; Restart returns to the starting balance with no orders.
 - **Vendor data needs the proxy and a network.** Polygon and Alpaca were implemented against their documented APIs and are tested with mocked responses; plan limits (history depth, rate limits, IEX vs SIP volume) are the vendor's.
 - **Single user, single browser.** Data is stored locally; there is no account or sync. Clearing site data resets the journal and the streak.
 - **The streak measures time, not quality.** It cannot tell focused practice from leaving a replay playing; it only stops counting after 10 minutes without input. It is a nudge to show up, not a measure of skill.
@@ -135,7 +135,7 @@ src/core/            framework-free engine (fully unit tested)
                      demo generator, CSV parser + provider, Polygon + Alpaca providers,
                      SimulationDataProvider, bar aggregation
   replay/            ReplayEngine (one symbol, hides the future) and ReplaySession (multi-symbol clock,
-                     broker, step-back snapshots)
+                     broker, step-back checkpoints)
   broker/            SimBroker (orders, fills, positions, brackets, P/L) and execution config
   indicators/        causal SMA, EMA, RSI, MACD, Bollinger, ATR, VWAP
   risk/              pre-trade risk assessment, position sizing, strict mode

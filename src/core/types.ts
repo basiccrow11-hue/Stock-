@@ -147,9 +147,16 @@ export interface RoundTrip {
   initialStop?: number;
   initialTarget?: number;
   tag?: string;
-  /** Highest / lowest price seen while the trade was open (for MFE/MAE). */
+  /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;
   lowWhileOpen: number;
+  /**
+   * Best and worst open P/L while the trade was open (MFE/MAE), before costs: what it had made so
+   * far plus the shares still held, at every price reached. Absent on trades recorded before these
+   * were tracked.
+   */
+  bestOpenPnl?: number;
+  worstOpenPnl?: number;
   fills: string[];
   closed: boolean;
   source: DataSourceKind;

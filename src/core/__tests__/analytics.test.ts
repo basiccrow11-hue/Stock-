@@ -142,6 +142,43 @@ describe('learning review', () => {
     expect(early.afterExit!.reachedOriginalTarget).toBe(false);
   });
 
+  it('measures MFE/MAE as the best and worst open P/L, through partial exits and adds', () => {
+    const t0 = et('2025-01-15', '09:30');
+    const at = (b: SimBroker, i: number, px: number) => b.onBar('T', bar(t0 + 60 * i, px, px, px, px));
+    const review = (b: SimBroker) => {
+      const st = b.state;
+      return reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: [], timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 1_000_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    };
+
+    // Scale out: 900 of 1000 shares sold 0.50 up, the last 100 ride 10 up. The peak open P/L is the result.
+    const out = new SimBroker({ startingBalance: 1_000_000, config: ZERO_COST_CONFIG });
+    at(out, 0, 100);
+    out.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 1000 });
+    at(out, 1, 100.5);
+    out.submit({ symbol: 'T', action: 'sell', type: 'market', quantity: 900 });
+    at(out, 2, 110);
+    out.submit({ symbol: 'T', action: 'sell', type: 'market', quantity: 100 });
+    const kept = review(out);
+    expect(out.state.roundTrips[0].pnl).toBeCloseTo(1450, 6);
+    expect(kept.mfe.dollars).toBeCloseTo(1450, 6);
+    expect(kept.capturePct).toBeCloseTo(100, 6);
+    expect(kept.findings.map((f) => f.title)).toContain('Captured most of the move');
+
+    // Scale in: 100 at 100 (stop 95), 900 more at 110, all out at 108. Price never went below 100.
+    const add = new SimBroker({ startingBalance: 1_000_000, config: ZERO_COST_CONFIG });
+    at(add, 0, 100);
+    add.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 95 });
+    at(add, 1, 110);
+    add.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 900 });
+    at(add, 2, 108);
+    add.closePosition('T');
+    const added = review(add);
+    expect(add.state.roundTrips[0].pnl).toBeCloseTo(-1000, 6);
+    expect(added.mae.dollars).toBeCloseTo(1000, 6);
+    expect(added.mfe.dollars).toBeCloseTo(1000, 6);
+    expect(added.findings[0].detail).toContain('at best +$1000.00 and at worst −$1000.00');
+  });
+
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
     // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
     const avgEntry = (100.1 + 100.1 + 100.1) / 3;

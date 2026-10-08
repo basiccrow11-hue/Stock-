@@ -21,6 +21,7 @@ import { useJournal, saveSnapshot } from './journalStore';
 import { useChallenges } from './challengeStore';
 import { toast } from './toasts';
 import { recordTradeClosed } from './streakStore';
+import { setLiveBlind } from './liveBlind';
 import { newId } from '../../core/util/ids';
 
 export type SessionMode = 'replay' | 'sim';
@@ -156,6 +157,11 @@ const EMPTY: TradingSnapshot = {
 
 export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY }));
 
+// Other open tabs keep this tab's running blind session's dates hidden too (they share the journal).
+useTrading.subscribe((s, prev) => {
+  if (s.session !== prev.session) setLiveBlind(s.session?.blind ? { id: s.session.id, start: s.session.startDate } : null);
+});
+
 function broker(): SimBroker | null {
   return eng.replay?.broker ?? eng.simBroker;
 }
@@ -173,22 +179,21 @@ export function getSimEventsFor(symbol: string): SimEvent[] {
   return eng.sim ? eng.sim.market.events.filter((e) => e.symbol === symbol || e.symbol === 'MARKET') : [];
 }
 
-/** "Day N" label used in blind mode (relative trading-day index from the session start date). */
-export function blindDayLabel(t: UnixSeconds): string {
-  const s = useTrading.getState().session;
-  if (!s) return exchangeDate(t);
+/** "Day N" label used in blind mode: trading days from the start date of the blind session (default: this tab's). */
+export function blindDayLabel(t: UnixSeconds, startDate = useTrading.getState().session?.startDate): string {
+  if (!startDate) return 'Day ?';
   const d = exchangeDate(t);
-  if (d === s.startDate) return 'Day 1';
+  if (d === startDate) return 'Day 1';
   let n = 0;
-  if (d > s.startDate) {
-    let x = s.startDate;
+  if (d > startDate) {
+    let x = startDate;
     while (x < d && n < 400) {
       x = nextTradingDay(x);
       n++;
     }
     return `Day ${n + 1}`;
   }
-  let x = s.startDate;
+  let x = startDate;
   while (x > d && n < 400) {
     x = prevTradingDay(x);
     n++;
@@ -263,9 +268,17 @@ function publish(force = false): void {
     simEvents: eng.sim ? eng.sim.market.events.slice(-100) : [],
     version: st.version,
   });
+  // A blind replay that has run to its end gives its date back: clock, chart, journal and exports.
+  const meta = useTrading.getState().session;
+  const revealed = finished && !!meta?.blind;
+  if (finished && meta?.blind) {
+    const last = exchangeDate(now);
+    useTrading.setState({ session: { ...meta, blind: false, label: `${meta.symbols[0]} · ${meta.startDate}` } });
+    toast('info', `Blind replay over: that was ${meta.symbols[0]} on ${last === meta.startDate ? meta.startDate : `${meta.startDate} to ${last}`}.`, 10_000);
+  }
   if (finished && useTrading.getState().playing) {
     pause();
-    toast('info', 'Replay reached the end time.');
+    if (!revealed) toast('info', 'Replay reached the end time.');
   }
   evaluateActiveChallenge();
 }
@@ -554,9 +567,9 @@ export function stepCandle(): void {
   afterChange(eng.replay.stepCandle(s.timeframe, s.activeSymbol));
 }
 
-/** Trades a rewind to `time` would undo: still open, and closed (whose journal entries it deletes). */
-export function tradesUndoneBy(time: UnixSeconds): { open: number; closed: number } {
-  return eng.replay?.undoneBy(time) ?? { open: 0, closed: 0 };
+/** Trades a rewind to `time` (or Restart) would undo: still open, and closed (whose journal entries it deletes). */
+export function tradesUndoneBy(time: UnixSeconds, restart = false): { open: number; closed: number } {
+  return eng.replay?.undoneBy(time, restart) ?? { open: 0, closed: 0 };
 }
 
 /** Where Step back goes (the open of the last revealed bar), or null when there is nothing to step back over. */
@@ -647,8 +660,9 @@ export function closePosition(symbol: string): SubmitResult {
 
 /** Apply changed execution settings to the running session. */
 function applyExecutionConfig(): void {
-  const b = broker();
-  if (b) b.cfg = getSettings().execution;
+  const cfg = getSettings().execution;
+  if (eng.replay) eng.replay.setConfig(cfg);
+  else if (eng.simBroker) eng.simBroker.cfg = cfg;
 }
 // The running session trades under the current execution settings, however they changed (the
 // settings page, a reset, another tab).

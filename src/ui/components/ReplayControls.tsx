@@ -27,9 +27,10 @@ function speedLabel(s: number): string {
   return `${s}x · ${perSec >= 60 ? `${perSec / 60}h` : `${perSec}m`}/s`;
 }
 
-function confirmRewind(target: number | null): boolean {
+/** Warns before a rewind to `target` (or Restart) and says what it undoes; false when cancelled. */
+function confirmRewind(target: number | null, restart = false): boolean {
   if (target === null) return false;
-  const { open, closed } = tradesUndoneBy(target);
+  const { open, closed } = tradesUndoneBy(target, restart);
   const first = useTrading.getState().rewinds === 0;
   const parts: string[] = [];
   if (first) parts.push('Going back in time means you have seen what happens next. This session will be marked "rewound": challenges become unofficial and journal entries are flagged.');
@@ -68,21 +69,17 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const rewinds = useTrading((s) => s.rewinds);
   const quote = useTrading((s) => s.quotes[s.activeSymbol]);
   const timeframe = useTrading((s) => s.timeframe);
-  const [jumpDate, setJumpDate] = useState('');
+  // The jump fields show the replay clock until the user edits them; a jump or a new session clears the edits.
+  const [edited, setEdited] = useState<{ session?: string; date?: string; time?: string }>({});
   // Set when Space was used for play/pause, so its keyup cannot press the focused button either
   // (some browsers press buttons on keyup). A ref, so it survives the listeners being re-registered.
   const spaceTaken = useRef(false);
-  const [jumpTime, setJumpTime] = useState('');
   const isReplay = session?.mode === 'replay';
-
-  useEffect(() => {
-    if (now) {
-      setJumpDate(exchangeDate(now));
-      setJumpTime(formatExchangeTime(now));
-    }
-    // Only refresh the jump fields when the session changes or playback pauses.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.id, playing]);
+  const edits = edited.session === session?.id ? edited : {};
+  // Blind mode has no date field: the date is always the replay's current day.
+  const jumpDate = (!session?.blind && edits.date) || (now ? exchangeDate(now) : '');
+  const jumpTime = edits.time ?? (now ? formatExchangeTime(now) : '');
+  const edit = (field: 'date' | 'time', value: string) => setEdited({ ...edits, session: session?.id, [field]: value });
 
   useEffect(() => {
     if (!active) return;
@@ -122,6 +119,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
     if (!jumpDate || !jumpTime) return;
     const t = exchangeTimeToUnix(jumpDate, parseHHMM(jumpTime));
     if (t < now && !confirmRewind(t)) return;
+    setEdited({});
     jumpTo(t);
   };
 
@@ -129,7 +127,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
     <div className="replay-bar">
       {isReplay ? (
         <>
-          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start) && restart()} disabled={now <= session.start}>
+          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start, true) && restart()} disabled={now <= session.start}>
             <span aria-hidden="true">⏮</span>
           </button>
           <button className="btn icon" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= session.start}>
@@ -173,8 +171,8 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
             <div style={{ width: `${progress * 100}%` }} />
           </div>
           <span className="row" style={{ gap: 4 }}>
-            {!session.blind && <input type="date" value={jumpDate} onChange={(e) => setJumpDate(e.target.value)} aria-label="Jump to date" title="Jump to date" style={{ width: 130 }} />}
-            <input type="time" value={jumpTime} onChange={(e) => setJumpTime(e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 'auto' }} />
+            {!session.blind && <input type="date" value={jumpDate} onChange={(e) => edit('date', e.target.value)} aria-label="Jump to date" title="Jump to date" style={{ width: 130 }} />}
+            <input type="time" value={jumpTime} onChange={(e) => edit('time', e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 'auto' }} />
             <button className="btn sm" onClick={doJump} title="Jump to time. Forward jumps process every skipped bar, so your orders still fill.">
               Jump
             </button>

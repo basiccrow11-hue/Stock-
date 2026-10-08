@@ -1,6 +1,6 @@
 /**
  * A replay trading session: one shared replay clock over one or more symbols, a simulated broker,
- * and undo snapshots.
+ * and undo checkpoints.
  *
  * Revealed bars flow one way: engines → broker, merged in time order. The broker can therefore only
  * fill orders against prices that have already "happened" in the replay, for every symbol.
@@ -8,12 +8,17 @@
  * Stepping backward / restarting / jumping back restores the account to exactly what it was at that
  * moment, and is recorded (`rewinds`) because after a rewind you have seen the future. Challenges
  * and the journal use that flag so rewound results are never presented as clean, blind results.
+ *
+ * The broker is deterministic: the same bars, orders and settings give the same fills. So undo keeps
+ * a checkpoint at every trading action, settings change and every few hundred bars, and a rewind
+ * goes back to the newest checkpoint at or before the target and feeds the broker the bars from
+ * there to the target again. Whatever is left on the chart is exactly what the account has seen.
  */
 import type { Bar, OrderRequest, Timeframe, UnixSeconds } from '../types';
 import type { HistoricalDataProvider } from '../data/provider';
 import type { ExecutionConfig } from '../broker/config';
-import { SimBroker, type BrokerState, type SubmitResult } from '../broker/SimBroker';
-import { ReplayEngine } from './ReplayEngine';
+import { SimBroker, type BrokerCheckpoint, type SubmitResult } from '../broker/SimBroker';
+import { ReplayEngine, barEndTime } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
@@ -56,19 +61,25 @@ export interface RevealedBar {
   bar: Bar;
 }
 
-interface Snapshot {
-  /** Total bars revealed across all engines (monotonic while moving forward). */
+interface Checkpoint {
+  /** Bars revealed by each engine (engine order) when it was taken. */
+  cursors: number[];
+  /** Their sum. */
   revealed: number;
-  now: UnixSeconds;
-  state: BrokerState;
+  broker: BrokerCheckpoint;
+  /** The execution settings the bars after it were processed with. */
+  config: ExecutionConfig;
 }
+
+/** Most bars fed between checkpoints, so a rewind replays at most this many. */
+const CHECKPOINT_BARS = 256;
 
 export class ReplaySession {
   readonly broker: SimBroker;
   readonly engines: ReadonlyMap<string, ReplayEngine>;
   rewinds = 0;
-  private snapshots: Snapshot[] = [];
-  private lastSnapshotVersion = -1;
+  /** Oldest first. The first is the clean start, which Restart returns to. */
+  private checkpoints: Checkpoint[] = [];
 
   constructor(
     engines: ReplayEngine | ReplayEngine[],
@@ -84,9 +95,9 @@ export class ReplaySession {
     // Prime the broker with each symbol's last known price before the start (no orders exist yet).
     for (const e of list) {
       const last = e.lastBar();
-      if (last) this.broker.onBar(e.symbol, last, e.baseSeconds);
+      if (last) this.broker.onBar(e.symbol, last, e.barSeconds(last));
     }
-    this.snapshot(true);
+    this.checkpoint();
   }
 
   /**
@@ -166,36 +177,64 @@ export class ReplaySession {
     return this.rewinds > 0;
   }
 
+  /** Bars processed after this use `config`. */
   setConfig(config: ExecutionConfig): void {
+    if (config === this.broker.cfg) return;
     this.broker.cfg = config;
+    this.checkpoint();
   }
 
-  private totalRevealed(): number {
-    let n = 0;
-    for (const e of this.engines.values()) n += e.revealedCount;
-    return n;
+  private cursors(): number[] {
+    return [...this.engines.values()].map((e) => e.revealedCount);
   }
 
-  /** Feed revealed bars to the broker in time order (ties: engine order, i.e. primary first). */
+  /** A checkpoint at the current reveal point. A later one at the same point replaces it (not the start's). */
+  private checkpoint(): void {
+    const cursors = this.cursors();
+    const last = this.checkpoints[this.checkpoints.length - 1];
+    if (this.checkpoints.length > 1 && last.cursors.every((c, i) => c === cursors[i])) this.checkpoints.pop();
+    this.checkpoints.push({ cursors, revealed: cursors.reduce((a, b) => a + b, 0), broker: this.broker.checkpoint(), config: this.broker.cfg });
+  }
+
+  /**
+   * Feed bars to `broker` in the order they completed (then by open time, then engine order, primary
+   * first). Every reveal hands over all bars completed by the new time, so feeding a replay range at
+   * once gives the same order as revealing it step by step did.
+   */
+  private process(broker: SimBroker, bars: RevealedBar[]): RevealedBar[] {
+    const rank = new Map(this.symbols.map((s, i) => [s, i]));
+    const keyed = bars.map((r) => ({ r, end: barEndTime(r.bar, this.engines.get(r.symbol)!.baseTimeframe), rank: rank.get(r.symbol)! }));
+    keyed.sort((a, b) => a.end - b.end || a.r.bar.time - b.r.bar.time || a.rank - b.rank);
+    for (const { r } of keyed) broker.onBar(r.symbol, r.bar, this.engines.get(r.symbol)!.barSeconds(r.bar));
+    return keyed.map((k) => k.r);
+  }
+
+  /** Feed newly revealed bars to the broker. */
   private feed(revealed: RevealedBar[]): RevealedBar[] {
-    revealed.sort((a, b) => a.bar.time - b.bar.time);
-    for (const r of revealed) this.broker.onBar(r.symbol, r.bar, this.engines.get(r.symbol)!.baseSeconds);
-    if (revealed.length) this.snapshot();
-    return revealed;
+    const out = this.process(this.broker, revealed);
+    const revealedNow = this.cursors().reduce((a, b) => a + b, 0);
+    if (revealedNow - this.checkpoints[this.checkpoints.length - 1].revealed >= CHECKPOINT_BARS) this.checkpoint();
+    return out;
   }
 
-  private snapshot(force = false): void {
-    if (!force && this.broker.version === this.lastSnapshotVersion) return;
-    const revealed = this.totalRevealed();
-    // Replace a snapshot taken at the same reveal point (e.g. several orders between two bars).
-    while (this.snapshots.length && this.snapshots[this.snapshots.length - 1].revealed === revealed) this.snapshots.pop();
-    // The equity curve and event log are append-only and can be long; keep them out of snapshots
-    // and truncate them on restore instead (keeps memory linear in replay length).
-    const { equityCurve, events, ...rest } = this.broker.state;
-    void equityCurve;
-    void events;
-    this.snapshots.push({ revealed, now: this.now, state: structuredClone({ ...rest, equityCurve: [], events: [] }) });
-    this.lastSnapshotVersion = this.broker.version;
+  /** The newest checkpoint at or before the reveal point `cursors`. */
+  private checkpointAt(cursors: number[]): number {
+    for (let i = this.checkpoints.length - 1; i > 0; i--) if (this.checkpoints[i].cursors.every((c, k) => c <= cursors[k])) return i;
+    return 0;
+  }
+
+  /** Bring `broker`, rolled back to `cp`, up to the reveal point `cursors` with the bars in between. */
+  private replayFrom(broker: SimBroker, cp: Checkpoint, cursors: number[]): void {
+    const bars: RevealedBar[] = [];
+    let k = 0;
+    for (const e of this.engines.values()) {
+      for (const bar of e.revealedBars(cp.cursors[k], cursors[k])) bars.push({ symbol: e.symbol, bar });
+      k++;
+    }
+    const config = broker.cfg;
+    broker.cfg = cp.config;
+    this.process(broker, bars);
+    broker.cfg = config;
   }
 
   /** Move every engine's clock to `target`, revealing completed bars. */
@@ -263,13 +302,16 @@ export class ReplaySession {
   }
 
   /**
-   * What a rewind to `time` would undo, read from the snapshot it would restore: trades opened
-   * since (`open`: still open now) and trades closed since (`closed`: their journal entries go).
+   * What a rewind to `time` (or Restart, with `restart`) would undo, worked out on a copy of the
+   * account: trades opened since (`open`: still open now) and trades closed since (`closed`: their
+   * journal entries go).
    */
-  undoneBy(time: UnixSeconds): { open: number; closed: number } {
-    let revealed = 0;
-    for (const e of this.engines.values()) revealed += e.revealedCountAt(time);
-    const then = new Map(this.snapshotAt(revealed).state.roundTrips.map((t) => [t.id, t.closed]));
+  undoneBy(time: UnixSeconds, restart = false): { open: number; closed: number } {
+    const target = restart ? this.checkpoints[0].cursors : [...this.engines.values()].map((e) => Math.min(e.revealedCount, e.revealedCountAt(time)));
+    const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target)];
+    const after = this.broker.fork(cp.broker);
+    this.replayFrom(after, cp, target);
+    const then = new Map(after.state.roundTrips.map((t) => [t.id, t.closed]));
     let open = 0;
     let closed = 0;
     for (const t of this.broker.state.roundTrips) {
@@ -279,55 +321,46 @@ export class ReplaySession {
     return { open, closed };
   }
 
-  /** The newest snapshot taken with at most `revealed` bars revealed: the state a rewind restores. */
-  private snapshotAt(revealed: number): Snapshot {
-    let snap = this.snapshots[0];
-    for (const s of this.snapshots) {
-      if (s.revealed <= revealed) snap = s;
-      else break;
-    }
-    return snap;
-  }
-
+  /** Back to the start with the starting account: no orders, even ones placed before the first bar. */
   restart(): void {
-    this.rewindTo(this.start);
+    this.rewindTo(this.start, true);
   }
 
-  private rewindTo(time: UnixSeconds): void {
+  /** Rewind to `time`: the account as it was then, including orders placed at that moment (not with `restart`). */
+  private rewindTo(time: UnixSeconds, restart = false): void {
     for (const e of this.engines.values()) e.rewindTo(time);
-    const snap = this.snapshotAt(this.totalRevealed());
-    this.snapshots = this.snapshots.filter((s) => s.revealed <= snap.revealed);
-    const cutoff = snap.state.clock;
-    const curve = this.broker.state.equityCurve.filter((p) => p.time <= cutoff);
-    const events = this.broker.state.events.filter((e) => e.time <= cutoff);
-    this.broker.restore({ ...snap.state, equityCurve: curve, events });
+    const cursors = this.cursors();
+    const i = restart ? 0 : this.checkpointAt(cursors);
+    const cp = this.checkpoints[i];
+    this.checkpoints.length = i + 1;
+    this.broker.rollback(cp.broker);
+    this.replayFrom(this.broker, cp, cursors);
     // No date: the log's time column already gives the day, and hides it in blind mode.
     this.broker.logInfo(`Rewound to ${formatExchangeTime(time)} ET. Results after a rewind are not blind.`);
-    this.lastSnapshotVersion = this.broker.version;
     this.rewinds += 1;
   }
 
   submit(req: OrderRequest): SubmitResult {
     const r = this.broker.submit(req);
-    this.snapshot();
+    this.checkpoint();
     return r;
   }
 
   cancel(orderId: string): boolean {
     const ok = this.broker.cancel(orderId);
-    this.snapshot();
+    this.checkpoint();
     return ok;
   }
 
   modify(orderId: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }) {
     const r = this.broker.modify(orderId, changes);
-    this.snapshot();
+    this.checkpoint();
     return r;
   }
 
   closePosition(symbol: string): SubmitResult {
     const r = this.broker.closePosition(symbol);
-    this.snapshot();
+    this.checkpoint();
     return r;
   }
 }

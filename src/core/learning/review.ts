@@ -98,16 +98,19 @@ export function equityAt(curve: readonly EquityPoint[], time: number, fallback: 
   return eq;
 }
 
-function excursion(perShare: number, trip: RoundTrip, riskPerShare: number | null): Excursion {
+/** An excursion of `dollars` (open P/L), also per share, as % of the position and in R, at the trade's full size. */
+function excursion(dollars: number, trip: RoundTrip, riskPerShare: number | null): Excursion {
+  const size = trip.maxQuantity;
   return {
-    perShare,
-    dollars: perShare * trip.maxQuantity,
-    pct: trip.avgEntry > 0 ? (perShare / trip.avgEntry) * 100 : 0,
-    r: riskPerShare ? perShare / riskPerShare : null,
+    perShare: size > 0 ? dollars / size : 0,
+    dollars,
+    pct: trip.avgEntry > 0 && size > 0 ? (dollars / (trip.avgEntry * size)) * 100 : 0,
+    r: riskPerShare && size > 0 ? dollars / (riskPerShare * size) : null,
   };
 }
 
 const money = (v: number) => `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`;
+const signed = (v: number) => `${v < -0.005 ? '−' : '+'}$${Math.abs(v).toFixed(2)}`;
 
 export interface ReviewInput {
   trip: RoundTrip;
@@ -128,10 +131,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const riskPerShare = initialRiskPerShare(trip);
   const r = rMultiple(trip);
   const rr = plannedRR(trip);
-  const mfePerShare = Math.max(0, long ? trip.highWhileOpen - trip.avgEntry : trip.avgEntry - trip.lowWhileOpen);
-  const maePerShare = Math.max(0, long ? trip.avgEntry - trip.lowWhileOpen : trip.highWhileOpen - trip.avgEntry);
-  const mfe = excursion(mfePerShare, trip, riskPerShare);
-  const mae = excursion(maePerShare, trip, riskPerShare);
+  // The best price reached, measured from the average entry like the target.
+  const bestMove = Math.max(0, long ? trip.highWhileOpen - trip.avgEntry : trip.avgEntry - trip.lowWhileOpen);
+  // Best and worst open P/L. Older trades without them: the price range at full size.
+  const best = trip.bestOpenPnl ?? bestMove * trip.maxQuantity;
+  const worst = trip.worstOpenPnl ?? -Math.max(0, long ? trip.avgEntry - trip.lowWhileOpen : trip.highWhileOpen - trip.avgEntry) * trip.maxQuantity;
+  const mfe = excursion(Math.max(0, best), trip, riskPerShare);
+  const mae = excursion(Math.max(0, -worst), trip, riskPerShare);
   const exitReason = exitReasonOf(trip, input.fills, input.orders);
   const equityAtEntry = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
@@ -170,7 +176,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     title: `${outcome === 'win' ? 'Won' : outcome === 'loss' ? 'Lost' : 'Broke even'} ${money(Math.abs(trip.pnl))}${rText}`,
     detail: `${long ? 'Long' : 'Short'} ${trip.maxQuantity} @ ${trip.avgEntry.toFixed(2)}, exited @ ${trip.avgExit?.toFixed(2) ?? '—'} via ${
       { stop_loss: 'your stop loss', take_profit: 'your profit target', manual: 'a manual exit', other: 'an exit order' }[exitReason]
-    }. While open, price moved at most ${mfePerShare.toFixed(2)} in your favour and ${maePerShare.toFixed(2)} against you.`,
+    }. While open, the trade was at best ${signed(best)} and at worst ${signed(worst)} (before costs).`,
   });
 
   if (riskPerShare === null) {
@@ -211,7 +217,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     if (exitReason === 'take_profit') {
       findings.push({ tone: 'good', title: 'Target reached', detail: `Your target ${targetDistanceAtr !== null ? `(${targetDistanceAtr.toFixed(1)}× ATR away) ` : ''}was realistic for this move.` });
     } else {
-      const reach = targetDistance > 0 ? (mfePerShare / targetDistance) * 100 : 0;
+      const reach = targetDistance > 0 ? (bestMove / targetDistance) * 100 : 0;
       findings.push({
         tone: reach < 50 ? 'bad' : 'neutral',
         title: reach < 50 ? 'Target was far from what price offered' : 'Target not reached',
@@ -225,7 +231,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   let capturePct: number | null = null;
   // Only once price moved at least a tick your way: below that there was no open profit to keep
   // (and float noise in the average entry would make a nonsense percentage).
-  if (mfePerShare >= 0.01 - 1e-9) {
+  if (mfe.perShare >= 0.01 - 1e-9) {
     capturePct = (trip.pnl / mfe.dollars) * 100;
     if (outcome === 'win' && capturePct < 40) {
       findings.push({ tone: 'bad', title: 'Gave back most of the open profit', detail: `Peak open profit was ${money(mfe.dollars)}; you kept ${money(trip.pnl)} (${capturePct.toFixed(0)}%).` });

@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { ReplayEngine } from '../replay/ReplayEngine';
 import { ReplaySession } from '../replay/ReplaySession';
 import { DemoDataProvider } from '../data/demoProvider';
-import { ZERO_COST_CONFIG } from '../broker/config';
+import { ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
+import type { BrokerCheckpoint } from '../broker/SimBroker';
 import { ema, rsi, vwap } from '../indicators/indicators';
-import type { Bar } from '../types';
-import { et, randomBars } from './helpers';
+import type { Bar, UnixSeconds } from '../types';
+import { bar, et, randomBars } from './helpers';
 
 const D = '2025-01-15';
 
@@ -97,6 +98,13 @@ describe('ReplayEngine: no look-ahead', () => {
 
 function setupFor() {
   return { symbol: 'TEST', date: D, startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 };
+}
+
+/** Everything about a session's account (the log without its rewind lines). */
+function account(s: ReplaySession) {
+  const { events, version, ...rest } = s.broker.state;
+  void version;
+  return { ...rest, events: events.filter((e) => !e.message.startsWith('Rewound')) };
 }
 
 describe('ReplaySession: rewind, jump, and fills', () => {
@@ -195,6 +203,138 @@ describe('ReplaySession: rewind, jump, and fills', () => {
   });
 });
 
+describe('ReplaySession: undo is exact', () => {
+  const bars = randomBars(600, 33, et(D, '06:00'));
+  const T = (hhmm: string) => et(D, hhmm);
+  const SLIPPY: ExecutionConfig = { ...ZERO_COST_CONFIG, slippage: { bps: 25, impactBpsPerPctOfVolume: 0 } };
+  const bracketIfFlat = (s: ReplaySession) => {
+    if (s.broker.position('TEST').quantity !== 0) return;
+    const px = s.engine.lastPrice()!;
+    s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 10, stopLoss: px - 0.4, takeProfit: px + 0.4 });
+  };
+  type Action = [UnixSeconds, (s: ReplaySession) => void];
+  /** Trading at fixed times, and a settings change that changes later fills. */
+  const ACTIONS: Action[] = [
+    ...['09:30', '09:41', '09:52', '10:03', '10:14', '10:25', '10:36', '10:47', '10:58'].map((t): Action => [T(t), bracketIfFlat]),
+    [T('10:20'), (s: ReplaySession) => s.setConfig(SLIPPY)] as Action,
+  ].sort((a, b) => a[0] - b[0]);
+
+  /** A session that ran straight to `target`, trading as ACTIONS says until `actionsUntil`. */
+  const play = (target: UnixSeconds, actionsUntil = target, move = (s: ReplaySession, t: UnixSeconds) => void s.jumpTo(t)) => {
+    const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+    for (const [t, act] of ACTIONS) {
+      if (t > Math.min(target, actionsUntil)) break;
+      if (t > s.now) move(s, t);
+      act(s);
+    }
+    if (target > s.now) move(s, target);
+    return s;
+  };
+
+  it('a rewind leaves the account exactly as if the replay had run straight to that moment', () => {
+    for (const target of [T('09:45'), T('10:07') + 30, T('10:20'), T('10:20') + 30, T('10:33'), T('10:59') + 30]) {
+      const s = play(T('11:30'));
+      s.jumpTo(target);
+      expect(account(s)).toEqual(account(play(target)));
+      expect(s.broker.cfg).toBe(SLIPPY); // the current settings still apply from here on
+    }
+    // Rewind, go forward (no trading this time), rewind again.
+    const s = play(T('11:30'));
+    s.jumpTo(T('10:50'));
+    expect(account(s)).toEqual(account(play(T('10:50'))));
+    s.jumpTo(T('11:10'));
+    expect(account(s)).toEqual(account(play(T('11:10'), T('10:50'))));
+    s.jumpTo(T('10:05'));
+    expect(account(s)).toEqual(account(play(T('10:05'))));
+    expect(s.broker.state.roundTrips.length).toBeGreaterThan(1);
+  });
+
+  it('step back after a multi-bar step or fast Play undoes only the last bar', () => {
+    const moves: Record<string, (s: ReplaySession) => void> = {
+      '+1 15m': (s) => void s.stepCandle('15m'),
+      'Play at 3600x': (s) => void s.advance(180),
+    };
+    for (const [name, move] of Object.entries(moves)) {
+      const s = play(T('10:00'));
+      for (let i = 0; i < 4; i++) move(s);
+      const target = s.stepBackTarget()!;
+      const predicted = s.undoneBy(target);
+      const before = s.broker.state.roundTrips.length;
+      s.stepBack();
+      const ref = play(target, T('10:00'));
+      expect(account(s), name).toEqual(account(ref));
+      expect(predicted, name).toEqual({ open: 0, closed: before - ref.broker.state.roundTrips.length });
+      // The chart and the account agree: the mark is the last bar still on the chart.
+      expect(s.broker.markPrice('TEST')).toBe(s.engine.lastPrice());
+    }
+  });
+
+  it('Restart returns to the starting account, even after an order placed before the first bar', () => {
+    const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+    s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100, stopLoss: 90 });
+    for (let i = 0; i < 5; i++) s.step();
+    s.closePosition('TEST');
+    s.step();
+    expect(s.broker.state.roundTrips[0].closed).toBe(true);
+    expect(s.undoneBy(s.start, true)).toEqual({ open: 0, closed: 1 });
+    // Going back to the start time keeps what was done at that moment...
+    s.jumpTo(s.start);
+    expect(s.broker.workingOrders()).toHaveLength(1);
+    // ...Restart does not.
+    s.restart();
+    expect(s.broker.state.orders).toEqual([]);
+    expect(s.broker.state.fills).toEqual([]);
+    expect(s.broker.state.roundTrips).toEqual([]);
+    expect(s.broker.account().cash).toBe(100_000);
+    s.step();
+    expect(s.broker.state.fills).toEqual([]);
+  });
+
+  it('keeps few, small checkpoints however long the session and however many trades', () => {
+    const s = new ReplaySession(engineWith(randomBars(3000, 7, et(D, '04:00')), et(D, '04:00'), et('2025-01-17', '20:00')), { ...setupFor(), startTime: '04:00' }, ZERO_COST_CONFIG, 's', 'DEMO');
+    let actions = 0;
+    for (let i = 0; i < 2900 && !s.finished; i++) {
+      if (i % 20 === 0) {
+        const px = s.engine.lastPrice()!;
+        if (s.broker.position('TEST').quantity === 0) s.submit({ symbol: 'TEST', action: 'buy', type: 'limit', extendedHours: true, quantity: 10, limitPrice: px + 0.05 });
+        else s.closePosition('TEST');
+        actions++;
+      }
+      s.step();
+    }
+    const checkpoints = (s as unknown as { checkpoints: Array<{ broker: BrokerCheckpoint }> }).checkpoints;
+    expect(s.broker.state.roundTrips.filter((t) => t.closed).length).toBeGreaterThan(20);
+    expect(checkpoints.length).toBeLessThanOrEqual(actions + 2900 / 256 + 2);
+    // Each holds only what can still change (the log lines it lists are shared, not copied).
+    for (const { broker } of checkpoints) {
+      const { events, ...own } = broker;
+      void events;
+      expect(JSON.stringify(own).length).toBeLessThan(3000);
+    }
+  });
+});
+
+describe('Daily base bars', () => {
+  // Daily bars are stamped at the 09:30 open, like a daily CSV.
+  const days = ['2025-02-03', '2025-02-04', '2025-02-05', '2025-02-06', '2025-02-07'];
+  const daily = days.map((d, i) => bar(et(d, '09:30'), 100 + i, 102 + i, 99 + i, 101 + i));
+
+  it('fills and equity points fall inside the regular session of their day', () => {
+    const e = new ReplayEngine({ symbol: 'XYZ', start: et('2025-02-05', '09:30'), end: et('2025-02-07', '16:00'), baseTimeframe: '1D' }, daily);
+    const s = new ReplaySession(e, { symbol: 'XYZ', date: '2025-02-05', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 2 }, ZERO_COST_CONFIG, 'd', 'DEMO');
+    expect(s.broker.state.clock).toBe(et('2025-02-04', '16:00'));
+    s.submit({ symbol: 'XYZ', action: 'buy', type: 'market', quantity: 10, takeProfit: 103.5 });
+    expect(s.broker.state.fills[0].time).toBe(et('2025-02-04', '16:00'));
+    s.step(); // Feb 5: up bar 102 → 101 → 104 → 103, the target fills on the way up
+    const exit = s.broker.state.fills[1];
+    expect(exit.price).toBe(103.5);
+    expect(exit.time).toBeGreaterThan(et('2025-02-05', '09:30'));
+    expect(exit.time).toBeLessThan(et('2025-02-05', '16:00'));
+    expect(s.broker.state.clock).toBe(et('2025-02-05', '16:00'));
+    expect(s.broker.state.equityCurve.map((p) => p.time)).toEqual([et('2025-02-04', '16:00'), et('2025-02-05', '16:00')]);
+  });
+});
+
 describe('Demo data provider', () => {
   const p = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
 
@@ -251,5 +391,23 @@ describe('Demo data provider', () => {
     s.stepBack();
     s.stepBack();
     expect(s.engineFor('AAPL')!.now).toBe(s.engine.now);
+  });
+
+  it('rewinds several symbols exactly', async () => {
+    const run = async (target: UnixSeconds) => {
+      const { session: s } = await ReplaySession.load(p, { ...setupFor(), symbol: 'SPY', extraSymbols: ['AAPL'], lookbackDays: 1 }, ZERO_COST_CONFIG, 'm');
+      s.jumpTo(et(D, '09:40'));
+      for (const sym of ['SPY', 'AAPL']) {
+        const px = s.broker.markPrice(sym)!;
+        s.submit({ symbol: sym, action: 'buy', type: 'market', quantity: 10, stopLoss: px * 0.998, takeProfit: px * 1.002 });
+      }
+      s.jumpTo(target);
+      return s;
+    };
+    const s = await run(et(D, '11:00'));
+    s.stepCandle('15m', 'AAPL');
+    s.jumpTo(et(D, '10:07') + 30);
+    expect(account(s)).toEqual(account(await run(et(D, '10:07') + 30)));
+    expect(s.broker.state.roundTrips.filter((t) => t.closed).length).toBeGreaterThan(0);
   });
 });

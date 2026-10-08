@@ -3,7 +3,9 @@
  * moves elsewhere, or on Escape (returning focus to the button that opened it); and keep the panel
  * on screen: shifted sideways; when it does not fit below its button, the scrolling layout around
  * it (the phone terminal) moves up to make room, else it opens above when there is more room there;
- * whatever room it gets, it scrolls inside.
+ * whatever room it gets, it scrolls inside. Room is measured inside whatever clips the panel (the
+ * terminal's scroll box, not just the window), and the side it opens on is chosen only on open and
+ * resize, never while the user scrolls.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { modalOpen } from './common';
@@ -19,6 +21,19 @@ function scrollParent(el: HTMLElement | null): HTMLElement | null {
     if ((y === 'auto' || y === 'scroll') && p.scrollHeight > p.clientHeight) return p;
   }
   return null;
+}
+
+/** The part of the window `el` can be seen in: the viewport cut by every ancestor that clips. */
+function visibleBand(el: HTMLElement): { top: number; bottom: number } {
+  let top = 0;
+  let bottom = document.documentElement.clientHeight;
+  for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+    if (getComputedStyle(p).overflowY === 'visible') continue;
+    const r = p.getBoundingClientRect();
+    top = Math.max(top, r.top + p.clientTop);
+    bottom = Math.min(bottom, r.top + p.clientTop + p.clientHeight);
+  }
+  return { top, bottom };
 }
 
 /** Closes the popover that is currently open, if any. */
@@ -73,51 +88,71 @@ export function usePopover() {
 
   useLayoutEffect(() => {
     if (!open) return;
-    /** `reveal`: may scroll the layout to fit the panel (on open and resize, never while the user scrolls). */
-    const place = (reveal: boolean) => {
+    /** Whether the panel opened above its button. */
+    let up = false;
+    /** Room for the panel on its side of the button. A panel running past it would make the layout scroll (styles.css .popover). */
+    const room = (pop: HTMLElement, box: HTMLElement) => {
+      const band = visibleBand(pop);
+      return Math.max(0, up ? box.getBoundingClientRect().top - GAP - MARGIN - band.top : band.bottom - MARGIN - pop.getBoundingClientRect().top);
+    };
+    /** Choose the side and size, and scroll the layout to make room if needed. On open and resize only. */
+    const place = () => {
       const pop = popRef.current;
       const box = boxRef.current;
       if (!pop || !box) return;
       const vw = document.documentElement.clientWidth;
-      const vh = document.documentElement.clientHeight;
-      // Below the button, at its natural height (CSS caps it), to measure.
+      // Below the button, at its natural height (CSS caps it), to measure. Measuring drops the
+      // panel's own scroll position, which is put back below.
+      const scrolled = pop.scrollTop;
       pop.style.left = '0px';
       pop.style.top = '';
       pop.style.bottom = '';
       pop.style.removeProperty('--pop-room');
       const want = pop.offsetHeight;
-      let top = pop.getBoundingClientRect().top;
-      if (reveal && top + want > vh - MARGIN) {
+      let band = visibleBand(pop);
+      const top = pop.getBoundingClientRect().top;
+      if (top + want > band.bottom - MARGIN) {
         const scroller = scrollParent(box);
         if (scroller) {
           // Move up as far as needed, but never past the button or the end of the layout.
-          const boxTop = box.getBoundingClientRect().top;
-          const by = Math.min(top + want - (vh - MARGIN), boxTop - Math.max(0, scroller.getBoundingClientRect().top) - MARGIN, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
+          const by = Math.min(top + want - (band.bottom - MARGIN), box.getBoundingClientRect().top - band.top - MARGIN, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
           if (by > 0) {
             scroller.scrollTop += by;
-            top = pop.getBoundingClientRect().top;
+            band = visibleBand(pop);
           }
         }
       }
-      const below = vh - top - MARGIN;
-      const above = box.getBoundingClientRect().top - GAP - MARGIN;
-      const up = want > below && above > below;
+      const boxTop = box.getBoundingClientRect().top;
+      const below = band.bottom - MARGIN - pop.getBoundingClientRect().top;
+      const above = boxTop - GAP - MARGIN - band.top;
+      up = want > below && above > below;
       if (up) {
         pop.style.top = 'auto';
         pop.style.bottom = `calc(100% + ${GAP}px)`;
       }
-      // A panel running past the screen edge would make the whole app scroll (styles.css .popover).
-      pop.style.setProperty('--pop-room', `${Math.max(0, up ? above : below)}px`);
+      pop.style.setProperty('--pop-room', `${room(pop, box)}px`);
+      pop.scrollTop = scrolled;
       const r = pop.getBoundingClientRect();
       let shift = 0;
       if (r.right > vw - MARGIN) shift = vw - MARGIN - r.right;
       if (r.left + shift < MARGIN) shift = MARGIN - r.left;
       pop.style.left = `${shift}px`;
     };
-    place(true);
-    const onResize = () => place(true);
-    // The stacked layout scrolls the terminal, which moves the panel up or down.
-    const onScroll = () => place(false);
+    place();
+    const onResize = () => {
+      place();
+      // A field being edited stays in view when the window shrinks (an on-screen keyboard opening).
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && popRef.current?.contains(focused)) focused.scrollIntoView({ block: 'nearest' });
+    };
+    // The stacked layout scrolls the terminal, which moves the panel up or down: keep it inside
+    // what can be seen, on the same side. The panel's own scrolling changes nothing.
+    const onScroll = (e: Event) => {
+      const pop = popRef.current;
+      const box = boxRef.current;
+      if (!pop || !box || (e.target instanceof Node && pop.contains(e.target))) return;
+      pop.style.setProperty('--pop-room', `${room(pop, box)}px`);
+    };
     window.addEventListener('resize', onResize);
     window.addEventListener('scroll', onScroll, true);
     return () => {

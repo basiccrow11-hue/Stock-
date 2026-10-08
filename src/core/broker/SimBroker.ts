@@ -69,6 +69,22 @@ export interface BrokerState {
   version: number;
 }
 
+/** A restore point from SimBroker.checkpoint(). */
+export interface BrokerCheckpoint {
+  core: Omit<BrokerState, 'orders' | 'fills' | 'roundTrips' | 'equityCurve' | 'events'>;
+  orders: number;
+  /** Orders that were still open, by index (the others never change again). */
+  openOrders: Array<[number, Order]>;
+  fills: number;
+  trips: number;
+  /** Trips that were still open, by index. */
+  openTrips: Array<[number, RoundTrip]>;
+  curve: number;
+  /** The latest equity point, which later bars at the same time update. */
+  curveLast?: EquityPoint;
+  events: BrokerEvent[];
+}
+
 export interface SubmitResult {
   ok: boolean;
   order?: Order;
@@ -156,6 +172,66 @@ export class SimBroker {
   restore(state: BrokerState): void {
     this.s = structuredClone(state);
     this.openFrom = 0;
+  }
+
+  /**
+   * A cheap restore point for rollback(). Finished orders, closed trips, fills, equity points before
+   * the latest one and log lines are never changed once written, so the checkpoint keeps how many
+   * there were and copies only what can still change.
+   */
+  checkpoint(): BrokerCheckpoint {
+    const { orders, fills, roundTrips, equityCurve, events, ...core } = this.s;
+    this.liveOrders(); // moves openFrom past finished orders
+    const openOrders: Array<[number, Order]> = [];
+    for (let i = this.openFrom; i < orders.length; i++) if (isOpen(orders[i])) openOrders.push([i, structuredClone(orders[i])]);
+    const openTrips: Array<[number, RoundTrip]> = [];
+    for (const id of Object.values(core.openTripBySymbol)) {
+      let i = roundTrips.length - 1;
+      while (i >= 0 && roundTrips[i].id !== id) i--;
+      if (i >= 0) openTrips.push([i, structuredClone(roundTrips[i])]);
+    }
+    const last = equityCurve[equityCurve.length - 1];
+    return {
+      core: structuredClone(core),
+      orders: orders.length,
+      openOrders,
+      fills: fills.length,
+      trips: roundTrips.length,
+      openTrips,
+      curve: equityCurve.length,
+      curveLast: last && { ...last },
+      events: events.slice(),
+    };
+  }
+
+  /** The state at `cp`, rebuilt from the current one, which must have come from it. */
+  private stateAt(cp: BrokerCheckpoint): BrokerState {
+    const s = this.s;
+    if (s.orders.length < cp.orders || s.fills.length < cp.fills || s.roundTrips.length < cp.trips || s.equityCurve.length < cp.curve) {
+      throw new Error('That checkpoint is not from this account’s history.');
+    }
+    const orders = s.orders.slice(0, cp.orders);
+    for (const [i, o] of cp.openOrders) orders[i] = structuredClone(o);
+    const roundTrips = s.roundTrips.slice(0, cp.trips);
+    for (const [i, t] of cp.openTrips) roundTrips[i] = structuredClone(t);
+    const equityCurve = s.equityCurve.slice(0, cp.curve);
+    if (cp.curveLast) equityCurve[cp.curve - 1] = { ...cp.curveLast };
+    // The lists are new arrays; the entries they share with this state are never changed.
+    return { ...structuredClone(cp.core), orders, fills: s.fills.slice(0, cp.fills), roundTrips, equityCurve, events: cp.events.slice() };
+  }
+
+  /** Go back to `cp`, taken earlier on this broker. */
+  rollback(cp: BrokerCheckpoint): void {
+    const version = this.s.version;
+    this.s = this.stateAt(cp);
+    // A version the UI has already seen is never reused.
+    this.s.version = version + 1;
+    this.openFrom = 0;
+  }
+
+  /** A separate broker starting from `cp`, taken earlier on this one, which stays as it is. */
+  fork(cp: BrokerCheckpoint): SimBroker {
+    return new SimBroker({ startingBalance: cp.core.startingBalance, config: this.cfg, state: this.stateAt(cp) });
   }
 
   /** Read-only view; do not mutate. */
@@ -500,14 +576,15 @@ export class SimBroker {
     const ext = session !== 'regular';
 
     // Excursions (MFE/MAE): every price the path passes while a trade is open, including the part of
-    // the bar before a trade closes in it. The path is straight between its points, so reaching each
-    // point and each fill level covers it.
+    // the bar before a trade closes in it. The path is straight between its points and open P/L is
+    // linear in price between fills, so reaching each point and each fill level covers it.
     let tripId = this.s.openTripBySymbol[symbol];
     const reach = (price: number) => {
       if (!tripId) return;
       const trip = this.tripById(tripId)!;
       trip.highWhileOpen = Math.max(trip.highWhileOpen, price);
       trip.lowWhileOpen = Math.min(trip.lowWhileOpen, price);
+      this.markOpenPnl(trip, price);
     };
     reach(path[0]);
 
@@ -542,6 +619,14 @@ export class SimBroker {
     this.recordEquity(bar.time + barSeconds);
     this.touch();
     return this.s.fills.slice(fillsBefore);
+  }
+
+  /** Record `trip`'s open P/L (before costs) with its symbol at `price`: what it made so far plus the shares still held. */
+  private markOpenPnl(trip: RoundTrip, price: number): void {
+    const pos = this.position(trip.symbol);
+    const open = trip.pnl + trip.commission + (price - pos.avgPrice) * pos.quantity;
+    trip.bestOpenPnl = Math.max(trip.bestOpenPnl ?? open, open);
+    trip.worstOpenPnl = Math.min(trip.worstOpenPnl ?? open, open);
   }
 
   /** Update marks without trading (e.g. for symbols with no orders in a multi-symbol sim). */
@@ -804,6 +889,7 @@ export class SimBroker {
     const posQty = Math.abs(this.position(symbol).quantity);
     trip.maxQuantity = Math.max(trip.maxQuantity, posQty);
     trip.pnl = money(trip.pnl);
+    this.markOpenPnl(trip, fill.price);
     if (posQty === 0) {
       trip.closed = true;
       trip.exitTime = fill.time;

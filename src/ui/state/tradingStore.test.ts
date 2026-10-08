@@ -104,3 +104,33 @@ describe('the simulated market on the chart', () => {
     }
   });
 });
+
+describe('blind replays', () => {
+  it('hide the date in every open tab while running and give it back at the end', async () => {
+    const store = await import('./tradingStore');
+    const { useLiveBlind } = await import('./liveBlind');
+    const ok = await store.startReplay({
+      providerId: 'demo',
+      symbol: 'SPY',
+      date: '2024-03-12',
+      startTime: '10:00',
+      endTime: '10:30',
+      startingBalance: 25_000,
+      lookbackDays: 1,
+      timeframe: '1m',
+      speed: 1,
+      blind: true,
+    });
+    expect(ok).toBe(true);
+    const id = store.useTrading.getState().session!.id;
+    expect(useLiveBlind.getState().sessions).toEqual({ [id]: '2024-03-12' });
+    expect(JSON.parse(localStorage.getItem('stock-replay-live-blind')!)[id].start).toBe('2024-03-12');
+
+    store.jumpTo(exchangeTimeToUnix('2024-03-12', 10 * 60 + 30));
+    const s = store.useTrading.getState();
+    expect(s.finished).toBe(true);
+    expect(s.session).toMatchObject({ id, blind: false, label: 'SPY · 2024-03-12' });
+    expect(useLiveBlind.getState().sessions).toEqual({});
+    expect(localStorage.getItem('stock-replay-live-blind')).toBeNull();
+  });
+});
