@@ -203,6 +203,12 @@ describe('practice tracker', () => {
     }
     expect(today(m)?.activeSeconds).toBeGreaterThanOrEqual(539);
     expect(today(m)?.activeSeconds).toBeLessThanOrEqual(541);
+    // Closing the tab while it is hidden credits nothing for the hidden time.
+    setVisibility('hidden');
+    const atHide = today(m)!.activeSeconds;
+    vi.advanceTimersByTime(4_900);
+    window.dispatchEvent(new Event('pagehide'));
+    expect(today(m)!.activeSeconds).toBe(atHide);
     stop();
   });
 

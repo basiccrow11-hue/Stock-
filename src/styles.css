@@ -111,7 +111,8 @@ input[type='text'], input[type='number'], input[type='date'], input[type='time']
   outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
-input.draft-number { padding-left: 6px; padding-right: 6px; }
+/* Indicator settings: number boxes never shrink below their value; the indicator name wraps instead. */
+input.draft-number { padding-left: 6px; padding-right: 6px; flex-shrink: 0; }
 textarea { width: 100%; resize: vertical; min-height: 54px; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-2); }
 label.field > input, label.field > select { font-size: 13px; color: var(--text); }
@@ -204,7 +205,9 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .chart-legend .neg { color: var(--chart-neg); }
 .chart-legend .muted { color: var(--chart-text); }
 .pick-hint { position: absolute; top: 34px; left: 50%; transform: translateX(-50%); background: var(--accent-2); color: var(--on-accent); padding: 4px 10px; border-radius: 999px; font-size: 12px; z-index: 4; pointer-events: none; }
-.drawing-layer { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; overflow: hidden; }
+/* touch-action: none lets a finger drag a drawing instead of scrolling the page. It sits on the svg
+   because browsers ignore it on the shapes inside; touches elsewhere fall through to the chart. */
+.drawing-layer { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; overflow: hidden; touch-action: none; }
 .drawing-layer.active { pointer-events: all; cursor: crosshair; }
 .drawing-layer .shape, .drawing-layer .handle { pointer-events: visiblePainted; cursor: move; }
 .drawing-layer .hit { stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: move; }
@@ -409,9 +412,14 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
     grid-template-areas: 'chart watch' 'chart right' 'bottom right';
   }
 }
-/* Phones: one scrolling column. Panels keep their own height instead of shrinking to fit, so the
-   watchlist and the order ticket never collapse to nothing. */
-@media (max-width: 820px) {
+/* Not much height to share: the bottom panel gives some to the chart. */
+@media (max-width: 1180px) and (max-height: 800px) {
+  .terminal { grid-template-rows: 180px minmax(0, 1fr) 200px; }
+}
+/* Phones, and screens too short for the grid (a phone in landscape, a 1024x600 tablet): one
+   scrolling column. Panels keep their own height instead of shrinking to fit, so the watchlist and
+   the order ticket never collapse to nothing. ChartView uses the same query (STACKED_LAYOUT). */
+@media (max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 520px) {
   .terminal { display: flex; flex-direction: column; overflow: auto; }
   .terminal > .panel { flex-shrink: 0; }
   .area-watch { max-height: 220px; }
@@ -419,7 +427,12 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .chart-host { flex: none; height: clamp(260px, 55vh, 420px); }
   .area-right { overflow: visible; }
   .area-bottom { height: 320px; }
+  .area-bottom .tabs { flex-wrap: wrap; }
+}
+@media (max-width: 820px) {
   .two-col { grid-template-columns: minmax(0, 1fr); }
+  /* The journal list wraps its cells (the long data-source badge too) so P/L stays on screen. */
+  .journal-cols table.grid td, .journal-cols table.grid .badge { white-space: normal; }
   .appearance-grid { grid-template-columns: 1fr; }
   .metrics { gap: 10px; }
   /* Phones: the page tabs get a row of their own and every group wraps, so nothing runs off screen. */

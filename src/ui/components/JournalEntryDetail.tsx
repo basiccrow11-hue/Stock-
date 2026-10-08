@@ -35,8 +35,11 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   useEffect(() => {
     pending.current = saved ? null : { id: entry.id, notes, tag, prevTag: entry.tag };
   }, [notes, tag, saved, entry.id, entry.tag]);
+  /** The stored notes the editor last took in. */
+  const base = useRef(entry.notes);
 
   useEffect(() => {
+    base.current = entry.notes;
     setNotes(entry.notes);
     setTag(entry.tag);
     setSaved(true);
@@ -58,6 +61,19 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
     // Reset local edits only when switching to another entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry.id]);
+
+  // Notes saved elsewhere (another tab, or a save merged with one) replace the fields not being
+  // edited here, so the next save never writes an old value back over them.
+  useEffect(() => {
+    const prev = base.current;
+    if (prev === entry.notes) return;
+    base.current = entry.notes;
+    setNotes((local) => {
+      const out = { ...local };
+      for (const { key } of NOTE_FIELDS) if (local[key] === prev[key]) out[key] = entry.notes[key];
+      return out;
+    });
+  }, [entry.notes]);
 
   // Debounced autosave.
   useEffect(() => {

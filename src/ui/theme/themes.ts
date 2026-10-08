@@ -5,7 +5,7 @@
  * concrete values every surface needs: CSS variables for the app chrome and a palette for the
  * canvas charts, with text colours adjusted to stay readable whatever colours were picked.
  */
-import { chartLabelFill, chroma, contrast, deltaE, distance, fillFor, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
+import { chartLabelFill, chroma, contrast, distance, fillFor, hueDistance, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
 
 export type ThemeId = 'midnight' | 'graphite' | 'light';
 export type ChartStyle = 'candles' | 'hollow' | 'bars' | 'line' | 'area';
@@ -326,11 +326,12 @@ export interface ResolvedTheme {
 export const COLOURFUL = 0.04;
 
 /**
- * OKLab distance P/L text keeps from the neutral text around it (body, secondary and muted). A
- * slate blue can be colourful enough on its own and still be read as one more grey label next to a
- * bluish muted grey (#5f6982 next to #62697b is 0.012); 0.06 and up is told apart at a glance.
+ * How far P/L text must differ in colour (hueDistance, lightness ignored) from the neutral text
+ * around it. The greys are slightly bluish, so a greyish blue can pass COLOURFUL and still read as
+ * one more muted label (#5f6982 next to #62697b: 0.012). Clear blues sit at 0.045 and up (Tableau
+ * blue on Midnight, Okabe-Ito sky blue on Light), which colour-blind users rely on.
  */
-export const NEUTRAL_GAP = 0.06;
+export const NEUTRAL_GAP = 0.035;
 
 /** Badges and alerts tint their background with this much of their text colour (see styles.css). */
 export const BADGE_TINT = 0.11;
@@ -372,19 +373,19 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const muted = readableOnAll(ui.muted, [ui.panel, ...surfaces]);
   const bg = c.background;
   // Candle colours only work as P/L colours when the text actually drawn with them (darkened or
-  // lightened for contrast) is clearly coloured, different from each other and from body text, on
-  // the panels and on the chart. Monochrome or pastel candles fall back to the standard green and red.
-  // Colourfulness is OKLCH chroma: HSL saturation would call a deep green lightened for a dark
-  // panel "grey" (#1b5e20 becomes #719b74, saturation 0.17), though it still plainly reads as green.
-  // `neutrals` is the text P/L sits among, body text first.
+  // lightened for contrast) is clearly coloured, different from each other and from the neutral text
+  // around it, on the panels and on the chart. Monochrome, pastel or greyish candles fall back to the
+  // standard green and red. Colourfulness is OKLCH chroma: HSL saturation would call a deep green
+  // lightened for a dark panel "grey" (#1b5e20 becomes #719b74, saturation 0.17), though it still
+  // plainly reads as green. `neutrals` is the text P/L sits among, body text first.
   const standsOut = (x: string, neutrals: string[]) =>
-    chroma(x) >= COLOURFUL && distance(x, neutrals[0]) >= 60 && neutrals.every((n) => deltaE(x, n) >= NEUTRAL_GAP);
+    chroma(x) >= COLOURFUL && distance(x, neutrals[0]) >= 60 && neutrals.every((n) => hueDistance(x, n) >= NEUTRAL_GAP);
   const tellApart = (x: string, y: string, neutrals: string[]) => distance(x, y) >= 60 && standsOut(x, neutrals) && standsOut(y, neutrals);
-  const axisText = readable(c.text, bg, 4.5);
-  const pnlUsesCandles =
-    a.pnlFollowsCandles &&
-    tellApart(text(c.up), text(c.down), [ui.text, ui.text2, muted]) &&
-    tellApart(readable(c.up, bg, 4.5), readable(c.down, bg, 4.5), [readable(ui.text, bg, 7), axisText]);
+  const pnlWorks = (up: string, down: string) =>
+    tellApart(text(up), text(down), [ui.text, ui.text2, muted]) && tellApart(readable(up, bg, 4.5), readable(down, bg, 4.5), [readable(ui.text, bg, 7)]);
+  // Falling back only helps when green and red pass where the candles fail (a custom chart
+  // background can defeat both); otherwise the user's colours stay.
+  const pnlUsesCandles = a.pnlFollowsCandles && (pnlWorks(c.up, c.down) || !pnlWorks(LABEL_HUES.pos, LABEL_HUES.neg));
   const posHue = pnlUsesCandles ? c.up : LABEL_HUES.pos;
   const negHue = pnlUsesCandles ? c.down : LABEL_HUES.neg;
   const buyBg = fillFor('#ffffff', posHue, 4.5);
@@ -392,6 +393,7 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const accentUi = readable(a.accent, ui.panel, 3);
   const accentFill = fillFor('#ffffff', a.accent, 4.5);
   const selected = mix(ui.panel, a.accent, dark ? 0.18 : 0.12);
+  const axisText = readable(c.text, bg, 4.5);
   // Hover fills darken, so white text stays at 4.5:1 or better.
   const hoverFill = (fill: string) => mix(fill, '#000000', 0.12);
 

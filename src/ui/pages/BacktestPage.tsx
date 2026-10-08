@@ -1,6 +1,6 @@
 /** Rule-based backtester: build IF/THEN rules, pick data, run without look-ahead, inspect results. */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CandlestickSeries, createChart, createSeriesMarkers, type SeriesMarker, type Time } from 'lightweight-charts';
+import { CandlestickSeries, createChart, createSeriesMarkers, PriceLineSource, type SeriesMarker, type Time } from 'lightweight-charts';
 import {
   OPERATOR_LABELS,
   STRATEGY_PRESETS,
@@ -186,8 +186,11 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
       layout: { ...themed.layout, fontSize: 11, attributionLogo: false },
       timeScale: { ...themed.timeScale, timeVisible: timeframe !== '1D' },
       localization: { locale: CHART_LOCALE },
+      // On a scrolling page a vertical swipe scrolls the page.
+      handleScroll: { vertTouchDrag: false },
     });
-    const s = chart.addSeries(CandlestickSeries, candleOptions(panel));
+    // The last-price line marks the same candle as its label (the last one on screen).
+    const s = chart.addSeries(CandlestickSeries, { ...candleOptions(panel), priceLineSource: PriceLineSource.LastVisible });
     const data = result.candles.map((c: Bar) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }));
     s.setData(data);
     // The last-price label shows the last candle on screen: fill it in that candle's colour, adjusted

@@ -187,8 +187,9 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
       settleNow();
     } else tick(true);
   };
-  // Closing or leaving the page: credit the seconds since the last tick, which were spent in front.
-  const onPageHide = () => tick(true);
+  // Closing or leaving the page: credit the seconds since the last tick if they were spent in front.
+  // A tab closed while already hidden has nothing to credit.
+  const onPageHide = () => tick(document.visibilityState === 'visible');
   const onStorage = (e: StorageEvent) => {
     if (e.key === KEY) useStreak.setState({ data: load() });
   };

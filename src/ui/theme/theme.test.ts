@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { chartLabelFill, chartLabelText, chroma, contrast, deltaE, distance, fillFor, isHex, mix, normHex, parseHex, readable, toHex, withAlpha } from './color';
+import { chartLabelFill, chartLabelText, chroma, contrast, deltaE, distance, fillFor, hueDistance, isHex, mix, normHex, parseHex, readable, toHex, withAlpha } from './color';
 import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, NEUTRAL_GAP, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
 import { lastPriceColor } from '../chart/chartTheme';
 
@@ -180,11 +180,28 @@ describe('appearance', () => {
 
   it('keeps deep, clearly coloured candles as P/L colours on every theme', () => {
     // Lightened for a dark panel, these lose HSL saturation but still read as plainly green and red.
-    // (Teal #004d40 is not here: lightened for a dark panel it is a grey-teal, #6e9a92, too close to
-    // the muted labels.)
-    for (const up of ['#1b5e20', '#33691e', '#2e7d32'])
+    for (const up of ['#1b5e20', '#004d40', '#33691e', '#2e7d32'])
       for (const down of ['#b71c1c', '#c62828', '#d32f2f', '#880e4f', '#e65100'])
         for (const theme of THEME_IDS) expect(resolveTheme(sanitizeAppearance({ theme, colors: { up, down } })).pnlUsesCandles, `${theme} ${up}/${down}`).toBe(true);
+  });
+
+  it('keeps the standard colour-blind-safe pairs as P/L colours on every theme', () => {
+    const pairs = [
+      ['#56b4e9', '#e69f00'], // Okabe-Ito sky blue / orange
+      ['#0072b2', '#d55e00'], // Okabe-Ito blue / vermillion
+      ['#4e79a7', '#f28e2b'], // Tableau blue / orange
+      ['#4477aa', '#ee6677'], // Paul Tol blue / red
+      ['#4682b4', '#ff7f0e'], // steel blue / orange
+    ];
+    for (const [up, down] of pairs)
+      for (const theme of THEME_IDS) expect(resolveTheme(sanitizeAppearance({ theme, colors: { up, down } })).pnlUsesCandles, `${theme} ${up}/${down}`).toBe(true);
+  });
+
+  it('judges P/L colours on the panels only by panel text, and keeps candles when green and red would fail too', () => {
+    // A coloured chart axis text does not overrule the panels' P/L colours.
+    expect(resolveTheme(sanitizeAppearance({ theme: 'midnight', colors: { up: '#2962ff', down: '#ff9800', text: '#ff9800' } })).pnlUsesCandles).toBe(true);
+    expect(resolveTheme(sanitizeAppearance({ theme: 'midnight', colors: { text: '#26a69a' } })).pnlUsesCandles).toBe(true);
+    expect(resolveTheme(sanitizeAppearance({ theme: 'graphite', colors: { background: '#5d606b' } })).pnlUsesCandles).toBe(true);
   });
 
   it('falls back when P/L text would look like the grey labels next to it', () => {
@@ -192,7 +209,6 @@ describe('appearance', () => {
     for (const [theme, up] of [
       ['light', '#8899bb'],
       ['light', '#bbccff'],
-      ['light', '#446688'],
       ['midnight', '#002255'],
       ['midnight', '#446688'],
       ['midnight', '#8899bb'],
@@ -207,7 +223,7 @@ describe('appearance', () => {
         const up = toHex([(i * 97) % 256, (i * 57 + 31) % 256, (i * 151 + 7) % 256]);
         const r = resolveTheme(sanitizeAppearance({ theme, colors: { up, down: '#ef5350' } }));
         if (!r.pnlUsesCandles) continue;
-        for (const n of ['--text', '--text-2', '--muted']) expect(deltaE(r.vars['--pos'], r.vars[n]), `${theme} ${up} vs ${n}`).toBeGreaterThanOrEqual(NEUTRAL_GAP);
+        for (const n of ['--text', '--text-2', '--muted']) expect(hueDistance(r.vars['--pos'], r.vars[n]), `${theme} ${up} vs ${n}`).toBeGreaterThanOrEqual(NEUTRAL_GAP);
       }
   });
 

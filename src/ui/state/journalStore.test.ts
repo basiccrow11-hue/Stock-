@@ -32,3 +32,38 @@ describe('journal reviews', () => {
     expect(useJournal.getState().entries[0].reviewedOn).toBe('2026-10-08');
   });
 });
+
+describe('journal in two tabs', () => {
+  it('never writes a stale copy back over notes another tab saved, and counts the review once', async () => {
+    vi.doMock('../services/idb', () => {
+      const db = ((globalThis as { __journalDb?: Map<string, unknown> }).__journalDb ??= new Map());
+      return {
+        idb: {
+          all: async () => [...db.values()],
+          get: async (_s: string, k: string) => db.get(k),
+          set: async (_s: string, k: string, v: unknown) => void db.set(k, structuredClone(v)),
+          delete: async (_s: string, k: string) => void db.delete(k),
+        },
+      };
+    });
+    const db = ((globalThis as { __journalDb?: Map<string, unknown> }).__journalDb ??= new Map());
+    db.set('t1', { id: 't1', exitTime: 1, createdAt: 1, notes: { ...EMPTY_NOTES } });
+    const { dayKey } = await import('../../core/streak/streak');
+    vi.resetModules();
+    const a = (await import('./journalStore')).useJournal;
+    vi.resetModules();
+    const b = (await import('./journalStore')).useJournal;
+    await a.getState().load();
+    await b.getState().load();
+    // Tab A writes the first note. Tab B, not yet told, writes another field from its old copy.
+    await a.getState().updateNotes('t1', { ...EMPTY_NOTES, why: 'A' });
+    await b.getState().updateNotes('t1', { ...EMPTY_NOTES, setup: 'B' });
+    expect((db.get('t1') as JournalEntry).notes).toMatchObject({ why: 'A', setup: 'B' });
+    const reviews = JSON.parse(localStorage.getItem('stock-replay-streak')!).days[dayKey(new Date())].reviews;
+    expect(reviews).toBe(1);
+    // Each tab hears about the other's writes and shows the stored version.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(a.getState().entries[0].notes).toMatchObject({ why: 'A', setup: 'B' });
+    vi.doUnmock('../services/idb');
+  });
+});

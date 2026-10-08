@@ -98,6 +98,16 @@ export function deltaE(x: string, y: string): number {
   return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
 }
 
+/**
+ * Difference in colour alone, ignoring lightness (distance in OKLab's a/b plane). Darker or lighter
+ * text of the same grey stays 0; it measures whether something reads as a different colour.
+ */
+export function hueDistance(x: string, y: string): number {
+  const p = oklab(x);
+  const q = oklab(y);
+  return Math.hypot(p[1] - q[1], p[2] - q[2]);
+}
+
 function oklab(c: string): [number, number, number] {
   const [r, g, b] = parseHex(c).map((v) => {
     const x = v / 255;

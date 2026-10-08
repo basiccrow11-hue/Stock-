@@ -379,7 +379,7 @@ export function AppearanceCard() {
       </label>
       {a.pnlFollowsCandles && !pnlUsesCandles && (
         <p className="small muted" style={{ margin: 0 }}>
-          These candle colours are too grey or too alike to tell gains from losses, so profit and loss stays green and red.
+          These candle colours would be hard to tell from each other or from the grey text around them, so profit and loss stays green and red.
         </p>
       )}
       <p className="small muted" style={{ margin: 0 }}>

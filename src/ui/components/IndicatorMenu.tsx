@@ -88,7 +88,7 @@ export function IndicatorMenu() {
           <div className="stack">
             {indicators.map((i) => (
               <div key={i.id} className="row" style={{ gap: 6 }}>
-                <label className="check" style={{ flex: 1 }}>
+                <label className="check" style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
                   <input type="checkbox" checked={i.enabled} onChange={(e) => updateIndicator(i.id, { enabled: e.target.checked })} />
                   {indicatorName(i)}
                 </label>

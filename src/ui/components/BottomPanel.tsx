@@ -19,6 +19,18 @@ function useTimeLabel(): (t: number) => string {
 
 export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string) => void }) {
   const [tab, setTab] = useState<Tab>('positions');
+  const panelRef = useRef<HTMLDivElement>(null);
+  const lastFocus = useRef<Element | null>(null);
+  // A focused control that disappears (its order filled or was cancelled, its position closed)
+  // hands focus to the open tab rather than dropping it on the page body. Children run their effects
+  // first, so a control that takes focus back itself (the order price) wins.
+  useEffect(() => {
+    const el = lastFocus.current;
+    if (el && !el.isConnected && (document.activeElement === document.body || !document.activeElement)) {
+      lastFocus.current = null;
+      panelRef.current?.querySelector<HTMLButtonElement>('.tabs button.on')?.focus();
+    }
+  });
   const positions = useTrading((s) => s.positions);
   const orders = useTrading((s) => s.orders);
   const fills = useTrading((s) => s.fills);
@@ -38,7 +50,7 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
   ];
 
   return (
-    <div className="panel area-bottom">
+    <div className="panel area-bottom" ref={panelRef} onFocus={(e) => (lastFocus.current = e.target)}>
       <div className="tabs">
         {tabs
           .filter((t) => !t.hide)
@@ -48,12 +60,6 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
               {t.count ? <span className="count">{t.count}</span> : null}
             </button>
           ))}
-        <div className="spacer" />
-        {tab === 'orders' && working.length > 0 && (
-          <button className="btn sm danger" onClick={cancelAllOrders}>
-            Cancel all
-          </button>
-        )}
       </div>
       <div className="panel-body">
         {!session ? (
@@ -142,14 +148,27 @@ function PositionsTab() {
   );
 }
 
+type PriceField = 'limitPrice' | 'stopPrice';
+
 function OrderPriceEditor({ order }: { order: Order }) {
-  const field: 'limitPrice' | 'stopPrice' | null = order.type === 'limit' || (order.type === 'stop_limit' && order.triggered) ? 'limitPrice' : order.type === 'market' ? null : 'stopPrice';
+  const field: PriceField | null = order.type === 'limit' || (order.type === 'stop_limit' && order.triggered) ? 'limitPrice' : order.type === 'market' ? null : 'stopPrice';
   const current = field ? order[field] : undefined;
-  const [editing, setEditing] = useState(false);
+  // The field being edited, fixed when editing starts: a typed price only ever goes to that field.
+  const [editing, setEditing] = useState<PriceField | null>(null);
   const [val, setVal] = useState<string>('');
   const buttonRef = useRef<HTMLButtonElement>(null);
   // Enter and Escape hand focus back to the price; leaving the box by clicking elsewhere does not.
   const refocus = useRef(false);
+  const open = editing !== null && editing === field;
+  useEffect(() => {
+    if (editing && editing !== field) {
+      // A stop-limit's stop triggered while its stop was being edited: it is now a limit order, and
+      // the typed stop must not become its limit price.
+      setEditing(null);
+      refocus.current = document.activeElement === document.body;
+      toast('warning', `${order.symbol} stop triggered while you were editing it, so the change was not applied. The order is now a limit at ${price(order.limitPrice)}.`, 7000);
+    }
+  }, [editing, field, order.symbol, order.limitPrice]);
   useEffect(() => {
     if (!editing && refocus.current) {
       refocus.current = false;
@@ -158,7 +177,7 @@ function OrderPriceEditor({ order }: { order: Order }) {
   }, [editing]);
   if (!field || current === undefined) return <>{order.type === 'market' ? 'MKT' : '—'}</>;
   const what = `${order.symbol} ${order.action} ${field === 'limitPrice' ? 'limit' : 'stop'} price`;
-  if (!editing)
+  if (!open)
     return (
       <button
         ref={buttonRef}
@@ -168,7 +187,7 @@ function OrderPriceEditor({ order }: { order: Order }) {
         aria-label={`Change ${what}, now ${price(current)}`}
         onClick={() => {
           setVal(String(current));
-          setEditing(true);
+          setEditing(field);
         }}
       >
         {price(current)}
@@ -176,9 +195,9 @@ function OrderPriceEditor({ order }: { order: Order }) {
     );
   const commit = () => {
     const n = Number(val);
-    setEditing(false);
+    setEditing(null);
     if (!Number.isFinite(n) || n <= 0 || n === current) return;
-    const r = modifyOrder(order.id, { [field]: n });
+    const r = modifyOrder(order.id, { [editing]: n });
     if (!r.ok) toast('error', r.error ?? 'Modify failed');
   };
   return (
@@ -200,7 +219,7 @@ function OrderPriceEditor({ order }: { order: Order }) {
         }
         if (e.key === 'Escape') {
           refocus.current = true;
-          setEditing(false);
+          setEditing(null);
         }
       }}
     />
@@ -220,10 +239,16 @@ function OrdersTab({ orders }: { orders: Order[] }) {
   const list = (showAll ? orders : orders.filter(isOpen)).slice().reverse();
   return (
     <>
-      <div className="row" style={{ padding: '4px 8px' }}>
+      <div className="row wrap" style={{ padding: '4px 8px' }}>
         <label className="check">
           <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} /> Show filled, cancelled and rejected
         </label>
+        <div className="spacer" />
+        {orders.some(isOpen) && (
+          <button className="btn sm danger" onClick={cancelAllOrders}>
+            Cancel all
+          </button>
+        )}
       </div>
       {!list.length ? (
         <EmptyState title={showAll ? 'No orders yet' : 'No working orders'} />

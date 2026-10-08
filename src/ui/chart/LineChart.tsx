@@ -1,6 +1,6 @@
 /** Small line/area chart for equity curves and drawdowns (lightweight-charts). */
 import { useEffect, useRef } from 'react';
-import { AreaSeries, createChart, LineSeries, TickMarkType, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts';
+import { AreaSeries, createChart, LineSeries, PriceLineSource, TickMarkType, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts';
 import { toChartTime } from './ChartView';
 import { exchangeOffsetSeconds } from '../../core/time';
 import { CHART_LOCALE } from '../services/format';
@@ -95,15 +95,17 @@ export function LineChart({
         ...(format && { priceFormatter: format }),
         ...(xLabelRef.current ? { timeFormatter: (t: Time) => xLabelRef.current!(unshift(t as number)) } : hideDates ? { timeFormatter: (t: Time) => hm(t as number) } : {}),
       },
-      handleScroll: true,
+      // On a scrolling page a vertical swipe scrolls the page.
+      handleScroll: { vertTouchDrag: false },
       handleScale: true,
     });
     chartRef.current = chart;
     fittedRef.current = false;
     seriesRef.current = shape.split(';').map((_, k) => {
       const l = linesRef.current[k];
-      // The value label (and its title) is filled with priceLineColor: adjusted so its text stays readable.
-      const label = { title: l.name, priceLineColor: chartLabelFill(l.color) };
+      // The value label (and its title) is filled with priceLineColor: adjusted so its text stays
+      // readable. The line marks the same point as the label: the last one on screen.
+      const label = { title: l.name, priceLineColor: chartLabelFill(l.color), priceLineSource: PriceLineSource.LastVisible };
       return l.area
         ? chart.addSeries(AreaSeries, { lineColor: l.color, topColor: withAlpha(l.color, 0.33), bottomColor: withAlpha(l.color, 0.02), lineWidth: 2, ...label })
         : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, ...label });

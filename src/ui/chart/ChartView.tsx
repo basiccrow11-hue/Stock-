@@ -45,6 +45,9 @@ export function toChartTime(t: number): UTCTimestamp {
   return (t + exchangeOffsetSeconds(t)) as UTCTimestamp;
 }
 
+/** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
+const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 520px)';
+
 interface IndicatorSeries {
   cfg: IndicatorConfig;
   series: ISeriesApi<'Line' | 'Histogram'>[];
@@ -184,9 +187,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const pricePane = chart.panes()[0].getHTMLElement();
     if (pricePane) ro.observe(pricePane);
 
+    // In the one-column layout the page scrolls: a vertical swipe on the chart scrolls the page
+    // instead of dragging the price scale (horizontal swipes still pan, pinch still zooms).
+    const stacked = window.matchMedia(STACKED_LAYOUT);
+    const syncTouch = () => chart.applyOptions({ handleScroll: { vertTouchDrag: !stacked.matches } });
+    syncTouch();
+    stacked.addEventListener('change', syncTouch);
+
     registerSnapshotProvider(async () => snapshot(chart, el));
     return () => {
       registerSnapshotProvider(null);
+      stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
       chart.remove();
       chartRef.current = null;

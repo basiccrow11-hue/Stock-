@@ -115,9 +115,11 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
     const needed = POINTS_NEEDED[tool as DrawingType];
     const pts = [...pending, pt];
     if (pts.length >= needed) {
+      // Back to the select tool first (it clears the selection), then add: a new drawing starts
+      // selected, so it can be adjusted or deleted straight away.
+      setTool('select');
       add({ id: newId('d'), type: tool as DrawingType, points: pts, color });
       setPending([]);
-      setTool('select');
     } else setPending(pts);
   };
 
@@ -142,7 +144,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   };
 
   const startDrag = (e: React.PointerEvent, d: Drawing, pointIndex: number | 'all') => {
-    if (tool !== 'select') return;
+    if (tool !== 'select' || e.button !== 0) return;
     e.stopPropagation();
     select(d.id);
     const rect = svgRef.current!.getBoundingClientRect();
@@ -164,6 +166,10 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
+      // A drag the browser takes over (a touch turned into a scroll) or loses must end too, or the
+      // next hover would carry on moving the drawing.
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       onPointerLeave={() => setHover(null)}
     >
       {[...drawings, ...(preview ? [preview] : [])].map((d) => (
@@ -281,6 +287,7 @@ function Shape({
       return (
         <g>
           <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={d.color} strokeDasharray="3 3" strokeWidth={1} className="shape" onPointerDown={(e) => onDragStart(e, d, 'all')} />
+          <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="hit" onPointerDown={(e) => onDragStart(e, d, 'all')} />
           {FIB_LEVELS.map((lvl) => {
             const pr = p1 - (p1 - p0) * lvl;
             const y = proj.y(pr);
@@ -288,6 +295,7 @@ function Shape({
             return (
               <g key={lvl}>
                 <line x1={left} x2={right} y1={y} y2={y} stroke={d.color} strokeWidth={lvl === 0.5 || lvl === 0.618 ? 1.25 : 0.75} opacity={0.9} />
+                <line x1={left} x2={right} y1={y} y2={y} className="hit" onPointerDown={(e) => onDragStart(e, d, 'all')} />
                 {label(right + 4, y + 3, `${(lvl * 100).toFixed(1)}%  ${fmtPrice(pr)}`)}
               </g>
             );
