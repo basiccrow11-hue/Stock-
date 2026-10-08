@@ -3,12 +3,13 @@ import { ChartView } from '../chart/ChartView';
 import { TOOL_LABELS, useDrawings, type DrawingTool } from '../chart/drawings';
 import { setTimeframe, useTrading } from '../state/tradingStore';
 import { IndicatorMenu } from './IndicatorMenu';
+import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
 import { EmptyState } from './common';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
 
-export function ChartPanel({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
+export function ChartPanel({ onNewSession, onOpenSettings }: { onNewSession: (mode: 'replay' | 'sim') => void; onOpenSettings?: () => void }) {
   const session = useTrading((s) => s.session);
   const symbol = useTrading((s) => s.activeSymbol);
   const timeframe = useTrading((s) => s.timeframe);
@@ -29,6 +30,7 @@ export function ChartPanel({ onNewSession }: { onNewSession: (mode: 'replay' | '
           ))}
         </div>
         <IndicatorMenu />
+        <ChartSettingsMenu onOpenSettings={onOpenSettings} />
         <div className="seg" role="group" aria-label="Drawing tools">
           {(Object.keys(TOOL_LABELS) as DrawingTool[]).map((t) => (
             <button key={t} className={tool === t ? 'on' : ''} onClick={() => setTool(t)} title={TOOL_LABELS[t]}>

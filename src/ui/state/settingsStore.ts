@@ -7,6 +7,17 @@ import type { Timeframe } from '../../core/types';
 import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from '../../core/broker/config';
 import { DEFAULT_TRADING_RULES, type TradingRules } from '../../core/learning/review';
 import { DEFAULT_SIM_CONFIG, type SimConfig } from '../../core/sim/SimMarket';
+import {
+  DEFAULT_APPEARANCE,
+  THEMES,
+  candlePresets,
+  defaultLineColor,
+  sanitizeAppearance,
+  themeChartSurface,
+  type Appearance,
+  type ChartColors,
+  type ThemeId,
+} from '../theme/themes';
 
 export type IndicatorType = 'sma' | 'ema' | 'vwap' | 'bb' | 'rsi' | 'macd' | 'atr' | 'volume';
 
@@ -27,7 +38,7 @@ export const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'ema9', type: 'ema', enabled: true, period: 9, color: '#f5a623' },
   { id: 'ema21', type: 'ema', enabled: true, period: 21, color: '#4f8cff' },
   { id: 'vwap', type: 'vwap', enabled: true, color: '#c77dff' },
-  { id: 'sma50', type: 'sma', enabled: false, period: 50, color: '#e0e0e0' },
+  { id: 'sma50', type: 'sma', enabled: false, period: 50, color: '#9e9e9e' },
   { id: 'bb', type: 'bb', enabled: false, period: 20, mult: 2, color: '#26a69a' },
   { id: 'rsi', type: 'rsi', enabled: true, period: 14, color: '#b39ddb' },
   { id: 'macd', type: 'macd', enabled: false, fast: 12, slow: 26, signal: 9, color: '#4f8cff' },
@@ -59,6 +70,7 @@ export interface Settings {
   indicators: IndicatorConfig[];
   sim: SimConfig & { speed: number; startingBalance: number };
   alpacaFeed: 'iex' | 'sip';
+  appearance: Appearance;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -84,6 +96,7 @@ export const DEFAULT_SETTINGS: Settings = {
   indicators: DEFAULT_INDICATORS,
   sim: { ...DEFAULT_SIM_CONFIG, speed: 10, startingBalance: 25_000 },
   alpacaFeed: 'iex',
+  appearance: DEFAULT_APPEARANCE,
 };
 
 interface SettingsStore extends Settings {
@@ -94,6 +107,13 @@ interface SettingsStore extends Settings {
   updateIndicator: (id: string, patch: Partial<IndicatorConfig>) => void;
   addIndicator: (ind: IndicatorConfig) => void;
   removeIndicator: (id: string) => void;
+  updateAppearance: (patch: Partial<Omit<Appearance, 'colors'>>) => void;
+  /** Set one chart colour. With linked candle parts, body colours also set wick and border. */
+  setChartColor: (key: keyof ChartColors, value: string) => void;
+  /** Switch app theme and the chart surface colours that belong to it (candle colours are kept). */
+  applyTheme: (theme: ThemeId) => void;
+  applyCandlePreset: (presetId: string) => void;
+  resetAppearance: () => void;
   reset: () => void;
 }
 
@@ -108,6 +128,43 @@ export const useSettings = create<SettingsStore>()(
       updateIndicator: (id, patch) => set((s) => ({ indicators: s.indicators.map((i) => (i.id === id ? { ...i, ...patch } : i)) })),
       addIndicator: (ind) => set((s) => ({ indicators: [...s.indicators, ind] })),
       removeIndicator: (id) => set((s) => ({ indicators: s.indicators.filter((i) => i.id !== id) })),
+      updateAppearance: (patch) =>
+        set((s) => {
+          const next = { ...s.appearance, ...patch };
+          // Turning the link on makes wick and border match the body again.
+          if (patch.linkCandleParts && !s.appearance.linkCandleParts) {
+            const c = s.appearance.colors;
+            next.colors = { ...c, wickUp: c.up, borderUp: c.up, wickDown: c.down, borderDown: c.down };
+          }
+          return { appearance: sanitizeAppearance(next) };
+        }),
+      setChartColor: (key, value) =>
+        set((s) => {
+          const a = s.appearance;
+          const colors = { ...a.colors, [key]: value };
+          if (a.linkCandleParts && key === 'up') Object.assign(colors, { wickUp: value, borderUp: value });
+          if (a.linkCandleParts && key === 'down') Object.assign(colors, { wickDown: value, borderDown: value });
+          return { appearance: sanitizeAppearance({ ...a, colors }) };
+        }),
+      applyTheme: (theme) =>
+        set((s) => {
+          const a = s.appearance;
+          const colors = { ...a.colors, ...themeChartSurface(theme) };
+          // A preset that adapts to light/dark (monochrome) follows the theme.
+          const was = candlePresets(THEMES[a.theme].scheme).find((p) => p.up === a.colors.up && p.down === a.colors.down);
+          const now = was && candlePresets(THEMES[theme].scheme).find((p) => p.id === was.id);
+          if (now && a.linkCandleParts) Object.assign(colors, { up: now.up, down: now.down, wickUp: now.up, wickDown: now.down, borderUp: now.up, borderDown: now.down });
+          if (a.colors.line === defaultLineColor(THEMES[a.theme].scheme)) colors.line = defaultLineColor(THEMES[theme].scheme);
+          return { appearance: sanitizeAppearance({ ...a, theme, colors }) };
+        }),
+      applyCandlePreset: (presetId) =>
+        set((s) => {
+          const p = candlePresets(THEMES[s.appearance.theme].scheme).find((x) => x.id === presetId);
+          if (!p) return {};
+          const colors = { ...s.appearance.colors, up: p.up, down: p.down, wickUp: p.up, wickDown: p.down, borderUp: p.up, borderDown: p.down };
+          return { appearance: sanitizeAppearance({ ...s.appearance, colors, linkCandleParts: true }) };
+        }),
+      resetAppearance: () => set({ appearance: DEFAULT_APPEARANCE }),
       reset: () => set({ ...DEFAULT_SETTINGS }),
     }),
     {
@@ -125,6 +182,7 @@ export const useSettings = create<SettingsStore>()(
           replay: { ...current.replay, ...p.replay },
           sim: { ...current.sim, ...p.sim },
           indicators: p.indicators?.length ? p.indicators : current.indicators,
+          appearance: sanitizeAppearance(p.appearance),
         };
       },
     },

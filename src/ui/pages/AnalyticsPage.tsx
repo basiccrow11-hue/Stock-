@@ -140,6 +140,7 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export function AnalyticsPage() {
   const entries = useJournal((s) => s.entries);
   const base = useSettings((s) => s.defaultBalance);
+  const accent = useSettings((s) => s.appearance.accent);
   const session = useTrading((s) => s.session);
   const sessionCurve = useTrading((s) => s.equityCurve);
   const sessionTrips = useTrading((s) => s.trips);
@@ -157,10 +158,10 @@ export function AnalyticsPage() {
   const trips = useMemo(() => filtered.map((e) => e.trip), [filtered]);
   const curve = useMemo(() => curveFromTrips(trips, base), [trips, base]);
   const stats = useMemo(() => computeStats(trips, curve, base), [trips, curve, base]);
-  const lines = useMemo<LineSpec[]>(() => [{ name: 'Equity', color: '#4f8cff', area: true, points: curve.map((p) => ({ time: p.time, value: p.equity })) }], [curve]);
+  const lines = useMemo<LineSpec[]>(() => [{ name: 'Equity', color: accent, area: true, points: curve.map((p) => ({ time: p.time, value: p.equity })) }], [curve, accent]);
 
   const sessionStats = useMemo(() => (account ? computeStats(sessionTrips, sessionCurve, account.startingBalance) : null), [sessionTrips, sessionCurve, account]);
-  const sessionLines = useMemo<LineSpec[]>(() => [{ name: 'Equity', color: '#4f8cff', area: true, points: sessionCurve.map((p) => ({ time: p.time, value: p.equity })) }], [sessionCurve]);
+  const sessionLines = useMemo<LineSpec[]>(() => [{ name: 'Equity', color: accent, area: true, points: sessionCurve.map((p) => ({ time: p.time, value: p.equity })) }], [sessionCurve, accent]);
 
   return (
     <div className="page">

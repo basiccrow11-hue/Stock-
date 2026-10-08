@@ -7,9 +7,6 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CandlestickSeries,
-  ColorType,
-  CrosshairMode,
   HistogramSeries,
   LineSeries,
   LineStyle,
@@ -37,15 +34,8 @@ import { getBaseBars, getSimEventsFor, onChartEvent, pickPrice, registerSnapshot
 import { CHART_LOCALE, compactVolume, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { useDrawings } from './drawings';
-
-const COLORS = {
-  bg: '#0d1117',
-  grid: '#161b24',
-  text: '#8b98a9',
-  up: '#26a69a',
-  down: '#ef5350',
-  border: '#1f2633',
-};
+import { addMainSeries, chartOptions, mainPoint, mainSeriesOptions, priceScaleMode, type MainSeries } from './chartTheme';
+import { useTheme } from '../theme/useTheme';
 
 /** lightweight-charts renders UTC; shift to exchange time so axes read in ET. */
 export function toChartTime(t: number): UTCTimestamp {
@@ -94,7 +84,7 @@ export interface ChartViewProps {
 export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const candleRef = useRef<MainSeries | null>(null);
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const indicatorsRef = useRef<IndicatorSeries[]>([]);
@@ -103,6 +93,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null);
   const [geometryVersion, setGeometryVersion] = useState(0);
+  /** Bumped when the main series is replaced (chart style change) so dependants re-attach. */
+  const [seriesVersion, setSeriesVersion] = useState(0);
+  const theme = useTheme();
+  const pal = theme.chart;
+  const palRef = useRef(pal);
+  palRef.current = pal;
+  const styleRef = useRef(pal.style);
   const [legend, setLegend] = useState<{ bar: Bar; change: number } | null>(null);
 
   const indicators = useSettings((s) => s.indicators);
@@ -118,32 +115,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   // ---------------------------------------------------------------- create chart once
   useEffect(() => {
     const el = containerRef.current!;
+    const base = chartOptions(palRef.current);
     const chart = createChart(el, {
+      ...base,
       autoSize: true,
-      layout: {
-        background: { type: ColorType.Solid, color: COLORS.bg },
-        textColor: COLORS.text,
-        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
-        fontSize: 11,
-        panes: { separatorColor: COLORS.border, separatorHoverColor: '#2a3242', enableResize: true },
-      },
-      grid: { vertLines: { color: COLORS.grid }, horzLines: { color: COLORS.grid } },
-      crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: COLORS.border },
-      timeScale: { borderColor: COLORS.border, timeVisible: true, secondsVisible: false, rightOffset: 8, barSpacing: 7 },
+      layout: { ...base.layout, fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif', panes: { ...base.layout?.panes, enableResize: true } },
+      timeScale: { ...base.timeScale, timeVisible: true, secondsVisible: false, rightOffset: 8, barSpacing: 7 },
       localization: { locale: CHART_LOCALE, priceFormatter: (p: number) => fmtPrice(p) },
     });
-    const candles = chart.addSeries(CandlestickSeries, {
-      upColor: COLORS.up,
-      downColor: COLORS.down,
-      borderVisible: false,
-      wickUpColor: COLORS.up,
-      wickDownColor: COLORS.down,
-      priceLineVisible: true,
-    });
     chartRef.current = chart;
-    candleRef.current = candles;
-    markersRef.current = createSeriesMarkers(candles, []);
 
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.seriesData) {
@@ -157,8 +137,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       setLegend({ bar, change: ((bar.close - prev) / prev) * 100 });
     });
     chart.subscribeClick((param) => {
-      if (!param.point || !useTrading.getState().pickTarget) return;
-      const p = candles.coordinateToPrice(param.point.y);
+      const series = candleRef.current;
+      if (!param.point || !series || !useTrading.getState().pickTarget) return;
+      const p = series.coordinateToPrice(param.point.y);
       if (p !== null) pickPrice(Math.round(p * 100) / 100);
     });
     const bump = () => setGeometryVersion((v) => v + 1);
@@ -173,11 +154,51 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
+      markersRef.current = null;
+      priceLinesRef.current = [];
       indicatorsRef.current = [];
       volumeRef.current = null;
       watermarkRef.current = null;
     };
   }, []);
+
+  // ---------------------------------------------------------------- main price series (chart style)
+  // Declared before the data effects so the series exists when they first run. Changing the style
+  // replaces the series; markers, price lines and drawings re-attach through seriesVersion.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const old = candleRef.current;
+    if (old && styleRef.current === pal.style) return;
+    if (old) {
+      markersRef.current?.detach();
+      chart.removeSeries(old);
+      priceLinesRef.current = [];
+    }
+    const series = addMainSeries(chart, palRef.current);
+    // Keep the price series underneath indicator overlays, as when it was first created.
+    series.setSeriesOrder(0);
+    styleRef.current = pal.style;
+    candleRef.current = series;
+    markersRef.current = createSeriesMarkers(series, []);
+    series.setData(candlesRef.current.map(candlePoint) as never);
+    setSeriesVersion((v) => v + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pal.style]);
+
+  // ---------------------------------------------------------------- colours, grid, crosshair, scale
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = candleRef.current;
+    if (!chart || !series) return;
+    chart.applyOptions(chartOptions(pal));
+    series.applyOptions(mainSeriesOptions(pal));
+    chart.priceScale('right', 0).applyOptions({ mode: priceScaleMode(pal.priceScale) });
+    // Volume and MACD histogram colours are per point, so their data is re-sent.
+    volumeRef.current?.setData(candlesRef.current.map(volumePoint));
+    setIndicatorData(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pal, seriesVersion]);
 
   // ---------------------------------------------------------------- axis + crosshair time labels
   // Chart times are ET shifted into UTC. In blind mode the calendar date must never appear: day
@@ -225,15 +246,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       vertAlign: 'center',
       lines: session
         ? [
-            { text: `${symbol} · ${timeframe}`, color: 'rgba(139,152,169,0.10)', fontSize: 42, fontStyle: 'bold' },
-            { text: label, color: 'rgba(139,152,169,0.13)', fontSize: 16 },
+            { text: `${symbol} · ${timeframe}`, color: pal.watermark, fontSize: 42, fontStyle: 'bold' },
+            { text: label, color: pal.watermarkSub, fontSize: 16 },
           ]
         : [],
     });
-  }, [session, symbol, timeframe]);
+  }, [session, symbol, timeframe, pal.watermark, pal.watermarkSub]);
 
   // ---------------------------------------------------------------- indicator series setup
   const indicatorKey = useMemo(() => JSON.stringify(indicators.filter((i) => i.enabled)), [indicators]);
+  // Colours baked into indicator series at creation (MACD lines, RSI bands).
+  const indicatorPalette = `${pal.up}|${pal.down}|${pal.accent}|${pal.warn}`;
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -262,13 +285,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       else if (cfg.type === 'macd') {
         series = [
           chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane),
-          line('#4f8cff', 2),
-          line('#f5a623', 1),
+          line(pal.accent, 2),
+          line(pal.warn, 1),
         ];
       } else series = [line(cfg.color, cfg.type === 'vwap' ? 2 : 1)];
       if (cfg.type === 'rsi') {
-        series[0].createPriceLine({ price: 70, color: '#ef535088', lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
-        series[0].createPriceLine({ price: 30, color: '#26a69a88', lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
+        series[0].createPriceLine({ price: 70, color: pal.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
+        series[0].createPriceLine({ price: 30, color: pal.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
       }
       indicatorsRef.current.push({ cfg, series, pane });
     }
@@ -277,7 +300,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     fullRedraw();
     // fullRedraw is stable for the lifetime of the component (uses refs only).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indicatorKey]);
+  }, [indicatorKey, indicatorPalette]);
 
   // ---------------------------------------------------------------- data
   function setIndicatorData(fromIndex: number): void {
@@ -297,7 +320,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
           Number.isNaN(vals[i])
             ? { time: toChartTime(candles[i].time) }
             : isHist
-              ? { time: toChartTime(candles[i].time), value: vals[i], color: vals[i] >= 0 ? '#26a69a99' : '#ef535099' }
+              ? { time: toChartTime(candles[i].time), value: vals[i], color: vals[i] >= 0 ? palRef.current.histUp : palRef.current.histDown }
               : endsSession(i)
                 ? { time: toChartTime(candles[i].time), value: vals[i], color: 'rgba(0,0,0,0)' }
                 : { time: toChartTime(candles[i].time), value: vals[i] };
@@ -310,11 +333,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   function volumePoint(c: Bar) {
-    return { time: toChartTime(c.time), value: c.volume, color: c.close >= c.open ? '#26a69a55' : '#ef535055' };
+    return { time: toChartTime(c.time), value: c.volume, color: c.close >= c.open ? palRef.current.volumeUp : palRef.current.volumeDown };
   }
 
   function candlePoint(c: Bar) {
-    return { time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close };
+    return mainPoint(styleRef.current, toChartTime(c.time), c);
   }
 
   function fullRedraw(): void {
@@ -322,7 +345,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     if (!series) return;
     baseRef.current = getBaseBars(symbol);
     candlesRef.current = aggregateBars(baseRef.current, timeframe);
-    series.setData(candlesRef.current.map(candlePoint));
+    series.setData(candlesRef.current.map(candlePoint) as never);
     volumeRef.current?.setData(candlesRef.current.map(volumePoint));
     setIndicatorData(0);
     setGeometryVersion((v) => v + 1);
@@ -344,7 +367,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const tail = aggregateBars(base.slice(start), timeframe);
     for (const c of tail) {
       candles.push(c);
-      series.update(candlePoint(c));
+      series.update(candlePoint(c) as never);
       volumeRef.current?.update(volumePoint(c));
     }
     setIndicatorData(firstChanged);
@@ -387,7 +410,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         time: toChartTime(bucketFor(f.time, timeframe).start),
         position: buy ? 'belowBar' : 'aboveBar',
         shape: buy ? 'arrowUp' : 'arrowDown',
-        color: buy ? '#4f8cff' : '#f5a623',
+        color: buy ? pal.accent : pal.warn,
         text: `${f.action.toUpperCase()} ${f.quantity} @ ${fmtPrice(f.price)}`,
       });
     }
@@ -396,13 +419,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         time: toChartTime(bucketFor(ev.time, timeframe).start),
         position: 'aboveBar',
         shape: 'circle',
-        color: ev.impactPct >= 0 ? '#26a69a' : '#ef5350',
+        color: ev.impactPct >= 0 ? pal.up : pal.down,
         text: `SIM NEWS: ${ev.headline.replace('[SIMULATED] ', '').slice(0, 40)}`,
       });
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     m.setMarkers(markers);
-  }, [fills, symbol, timeframe, simEventCount]);
+  }, [fills, symbol, timeframe, simEventCount, seriesVersion, pal.accent, pal.warn, pal.up, pal.down]);
 
   // ---------------------------------------------------------------- price lines: position + orders
   useEffect(() => {
@@ -413,7 +436,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const pos = positions.find((p) => p.symbol === symbol);
     if (pos && pos.quantity !== 0) {
       priceLinesRef.current.push(
-        series.createPriceLine({ price: pos.avgPrice, color: '#4f8cff', lineStyle: LineStyle.Solid, lineWidth: 1, axisLabelVisible: true, title: `${pos.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(pos.quantity)}` }),
+        series.createPriceLine({ price: pos.avgPrice, color: pal.accent, lineStyle: LineStyle.Solid, lineWidth: 1, axisLabelVisible: true, title: `${pos.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(pos.quantity)}` }),
       );
     }
     for (const o of orders) {
@@ -422,11 +445,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (px === undefined) continue;
       const isStopLoss = !!o.parentId && o.type === 'stop';
       const isTarget = !!o.parentId && o.type === 'limit';
-      const color = isStopLoss ? '#ef5350' : isTarget ? '#26a69a' : '#f5a623';
+      const color = isStopLoss ? pal.down : isTarget ? pal.up : pal.warn;
       const title = isStopLoss ? `SL ${o.quantity - o.filledQty}` : isTarget ? `TP ${o.quantity - o.filledQty}` : describeOrder(o).replace(` ${o.symbol}`, '');
       priceLinesRef.current.push(series.createPriceLine({ price: px, color, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: true, title }));
     }
-  }, [orders, positions, symbol]);
+  }, [orders, positions, symbol, seriesVersion, pal.accent, pal.warn, pal.up, pal.down]);
 
   // ---------------------------------------------------------------- geometry for drawings
   const geometry: ChartGeometry | null = useMemo(() => {
@@ -443,7 +466,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     };
     // geometryVersion forces consumers to re-render on scroll/zoom/resize/data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tfSeconds, geometryVersion]);
+  }, [tfSeconds, geometryVersion, seriesVersion]);
 
   const lb = legend?.bar ?? candlesRef.current[candlesRef.current.length - 1];
   return (

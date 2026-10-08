@@ -1,9 +1,12 @@
 /** Small line/area chart for equity curves and drawdowns (lightweight-charts). */
 import { useEffect, useRef } from 'react';
-import { AreaSeries, ColorType, createChart, LineSeries, TickMarkType, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts';
+import { AreaSeries, createChart, LineSeries, TickMarkType, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts';
 import { toChartTime } from './ChartView';
 import { exchangeOffsetSeconds } from '../../core/time';
 import { CHART_LOCALE } from '../services/format';
+import { useTheme } from '../theme/useTheme';
+import { withAlpha } from '../theme/color';
+import { panelChartOptions } from './chartTheme';
 
 export interface LineSpec {
   name: string;
@@ -63,19 +66,22 @@ export function LineChart({
   const xLabelRef = useRef(xLabel);
   xLabelRef.current = xLabel;
   const hasXLabel = !!xLabel;
+  const panel = useTheme().panel;
+  const panelRef = useRef(panel);
+  panelRef.current = panel;
   // Recreate the chart only when the set of lines or the formatting changes, not on every data update.
   const shape = lines.map((l) => `${l.name}|${l.color}|${l.area ? 1 : 0}|${l.dashed ? 1 : 0}`).join(';');
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const themed = panelChartOptions(panelRef.current);
     const chart = createChart(el, {
+      ...themed,
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#8b97a8', fontSize: 11, attributionLogo: false },
-      grid: { vertLines: { color: '#1a2130' }, horzLines: { color: '#1a2130' } },
-      rightPriceScale: { borderColor: '#1f2633' },
+      layout: { ...themed.layout, fontSize: 11, attributionLogo: false },
       timeScale: {
-        borderColor: '#1f2633',
+        ...themed.timeScale,
         timeVisible: true,
         tickMarkFormatter: xLabelRef.current
           ? (t: Time) => xLabelRef.current!(unshift(t as number))
@@ -97,7 +103,7 @@ export function LineChart({
     seriesRef.current = shape.split(';').map((_, k) => {
       const l = linesRef.current[k];
       return l.area
-        ? chart.addSeries(AreaSeries, { lineColor: l.color, topColor: `${l.color}55`, bottomColor: `${l.color}05`, lineWidth: 2, title: l.name })
+        ? chart.addSeries(AreaSeries, { lineColor: l.color, topColor: withAlpha(l.color, 0.33), bottomColor: withAlpha(l.color, 0.02), lineWidth: 2, title: l.name })
         : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, title: l.name });
     });
     return () => {
@@ -107,6 +113,11 @@ export function LineChart({
     };
   }, [shape, format, hideDates, hasXLabel]);
 
+
+  // Theme changes restyle the existing chart in place.
+  useEffect(() => {
+    chartRef.current?.applyOptions(panelChartOptions(panel));
+  }, [panel, shape, format, hideDates, hasXLabel]);
 
   useEffect(() => {
     const chart = chartRef.current;

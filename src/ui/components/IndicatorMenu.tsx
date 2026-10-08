@@ -43,7 +43,7 @@ export function IndicatorMenu() {
         Indicators ({indicators.filter((i) => i.enabled).length})
       </button>
       {open && (
-        <div className="card" style={{ position: 'absolute', top: 30, left: 0, zIndex: 20, width: 340, boxShadow: '0 10px 30px #000a' }}>
+        <div className="card popover" style={{ width: 340 }}>
           <div className="stack">
             {indicators.map((i) => (
               <div key={i.id} className="row" style={{ gap: 6 }}>

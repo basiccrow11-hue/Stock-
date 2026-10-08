@@ -11,6 +11,7 @@ import { NumberField, SourceBadge } from '../components/common';
 import { toast } from '../state/toasts';
 import { dateTime } from '../services/format';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
+import { AppearanceCard } from '../components/Appearance';
 
 /** NumberField handler that ignores the transient empty value while typing. */
 function num(set: (v: number) => void) {
@@ -24,6 +25,7 @@ export function SettingsPage() {
     <div className="page">
       <div className="page-inner stack" style={{ gap: 16 }}>
         <h1>Data &amp; Settings</h1>
+        <AppearanceCard />
         <DataSourcesCard />
         <CsvImportCard />
         <ApiKeysCard />
@@ -486,7 +488,7 @@ function GeneralCard() {
         <button
           className="btn danger"
           onClick={() => {
-            if (!window.confirm('Reset all settings to their defaults? Your journal, imported data and keys are kept.')) return;
+            if (!window.confirm('Reset all settings, including theme and chart colours, to their defaults? Your journal, streak, imported data and keys are kept.')) return;
             s.reset();
             setWatch(useSettings.getState().watchlist.join(', '));
             applyExecutionConfig();

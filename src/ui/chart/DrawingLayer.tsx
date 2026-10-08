@@ -5,16 +5,17 @@
  * which reveals nothing about future prices.
  */
 import { useEffect, useRef, useState } from 'react';
-import type { IChartApi, ISeriesApi } from 'lightweight-charts';
+import type { IChartApi, ISeriesApi, SeriesType } from 'lightweight-charts';
 import type { Bar } from '../../core/types';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import { FIB_LEVELS, POINTS_NEEDED, useDrawings, type DrawPoint, type Drawing, type DrawingType } from './drawings';
 import { newId } from '../../core/util/ids';
 import { price as fmtPrice } from '../services/format';
+import { useSettings } from '../state/settingsStore';
 
 export interface ChartGeometry {
   chart: IChartApi;
-  series: ISeriesApi<'Candlestick'>;
+  series: ISeriesApi<SeriesType>;
   candles: () => Bar[];
   tfSeconds: number;
   paneHeight: () => number;
@@ -67,6 +68,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   const [hover, setHover] = useState<DrawPoint | null>(null);
   const [drag, setDrag] = useState<DragState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const handleFill = useSettings((s) => s.appearance.colors.background);
   void version;
 
   const proj = projector(geometry);
@@ -161,7 +163,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       onPointerLeave={() => setHover(null)}
     >
       {[...drawings, ...(preview ? [preview] : [])].map((d) => (
-        <Shape key={d.id} d={d} proj={proj} width={width} height={height} selected={d.id === selectedId} onDragStart={startDrag} />
+        <Shape key={d.id} d={d} proj={proj} width={width} height={height} selected={d.id === selectedId} onDragStart={startDrag} handleFill={handleFill} />
       ))}
       {pending.map((p, i) => {
         const x = proj.x(p.time);
@@ -179,7 +181,9 @@ function Shape({
   height,
   selected,
   onDragStart,
+  handleFill,
 }: {
+  handleFill: string;
   d: Drawing;
   proj: Projector;
   width: number;
@@ -196,7 +200,7 @@ function Shape({
   const common = { stroke: d.color, strokeWidth: sw, fill: 'none', className: 'shape', onPointerDown: (e: React.PointerEvent) => onDragStart(e, d, 'all') };
   const handles = selected
     ? xy.map((p, i) =>
-        p.x !== null && p.y !== null ? <circle key={`h${i}`} className="handle" cx={p.x} cy={p.y} r={5} fill="#0d1117" stroke={d.color} strokeWidth={2} onPointerDown={(e) => onDragStart(e, d, i)} /> : null,
+        p.x !== null && p.y !== null ? <circle key={`h${i}`} className="handle" cx={p.x} cy={p.y} r={5} fill={handleFill} stroke={d.color} strokeWidth={2} onPointerDown={(e) => onDragStart(e, d, i)} /> : null,
       )
     : null;
   const label = (x: number, y: number, text: string) => (

@@ -3,6 +3,7 @@ import { SourceBadge } from './common';
 import { money, pnlClass, signedMoney } from '../services/format';
 import { exchangeDate, marketSession, formatExchangeTime } from '../../core/time';
 import { blindDayLabel } from '../state/tradingStore';
+import { StreakChip } from './Streak';
 
 export type View = 'trade' | 'backtest' | 'journal' | 'analytics' | 'challenges' | 'settings';
 
@@ -37,6 +38,7 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
           </button>
         ))}
       </nav>
+      <StreakChip />
       <div className="integrity">
         {session ? (
           <>

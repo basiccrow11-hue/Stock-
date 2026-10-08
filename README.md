@@ -15,7 +15,7 @@ Other scripts:
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Unit tests (Vitest): orders, fills, positions, P/L, shorts, indicators, backtests, risk, replay and look-ahead prevention |
+| `npm test` | Unit tests (Vitest): orders, fills, positions, P/L, shorts, indicators, backtests, risk, replay and look-ahead prevention, streak rules, theme contrast, the Vercel proxy |
 | `npm run typecheck` | TypeScript, strict mode |
 | `npm run build` | Production build into `dist/` |
 | `npm run preview` | Serve the production build (keeps the data proxy for Polygon/Alpaca) |
@@ -65,6 +65,10 @@ To practise on real price action, import a CSV or add a vendor key (see below).
 
 **Simulated market.** Start Market launches six fictional stocks with different personalities (growth, large-cap tech, small cap, blue chip, volatile momentum, index ETF). Hidden bull, bear and sideways phases, trends, consolidation, overnight gaps, intraday volatility patterns and news events (earnings, analyst calls, lawsuits, economic data) that move prices. Every headline is labelled SIMULATED. Volatility, news frequency, trend strength, regime and seed are configurable.
 
+**Daily practice streak.** The flame in the top bar counts the days in a row you reached your daily practice goal (5 to 60 minutes, default 10). Practice time counts while the tab is in front and you are active on any screen except Data & Settings; a playing replay keeps counting for 10 minutes after your last click or key press, since watching tape is practice too. The ring around the flame fills as you go. Click it for today's progress, trades closed and journal reviews, your best streak, the next milestone (3, 7, 14, 30, 50, 100 days...) and a calendar of the last four months. Every 7 practised days earns a streak freeze (up to 2), which covers a missed day automatically. Days follow your computer's calendar, weekends included, and changing the goal never rewrites completed days. The streak rewards practice time, never profit or trade count, so there is no reason to force a trade to keep it alive. It is stored in your browser.
+
+**Appearance.** Data & Settings → Appearance, or **Chart style** in the chart toolbar for quick changes while you trade. Themes: Midnight, Graphite and Light, plus an accent colour. Chart type: candles, hollow candles, OHLC bars, line or area. Candle colour presets (classic, green/red, colour-blind safe blue/orange, cyan/magenta, monochrome) or your own up/down body, border and wick colours; chart background, grid, axis text and crosshair; grid lines on or off, magnet crosshair, last price line, normal/log/percent price scale, volume opacity and axis font size. A live preview shows the result. Profit and loss text can follow your candle colours, and text colours are nudged automatically when needed so numbers stay readable (WCAG 4.5:1) on any combination. Data source labels always stay on the chart.
+
 **Challenges.** Grow $10k to $12k risking ≤1% per trade; trade a day without a 5% drawdown; average 2:1 planned R:R over 10 trades; 20 trades following your rules; positive expectancy over 15 trades. A result is *official* only if you never rewound the session.
 
 ## Using real data
@@ -75,12 +79,12 @@ Data & Settings → Import historical data. Needs columns for time, open, high, 
 
 ### Polygon or Alpaca
 
-The browser cannot call these APIs directly (CORS), so the dev and preview servers include a small proxy at `/api/polygon` and `/api/alpaca`. Use `npm run dev` or `npm run preview`; a static host without the proxy will not work for vendor data.
+The browser cannot call these APIs directly (CORS), so the dev and preview servers include a small proxy at `/api/polygon` and `/api/alpaca`, and a Vercel deployment gets the same proxy as a function (see below). A plain static host without either will not work for vendor data.
 
 Keys, three options:
 1. **Session only (default):** paste them in Data & Settings. They live in memory and are gone on reload.
 2. **Encrypted in the browser:** save them with a passphrase (AES-GCM, key derived with PBKDF2). You unlock them each session.
-3. **Server side:** put them in `.env.local` next to `package.json`. The browser never sees them; the proxy adds them.
+3. **Server side (local dev):** put them in `.env.local` next to `package.json`. The browser never sees them; the proxy adds them. On Vercel see [Deploying to Vercel](#deploying-to-vercel) before doing this.
 
 ```bash
 # .env.local  (git-ignored)
@@ -90,6 +94,14 @@ ALPACA_SECRET=...
 ```
 
 Keys are never hard-coded and never logged. `/api/server-keys` reports only whether a key is configured.
+
+## Deploying to Vercel
+
+The repository deploys as is: `vercel.json` builds the Vite app into `dist/` and adds a small function, `api/proxy.ts`, that replaces the dev server's data proxy for Polygon and Alpaca.
+
+- The function forwards only the two bar endpoints the app uses, so it is not an open proxy.
+- On a public deployment it forwards only the keys a visitor enters in their own browser. Keys in the project's environment variables (`POLYGON_API_KEY`, `ALPACA_KEY_ID`, `ALPACA_SECRET`) are ignored unless you also set `ALLOW_SERVER_KEYS=true`, because otherwise anyone with the URL could spend your quota. Only set it on a deployment protected by Vercel Authentication or a password.
+- Everything else (journal, streak, settings, imported CSVs) stays in each visitor's browser. There is no database and no account.
 
 ## Keyboard
 
@@ -110,7 +122,8 @@ Keys are never hard-coded and never logged. `/api/server-keys` reports only whet
 - **Sessions do not survive a page reload.** The journal, analytics, imported data, settings and drawings persist; an in-progress replay or simulated market does not.
 - **Rewinding rewrites history.** Stepping back past a closed trade undoes it and removes its journal entry (you are asked first), and the session is flagged as not blind.
 - **Vendor data needs the proxy and a network.** Polygon and Alpaca were implemented against their documented APIs and are tested with mocked responses; plan limits (history depth, rate limits, IEX vs SIP volume) are the vendor's.
-- **Single user, single browser.** Data is stored locally; there is no account or sync.
+- **Single user, single browser.** Data is stored locally; there is no account or sync. Clearing site data resets the journal and the streak.
+- **The streak measures time, not quality.** It cannot tell focused practice from leaving a replay playing; it only stops counting after 10 minutes without input. It is a nudge to show up, not a measure of skill.
 
 ## Architecture
 
@@ -130,12 +143,17 @@ src/core/            framework-free engine (fully unit tested)
   analytics/         performance statistics
   learning/          post-trade review
   challenges/        challenge definitions and evaluation
+  streak/            daily practice streak rules (goal, freezes, milestones, calendar)
 src/ui/              React UI
-  state/             zustand stores; tradingStore runs the play loop and bridges engine → UI
+  state/             zustand stores; tradingStore runs the play loop and bridges engine → UI;
+                     streakStore tracks active practice time
+  theme/             themes, colour maths (WCAG contrast) and the resolved palette for CSS and charts
   chart/             lightweight-charts wrapper, drawing layer, line charts
   components/        terminal panels, order ticket, dialogs
   pages/             backtest, journal, analytics, challenges, settings
 vite.config.ts       dev/preview proxy for vendor APIs, server-side key injection
+api/proxy.ts         the same proxy as a Vercel function (deployed builds)
+vercel.json          build settings, proxy rewrites, security headers
 ```
 
 The engine has no browser dependencies, so new data sources plug in by implementing `HistoricalDataProvider` (see `src/core/data/provider.ts`) and registering it in `src/ui/state/dataRegistry.ts`.

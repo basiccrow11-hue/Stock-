@@ -1,6 +1,6 @@
 /** Rule-based backtester: build IF/THEN rules, pick data, run without look-ahead, inspect results. */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, type SeriesMarker, type Time } from 'lightweight-charts';
+import { CandlestickSeries, createChart, createSeriesMarkers, type SeriesMarker, type Time } from 'lightweight-charts';
 import {
   OPERATOR_LABELS,
   STRATEGY_PRESETS,
@@ -25,6 +25,8 @@ import { NumberField, SourceBadge, EmptyState } from '../components/common';
 import { StatsGrid } from './AnalyticsPage';
 import { LineChart, type LineSpec } from '../chart/LineChart';
 import { toChartTime } from '../chart/ChartView';
+import { candleOptions, panelChartOptions } from '../chart/chartTheme';
+import { useTheme } from '../theme/useTheme';
 import { CHART_LOCALE, dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { newId } from '../../core/util/ids';
 import { formatDuration } from '../../core/time';
@@ -172,25 +174,26 @@ function describeRule(r: Rule): string {
 
 function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe: Timeframe }) {
   const ref = useRef<HTMLDivElement>(null);
+  const panel = useTheme().panel;
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const themed = panelChartOptions(panel);
     const chart = createChart(el, {
+      ...themed,
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#8b97a8', fontSize: 11, attributionLogo: false },
-      grid: { vertLines: { color: '#1a2130' }, horzLines: { color: '#1a2130' } },
-      rightPriceScale: { borderColor: '#1f2633' },
-      timeScale: { borderColor: '#1f2633', timeVisible: timeframe !== '1D' },
+      layout: { ...themed.layout, fontSize: 11, attributionLogo: false },
+      timeScale: { ...themed.timeScale, timeVisible: timeframe !== '1D' },
       localization: { locale: CHART_LOCALE },
     });
-    const s = chart.addSeries(CandlestickSeries, { upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+    const s = chart.addSeries(CandlestickSeries, candleOptions(panel));
     const data = result.candles.map((c: Bar) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }));
     s.setData(data);
     const markers: SeriesMarker<Time>[] = result.fills
       .map((f) => ({
         time: toChartTime(bucketFor(f.time, timeframe).start) as Time,
         position: f.side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
-        color: f.side === 'buy' ? '#26a69a' : '#ef5350',
+        color: f.side === 'buy' ? panel.up : panel.down,
         shape: f.side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
         text: f.action === 'buy' ? 'B' : f.action === 'sell' ? 'S' : f.action === 'short' ? 'SH' : 'CV',
       }))
@@ -201,12 +204,13 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
     if (n > 200) chart.timeScale().setVisibleLogicalRange({ from: n - 200, to: n + 5 });
     else chart.timeScale().fitContent();
     return () => chart.remove();
-  }, [result, timeframe]);
+  }, [result, timeframe, panel]);
   return <div ref={ref} style={{ height: 380, position: 'relative' }} />;
 }
 
 export function BacktestPage() {
   const settings = useSettings();
+  const panel = useTheme().panel;
   useCredentials((s) => s.creds);
   const [strategy, setStrategy] = useState<StrategyDefinition>(() => clone(STRATEGY_PRESETS[0]));
   const [providerId, setProviderId] = useState(settings.replay.providerId);
@@ -288,10 +292,10 @@ export function BacktestPage() {
   const equityLines = useMemo<LineSpec[]>(() => {
     if (!result) return [];
     return [
-      { name: 'Strategy', color: '#4f8cff', area: true, points: result.r.equityCurve.map((p) => ({ time: p.time, value: p.equity })) },
-      { name: 'Buy & hold', color: '#8b97a8', dashed: true, points: result.r.benchmarkCurve.map((p) => ({ time: p.time, value: p.equity })) },
+      { name: 'Strategy', color: panel.accent, area: true, points: result.r.equityCurve.map((p) => ({ time: p.time, value: p.equity })) },
+      { name: 'Buy & hold', color: panel.benchmark, dashed: true, points: result.r.benchmarkCurve.map((p) => ({ time: p.time, value: p.equity })) },
     ];
-  }, [result]);
+  }, [result, panel.accent, panel.benchmark]);
 
   const setSizing = (s: Sizing) => setStrategy({ ...strategy, sizing: s });
 

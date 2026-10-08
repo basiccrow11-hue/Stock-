@@ -3,6 +3,7 @@ import { CHALLENGES } from '../../core/challenges/challenges';
 import { useChallenges } from '../state/challengeStore';
 import { EmptyState } from '../components/common';
 import { money } from '../services/format';
+import { StreakPanel } from '../components/Streak';
 
 export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mode: 'replay' | 'sim') => void }) {
   const attempts = useChallenges((s) => s.attempts);
@@ -14,6 +15,9 @@ export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mod
         <p className="muted">
           Structured goals that train discipline rather than luck. A result only counts as <b>official</b> if you never rewound or restarted the session, because going back means you have seen the future.
         </p>
+        <div className="card">
+          <StreakPanel />
+        </div>
         {active && (
           <div className="alert info">
             In progress: <b>{CHALLENGES.find((c) => c.id === active.challengeId)?.title}</b>. {active.result.detail} Progress is shown on the trade screen.

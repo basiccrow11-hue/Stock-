@@ -3,7 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Stock Replay — Trading Simulator</title>
+    <meta name="description" content="Practise trading when the market is closed: replay past days bar by bar with no look-ahead, paper trade with realistic orders, journal, backtest and track a daily practice streak." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6fe8'/%3E%3Cpath d='M8 21h3V12H8zM14.5 24h3V8h-3zM21 19h3v-6h-3z' fill='%23fff'/%3E%3C/svg%3E" />
+    <title>Stock Replay · Trading Simulator</title>
+    <script>
+      // Paint the saved theme's background before the app loads, so a light theme never flashes dark.
+      try {
+        var t = JSON.parse(localStorage.getItem('stock-replay-settings') || '{}').state.appearance.theme;
+        var bg = { light: '#eef1f5', graphite: '#121316' }[t];
+        if (bg) {
+          document.documentElement.style.background = bg;
+          document.documentElement.style.colorScheme = t === 'light' ? 'light' : 'dark';
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

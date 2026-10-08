@@ -2,6 +2,9 @@
 import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
+import { recordReview } from './streakStore';
+
+const hasNotes = (n: JournalNotes) => Object.values(n).some((v) => typeof v === 'string' && v.trim() !== '');
 
 interface JournalStore {
   entries: JournalEntry[];
@@ -46,7 +49,10 @@ export const useJournal = create<JournalStore>()((set, get) => ({
   updateNotes: async (id, notes) => {
     const entry = get().entries.find((e) => e.id === id);
     if (!entry) return;
-    await get().update(id, { notes: { ...entry.notes, ...notes } });
+    const next = { ...entry.notes, ...notes };
+    // The first note written on a trade counts as a review for the daily practice summary.
+    if (!hasNotes(entry.notes) && hasNotes(next)) recordReview();
+    await get().update(id, { notes: next });
   },
   remove: async (id) => {
     const entry = get().entries.find((e) => e.id === id);

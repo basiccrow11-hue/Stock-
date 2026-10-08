@@ -20,6 +20,7 @@ import { getSettings } from './settingsStore';
 import { useJournal, saveSnapshot } from './journalStore';
 import { useChallenges } from './challengeStore';
 import { toast } from './toasts';
+import { recordTradeClosed } from './streakStore';
 import { newId } from '../../core/util/ids';
 
 export type SessionMode = 'replay' | 'sim';
@@ -301,6 +302,7 @@ async function processClosedTrips(): Promise<void> {
       }
     }
     await useJournal.getState().add(entry);
+    recordTradeClosed();
     const tone = trip.pnl >= 0 ? 'success' : 'error';
     toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
     if (settings.learningMode) {

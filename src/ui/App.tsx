@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { TopBar, type View } from "./components/TopBar";
 import { Watchlist } from "./components/Watchlist";
 import { ChartPanel } from "./components/ChartPanel";
@@ -7,6 +7,7 @@ import { BottomPanel } from "./components/BottomPanel";
 import { SessionSetup, type SetupMode } from "./components/SessionSetup";
 import { TradeReviewModal } from "./components/TradeReviewModal";
 import { Toasts } from "./components/common";
+import { StreakCelebration, StreakModal } from "./components/Streak";
 // Secondary pages load on first visit to keep the trading screen's initial bundle small.
 const BacktestPage = lazy(() =>
   import("./pages/BacktestPage").then((m) => ({ default: m.BacktestPage })),
@@ -27,6 +28,8 @@ import { useJournal } from "./state/journalStore";
 import { useChallenges } from "./state/challengeStore";
 import { useCredentials } from "./state/credentials";
 import { loadCsvDatasets } from "./state/dataRegistry";
+import { startPracticeTracker } from "./state/streakStore";
+import { useTrading } from "./state/tradingStore";
 
 export function App() {
   const [view, setView] = useState<View>("trade");
@@ -35,6 +38,8 @@ export function App() {
     challengeId?: string;
   } | null>(null);
   const [journalFocus, setJournalFocus] = useState<string | null>(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
 
   useEffect(() => {
     void useJournal.getState().load();
@@ -43,13 +48,26 @@ export function App() {
     void useCredentials.getState().checkServer();
   }, []);
 
+  // Practice time for the daily streak: every screen except settings counts.
+  useEffect(
+    () =>
+      startPracticeTracker(
+        () => viewRef.current !== "settings",
+        () => useTrading.getState().playing,
+      ),
+    [],
+  );
+
   return (
     <div className="app">
       <TopBar view={view} onView={setView} />
       {/* The terminal stays mounted so the chart and drawings survive page switches. */}
       <main className={`terminal${view === "trade" ? "" : " hidden"}`}>
         <Watchlist />
-        <ChartPanel onNewSession={(mode) => setSetup({ mode })} />
+        <ChartPanel
+          onNewSession={(mode) => setSetup({ mode })}
+          onOpenSettings={() => setView("settings")}
+        />
         <RightPanel />
         <BottomPanel
           onOpenJournal={(id) => {
@@ -84,6 +102,8 @@ export function App() {
         />
       )}
       <TradeReviewModal />
+      <StreakModal />
+      <StreakCelebration />
       <Toasts />
     </div>
   );
