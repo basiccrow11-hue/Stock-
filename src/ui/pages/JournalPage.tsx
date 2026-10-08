@@ -1,7 +1,7 @@
 /** Trade journal: every closed trade, filterable, with notes, snapshots and reviews. */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useJournal } from '../state/journalStore';
-import { EmptyState, SourceBadge } from '../components/common';
+import { EmptyState, SourceBadge, rowAction } from '../components/common';
 import { JournalEntryDetail } from '../components/JournalEntryDetail';
 import { dateTime, pnlClass, signedMoney } from '../services/format';
 import type { JournalEntry } from '../../core/journal';
@@ -81,6 +81,16 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
   useEffect(() => {
     if (current && current.id !== selected) setSelected(current.id);
   }, [current, selected]);
+  // A new search or filter is different: the editor follows the list, so it never shows (or deletes)
+  // an entry the list is hiding. Keyed on the filters only, so saving notes cannot trigger it.
+  const filterKey = `${query}\u0000${outcome}\u0000${noteless}`;
+  const lastFilter = useRef(filterKey);
+  useEffect(() => {
+    if (lastFilter.current === filterKey) return;
+    lastFilter.current = filterKey;
+    if (!list.some((e) => e.id === selected)) setSelected(list[0]?.id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
 
   if (!loaded) return <div className="page"><div className="page-inner">Loading journal…</div></div>;
 
@@ -108,7 +118,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
               <div className="row wrap">
                 <div className="seg">
                   {(['all', 'win', 'loss'] as const).map((o) => (
-                    <button key={o} className={outcome === o ? 'on' : ''} onClick={() => setOutcome(o)}>
+                    <button key={o} className={outcome === o ? 'on' : ''} aria-pressed={outcome === o} onClick={() => setOutcome(o)}>
                       {o === 'all' ? 'All' : o === 'win' ? 'Wins' : 'Losses'}
                     </button>
                   ))}
@@ -121,7 +131,13 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
                 <table className="grid">
                   <tbody>
                     {list.map((e) => (
-                      <tr key={e.id} className="clickable" onClick={() => setSelected(e.id)} style={current?.id === e.id ? { background: 'var(--panel-3)' } : undefined}>
+                      <tr
+                        key={e.id}
+                        className="clickable"
+                        {...rowAction(() => setSelected(e.id))}
+                        aria-current={current?.id === e.id ? 'true' : undefined}
+                        style={current?.id === e.id ? { background: 'var(--panel-3)' } : undefined}
+                      >
                         <td>
                           <b>{e.symbol}</b> <span className={e.direction === 'long' ? 'pos' : 'neg'}>{e.direction === 'long' ? 'L' : 'S'}</span>
                           <div className="small muted">{dateTime(e.exitTime)}</div>

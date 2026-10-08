@@ -5,7 +5,7 @@ import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
 import { EVENT_LABELS } from '../../core/sim/SimMarket';
 import { useJournal } from '../state/journalStore';
-import { EmptyState } from './common';
+import { EmptyState, rowAction } from './common';
 import { dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { formatDuration, formatExchangeTime } from '../../core/time';
 import { toast } from '../state/toasts';
@@ -43,7 +43,7 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
         {tabs
           .filter((t) => !t.hide)
           .map((t) => (
-            <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>
+            <button key={t.id} className={tab === t.id ? 'on' : ''} aria-pressed={tab === t.id} onClick={() => setTab(t.id)}>
               {t.label}
               {t.count ? <span className="count">{t.count}</span> : null}
             </button>
@@ -80,6 +80,7 @@ function PositionsTab() {
   const positions = useTrading((s) => s.positions);
   const quotes = useTrading((s) => s.quotes);
   const orders = useTrading((s) => s.orders);
+  const activeSymbol = useTrading((s) => s.activeSymbol);
   if (!positions.length) return <EmptyState title="No open positions" />;
   return (
     <table className="grid">
@@ -107,7 +108,7 @@ function PositionsTab() {
           const stop = exits.find((o) => o.type === 'stop' || o.type === 'stop_limit')?.stopPrice;
           const target = exits.find((o) => o.type === 'limit')?.limitPrice;
           return (
-            <tr key={p.symbol} className="clickable" onClick={() => setActiveSymbol(p.symbol)}>
+            <tr key={p.symbol} className="clickable" {...rowAction(() => setActiveSymbol(p.symbol), false)} aria-current={p.symbol === activeSymbol ? 'true' : undefined}>
               <td>
                 <b>{p.symbol}</b>
               </td>

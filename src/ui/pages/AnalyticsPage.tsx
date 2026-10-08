@@ -8,6 +8,7 @@ import type { EquityPoint, RoundTrip } from '../../core/types';
 import type { JournalEntry } from '../../core/journal';
 import { EmptyState, Stat } from '../components/common';
 import { LineChart, type LineSpec } from '../chart/LineChart';
+import { useTheme } from '../theme/useTheme';
 import { money, pnlClass, signedMoney } from '../services/format';
 import { exchangeDate, exchangeMinuteOfDay, formatDuration, weekdayOf } from '../../core/time';
 
@@ -140,7 +141,8 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export function AnalyticsPage() {
   const entries = useJournal((s) => s.entries);
   const base = useSettings((s) => s.defaultBalance);
-  const accent = useSettings((s) => s.appearance.accent);
+  // Adjusted to 3:1 on the panel, like every other chart line on app panels.
+  const accent = useTheme().panel.accent;
   const session = useTrading((s) => s.session);
   const sessionCurve = useTrading((s) => s.equityCurve);
   const sessionTrips = useTrading((s) => s.trips);

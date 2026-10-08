@@ -85,9 +85,16 @@ describe('vendor providers (mocked HTTP)', () => {
     const html = (async () => new Response('<!doctype html><title>404</title>', { status: 404, headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
     await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', html).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringMatching(/no market-data proxy/) });
     await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', html).getBars(req)).rejects.toMatchObject({ kind: 'network' });
+    // Hosts that fall back to the app serve its index.html with 200 for every unknown path.
+    const spa = (async () => new Response('<!doctype html><html><div id="root"></div></html>', { status: 200, headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', spa).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringMatching(/no market-data proxy/) });
+    await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', spa).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringMatching(/no market-data proxy/) });
     // The vendor's own 404 is JSON.
     const json = (async () => new Response('{"message":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
     await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', json).getBars(req)).rejects.toMatchObject({ kind: 'not_found' });
+    // Anything else that is not JSON is still reported as a bad vendor response.
+    const junk = (async () => new Response('upstream said no', { status: 200, headers: { 'content-type': 'text/plain' } })) as unknown as typeof fetch;
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', junk).getBars(req)).rejects.toMatchObject({ kind: 'invalid' });
   });
 
   it('Alpaca: sends key headers and pages with next_page_token', async () => {

@@ -11,6 +11,7 @@ import {
   type DeepPartial,
   type IChartApi,
   type ISeriesApi,
+  type LogicalRange,
   type SeriesType,
   type UTCTimestamp,
 } from 'lightweight-charts';
@@ -147,6 +148,15 @@ export function candleOptions(p: Pick<ChartPalette, 'up' | 'down' | 'wickUp' | '
 export function lastPriceColor(p: ChartPalette, lastUp: boolean): string {
   const raw = p.style === 'line' || p.style === 'area' ? p.line : p.style === 'hollow' ? (lastUp ? p.borderUp : p.borderDown) : lastUp ? p.up : p.down;
   return chartLabelFill(raw);
+}
+
+/**
+ * Index of the bar whose close lightweight-charts shows in the price-axis label: the last bar on
+ * screen (its visible range rounded outward), or the newest bar before the chart has a range.
+ */
+export function lastVisibleIndex(range: LogicalRange | null, count: number): number {
+  if (count <= 0) return -1;
+  return range ? Math.max(0, Math.min(count - 1, Math.ceil(range.to))) : count - 1;
 }
 
 /** Style-specific options for the main price series; safe to apply to a series of that style. */

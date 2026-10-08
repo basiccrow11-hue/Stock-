@@ -12,6 +12,8 @@ import { FIB_LEVELS, POINTS_NEEDED, useDrawings, type DrawPoint, type Drawing, t
 import { newId } from '../../core/util/ids';
 import { price as fmtPrice } from '../services/format';
 import { useSettings } from '../state/settingsStore';
+import { keyBelongsElsewhere } from '../components/common';
+import { readable } from '../theme/color';
 
 export interface ChartGeometry {
   chart: IChartApi;
@@ -68,7 +70,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   const [hover, setHover] = useState<DrawPoint | null>(null);
   const [drag, setDrag] = useState<DragState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const handleFill = useSettings((s) => s.appearance.colors.background);
+  const background = useSettings((s) => s.appearance.colors.background);
   void version;
 
   const proj = projector(geometry);
@@ -77,8 +79,8 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+      // Never delete a drawing hidden behind a dialog, or reset the tool with the Escape that closed one.
+      if (keyBelongsElsewhere(e)) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         remove(selectedId);
         e.preventDefault();
@@ -163,7 +165,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       onPointerLeave={() => setHover(null)}
     >
       {[...drawings, ...(preview ? [preview] : [])].map((d) => (
-        <Shape key={d.id} d={d} proj={proj} width={width} height={height} selected={d.id === selectedId} onDragStart={startDrag} handleFill={handleFill} />
+        <Shape key={d.id} d={d} proj={proj} width={width} height={height} selected={d.id === selectedId} onDragStart={startDrag} background={background} />
       ))}
       {pending.map((p, i) => {
         const x = proj.x(p.time);
@@ -181,9 +183,10 @@ function Shape({
   height,
   selected,
   onDragStart,
-  handleFill,
+  background,
 }: {
-  handleFill: string;
+  /** Chart background: handle fill, and what label text must stay readable on. */
+  background: string;
   d: Drawing;
   proj: Projector;
   width: number;
@@ -200,11 +203,13 @@ function Shape({
   const common = { stroke: d.color, strokeWidth: sw, fill: 'none', className: 'shape', onPointerDown: (e: React.PointerEvent) => onDragStart(e, d, 'all') };
   const handles = selected
     ? xy.map((p, i) =>
-        p.x !== null && p.y !== null ? <circle key={`h${i}`} className="handle" cx={p.x} cy={p.y} r={5} fill={handleFill} stroke={d.color} strokeWidth={2} onPointerDown={(e) => onDragStart(e, d, i)} /> : null,
+        p.x !== null && p.y !== null ? <circle key={`h${i}`} className="handle" cx={p.x} cy={p.y} r={5} fill={background} stroke={d.color} strokeWidth={2} onPointerDown={(e) => onDragStart(e, d, i)} /> : null,
       )
     : null;
+  // Lines keep the picked colour (3:1 is enough for a line); small label text needs 4.5:1.
+  const textColor = readable(d.color, background, 4.5);
   const label = (x: number, y: number, text: string) => (
-    <text x={x} y={y} fill={d.color} fontSize={10} className="shape-label">
+    <text x={x} y={y} fill={textColor} fontSize={10} className="shape-label">
       {text}
     </text>
   );

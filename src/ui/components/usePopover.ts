@@ -33,8 +33,13 @@ export function usePopover() {
       if (box && !box.contains(e.target as Node)) close(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      // A dialog that opened on top (a trade review) handles its own Escape.
-      if (e.key === 'Escape' && !modalOpen()) close(true);
+      // A dialog that opened on top (a trade review) handles its own Escape. Otherwise Escape closes
+      // the popover and nothing else: this runs first (capture phase) and marks the key as used, so
+      // chart shortcuts behind it (reset the drawing tool, cancel a price pick) stand down.
+      if (e.key === 'Escape' && !modalOpen() && !e.defaultPrevented) {
+        e.preventDefault();
+        close(true);
+      }
     };
     // Tabbing out of the panel closes it, so two popovers never overlap. Focus that moves to an
     // ancestor (a click on plain text in the panel focuses the terminal around it) is not leaving.
@@ -43,12 +48,12 @@ export function usePopover() {
       if (to instanceof Node && box && !box.contains(to) && !to.contains(box)) close(false);
     };
     window.addEventListener('pointerdown', onDown);
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     box?.addEventListener('focusout', onFocusOut);
     return () => {
       if (closeOpen === mine) closeOpen = null;
       window.removeEventListener('pointerdown', onDown);
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
       box?.removeEventListener('focusout', onFocusOut);
     };
   }, [open, close]);

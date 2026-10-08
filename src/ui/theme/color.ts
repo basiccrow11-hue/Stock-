@@ -81,14 +81,36 @@ export function readable(fg: string, bg: string, min = 4.5): string {
   return towards(fg, first, bg, min) ?? towards(fg, second, bg, min) ?? (contrast(first, bg) >= contrast(second, bg) ? first : second);
 }
 
-/** HSL saturation, 0..1. Greys and near-greys are close to 0. */
-export function saturation(c: string): number {
-  const [r, g, b] = parseHex(c).map((v) => v / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return 0;
-  return (max - min) / (1 - Math.abs(2 * l - 1));
+/**
+ * How colourful a colour looks: OKLCH chroma, about 0 for greys and 0.1 to 0.3 for clear colours.
+ * Unlike HSL saturation it does not collapse when a colour is lightened, so a deep green made
+ * lighter for contrast still counts as green.
+ */
+export function chroma(c: string): number {
+  const [, a, b] = oklab(c);
+  return Math.hypot(a, b);
+}
+
+/** Perceptual difference between two colours (distance in OKLab): about 0.02 is barely visible. */
+export function deltaE(x: string, y: string): number {
+  const p = oklab(x);
+  const q = oklab(y);
+  return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+}
+
+function oklab(c: string): [number, number, number] {
+  const [r, g, b] = parseHex(c).map((v) => {
+    const x = v / 255;
+    return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  });
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
 }
 
 /** Euclidean distance in RGB, 0..441. A rough "do these look alike" measure. */
@@ -126,7 +148,23 @@ export function chartLabelText(bg: string): string {
   return 0.199 * r + 0.687 * g + 0.114 * b > 160 ? '#000000' : '#ffffff';
 }
 
-/** `color` adjusted just enough that lightweight-charts' own label text on it reaches 4.5:1. */
+/**
+ * `color` adjusted just enough that lightweight-charts' own label text on it reaches 4.5:1. Either
+ * it is darkened under white text, or lightened just past the point where the chart switches to
+ * black text, whichever looks less different: an orange just under that point stays orange instead
+ * of turning brown.
+ */
 export function chartLabelFill(color: string): string {
-  return fillFor(chartLabelText(color), color, 4.5);
+  if (contrast(chartLabelText(color), color) >= 4.5) return normHex(color);
+  const darker = fillFor('#ffffff', color, 4.5);
+  const reads = (c: string) => chartLabelText(c) === '#000000' && contrast('#000000', c) >= 4.5;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 18; i++) {
+    const mid = (lo + hi) / 2;
+    if (reads(mix(color, '#ffffff', mid))) hi = mid;
+    else lo = mid;
+  }
+  const lighter = mix(color, '#ffffff', hi);
+  return deltaE(lighter, color) < deltaE(darker, color) ? lighter : darker;
 }

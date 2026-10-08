@@ -32,11 +32,47 @@ const DEFAULTS: Record<IndicatorType, Partial<IndicatorConfig>> = {
   volume: {},
 };
 
+/**
+ * A number box the user can type into freely. Clamping every keystroke would turn the "1" of "14"
+ * into the minimum at once, so the value is applied only while what is typed is valid, and tidied
+ * up (clamped, or restored if empty) when the box loses focus or on Enter.
+ */
+function DraftNumber({ value, min, step = 1, integer = true, label, width, onCommit }: { value: number; min: number; step?: number; integer?: boolean; label: string; width: number; onCommit: (v: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const parse = (text: string) => {
+    const n = Number(text);
+    return text.trim() === '' || !Number.isFinite(n) ? null : integer ? Math.round(n) : n;
+  };
+  const finish = () => {
+    if (draft === null) return;
+    const n = parse(draft);
+    if (n !== null && Math.max(min, n) !== value) onCommit(Math.max(min, n));
+    setDraft(null);
+  };
+  return (
+    <input
+      type="number"
+      aria-label={label}
+      title={label}
+      min={min}
+      step={step}
+      style={{ width }}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        const n = parse(e.target.value);
+        if (n !== null && n >= min && n !== value) onCommit(n);
+      }}
+      onBlur={finish}
+      onKeyDown={(e) => e.key === 'Enter' && finish()}
+    />
+  );
+}
+
 export function IndicatorMenu() {
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const { indicators, updateIndicator, addIndicator, removeIndicator } = useSettings();
   const [addType, setAddType] = useState<IndicatorType>('sma');
-  const num = (v: string, min = 1) => Math.max(min, Math.round(Number(v) || min));
 
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
@@ -53,21 +89,30 @@ export function IndicatorMenu() {
                   {indicatorName(i)}
                 </label>
                 {(i.type === 'sma' || i.type === 'ema' || i.type === 'rsi' || i.type === 'atr' || i.type === 'bb') && (
-                  <input type="number" title="Period" style={{ width: 54 }} value={i.period} onChange={(e) => updateIndicator(i.id, { period: num(e.target.value, 2) })} />
+                  <DraftNumber label={`${indicatorName(i)} period`} width={54} min={2} value={i.period ?? 2} onCommit={(period) => updateIndicator(i.id, { period })} />
                 )}
-                {i.type === 'bb' && <input type="number" title="Std dev multiplier" step={0.5} style={{ width: 48 }} value={i.mult} onChange={(e) => updateIndicator(i.id, { mult: Math.max(0.5, Number(e.target.value) || 2) })} />}
+                {i.type === 'bb' && (
+                  <DraftNumber label={`${indicatorName(i)} standard deviation multiplier`} width={48} min={0.5} step={0.5} integer={false} value={i.mult ?? 2} onCommit={(mult) => updateIndicator(i.id, { mult })} />
+                )}
                 {i.type === 'macd' && (
                   <>
-                    <input type="number" title="Fast" style={{ width: 42 }} value={i.fast} onChange={(e) => updateIndicator(i.id, { fast: num(e.target.value, 2) })} />
-                    <input type="number" title="Slow" style={{ width: 42 }} value={i.slow} onChange={(e) => updateIndicator(i.id, { slow: num(e.target.value, 3) })} />
-                    <input type="number" title="Signal" style={{ width: 42 }} value={i.signal} onChange={(e) => updateIndicator(i.id, { signal: num(e.target.value, 2) })} />
+                    <DraftNumber label={`${indicatorName(i)} fast period`} width={42} min={2} value={i.fast ?? 12} onCommit={(fast) => updateIndicator(i.id, { fast })} />
+                    <DraftNumber label={`${indicatorName(i)} slow period`} width={42} min={3} value={i.slow ?? 26} onCommit={(slow) => updateIndicator(i.id, { slow })} />
+                    <DraftNumber label={`${indicatorName(i)} signal period`} width={42} min={2} value={i.signal ?? 9} onCommit={(signal) => updateIndicator(i.id, { signal })} />
                   </>
                 )}
                 {i.type !== 'volume' && i.type !== 'macd' && (
-                  <input type="color" title="Color" value={i.color} onChange={(e) => updateIndicator(i.id, { color: e.target.value })} style={{ width: 28, height: 26, padding: 0, border: 0, background: 'none' }} />
+                  <input
+                    type="color"
+                    aria-label={`${indicatorName(i)} colour`}
+                    title="Colour"
+                    value={i.color}
+                    onChange={(e) => updateIndicator(i.id, { color: e.target.value })}
+                    style={{ width: 28, height: 26, padding: 0, border: 0, background: 'none' }}
+                  />
                 )}
-                <button className="btn ghost sm" title="Remove" onClick={() => removeIndicator(i.id)}>
-                  ✕
+                <button className="btn ghost sm" aria-label={`Remove ${indicatorName(i)}`} title="Remove" onClick={() => removeIndicator(i.id)}>
+                  <span aria-hidden="true">✕</span>
                 </button>
               </div>
             ))}

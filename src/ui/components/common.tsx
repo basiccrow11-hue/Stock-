@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { DataSourceKind } from '../../core/types';
 import { useToasts } from '../state/toasts';
 
@@ -13,6 +13,16 @@ function modalsChanged(): void {
 /** True while any modal dialog is open (global shortcuts stand down). */
 export function modalOpen(): boolean {
   return modalStack.length > 0;
+}
+
+/**
+ * Whether a global shortcut should leave this key alone: a dialog is open, a dialog or popover has
+ * already handled it (Escape), or focus is in a text field, a dialog or a popover.
+ */
+export function keyBelongsElsewhere(e: KeyboardEvent): boolean {
+  if (modalOpen() || e.defaultPrevented) return true;
+  const el = e.target instanceof Element ? e.target : null;
+  return !!el?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover');
 }
 
 /** Number of open modal dialogs, as React state. */
@@ -46,9 +56,13 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  // Read during the first render, before anything inside the dialog takes focus.
+  // Read during the first render, before anything inside the dialog takes focus. A dialog that opened
+  // on its own (the milestone celebration at page load) has no opener: focus was on the page body.
   const openerRef = useRef<HTMLElement | null | undefined>(undefined);
-  if (openerRef.current === undefined) openerRef.current = document.activeElement as HTMLElement | null;
+  if (openerRef.current === undefined) {
+    const active = document.activeElement as HTMLElement | null;
+    openerRef.current = active && active !== document.body && active !== document.documentElement ? active : null;
+  }
 
   useEffect(() => {
     const dialog = dialogRef.current!;
@@ -65,6 +79,8 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
     const onKey = (e: KeyboardEvent) => {
       if (!isTop()) return;
       if (e.key === 'Escape') {
+        // Handled here, first (capture phase): Escape closes the dialog and nothing behind it.
+        e.preventDefault();
         onCloseRef.current();
       } else if (e.key === 'Tab') {
         const list = items();
@@ -90,10 +106,10 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
       if (!isTop() || !(e.target instanceof Node) || dialog.contains(e.target)) return;
       dialog.focus();
     };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     document.addEventListener('focusin', onFocusIn);
     return () => {
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
       document.removeEventListener('focusin', onFocusIn);
       const i = modalStack.findIndex((m) => m.id === id);
       if (i >= 0) modalStack.splice(i, 1);
@@ -161,12 +177,32 @@ export function Toasts() {
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        <div key={t.id} className={`toast ${t.tone}`} onClick={() => dismiss(t.id)}>
+        // Clicking a toast dismisses it without taking focus away from the dialog or control in use.
+        <div key={t.id} className={`toast ${t.tone}`} onMouseDown={(e) => e.preventDefault()} onClick={() => dismiss(t.id)}>
           {t.text}
         </div>
       ))}
     </div>
   );
+}
+
+/**
+ * Props for a clickable table row that keyboard users can reach with Tab and open with Enter. Space
+ * opens it too unless `space` is false (rows on the trade screen, where Space plays and pauses).
+ */
+export function rowAction(onActivate: () => void, space = true) {
+  return {
+    tabIndex: 0,
+    onClick: onActivate,
+    onKeyDown: (e: ReactKeyboardEvent<HTMLElement>) => {
+      // Keys on a button inside the row (Close, Delete) belong to that button.
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter' || (space && e.key === ' ')) {
+        e.preventDefault();
+        onActivate();
+      }
+    },
+  };
 }
 
 export function Stat({ k, v, cls }: { k: string; v: ReactNode; cls?: string }) {

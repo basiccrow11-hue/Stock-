@@ -29,13 +29,33 @@ const COMMON_SYMBOLS: SymbolInfo[] = DEMO_TICKERS.map((t) => ({ symbol: t.symbol
 /** True on the hosted site and locally alike, so it never sends anyone to a command they cannot run. */
 const PROXY_HINT = "the vendor or this app's data proxy did not answer. Check your connection and try again. If you run the app yourself, start it with npm run dev or npm run preview so the proxy is available.";
 
+/**
+ * The vendors answer in JSON. An HTML page comes from the web host instead: there is no data proxy
+ * at this address (a plain static host, or a deployment without its api/ function). Hosts answer
+ * that with a 404 page, or with the app's own index.html (200) when they fall back to the app.
+ */
+function isHostPage(body: string, contentType: string | null): boolean {
+  return /html/i.test(contentType ?? '') || body.trimStart().startsWith('<');
+}
+
+function noProxy(vendor: string): DataProviderError {
+  return new DataProviderError(`${vendor}: this site has no market-data proxy, so vendor data cannot be fetched here. Run the app with npm run dev or npm run preview, or deploy it with its api/ function (see the README).`, 'network');
+}
+
+/** Parse a successful response, telling a missing proxy apart from a vendor that sent something odd. */
+function parseJson<T>(body: string, vendor: string, contentType: string | null): T {
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    if (isHostPage(body, contentType)) throw noProxy(vendor);
+    throw new DataProviderError(`${vendor} returned a non-JSON response.`, 'invalid');
+  }
+}
+
 function httpError(status: number, body: string, vendor: string, contentType: string | null = null): DataProviderError {
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
-  // The vendors answer in JSON. A 404 page in HTML comes from the web host: there is no data proxy
-  // at this address (a plain static host, or a deployment without its api/ function).
-  if (status === 404 && !/json/i.test(contentType ?? ''))
-    return new DataProviderError(`${vendor}: this site has no market-data proxy, so vendor data cannot be fetched here. Run the app with npm run dev or npm run preview, or deploy it with its api/ function (see the README).`, 'network');
+  if (status === 404 && !/json/i.test(contentType ?? '')) return noProxy(vendor);
   if (status === 404) return new DataProviderError(`${vendor}: symbol or data not found.`, 'not_found');
   if (status === 502 || status === 503 || status === 504)
     return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}): ${PROXY_HINT}`, 'network');
@@ -87,12 +107,11 @@ export class PolygonProvider implements HistoricalDataProvider {
       }
       const text = await res.text();
       if (!res.ok) throw httpError(res.status, text, 'Polygon', res.headers.get('content-type'));
-      let json: { results?: { t: number; o: number; h: number; l: number; c: number; v: number }[]; next_url?: string; status?: string; error?: string };
-      try {
-        json = JSON.parse(text);
-      } catch {
-        throw new DataProviderError('Polygon returned a non-JSON response.', 'invalid');
-      }
+      const json = parseJson<{ results?: { t: number; o: number; h: number; l: number; c: number; v: number }[]; next_url?: string; status?: string; error?: string }>(
+        text,
+        'Polygon',
+        res.headers.get('content-type'),
+      );
       if (json.status === 'ERROR') throw new DataProviderError(`Polygon: ${json.error ?? 'error'}`, 'unknown');
       for (const r of json.results ?? []) {
         const t = Math.floor(r.t / 1000);
@@ -163,12 +182,7 @@ export class AlpacaProvider implements HistoricalDataProvider {
       }
       const text = await res.text();
       if (!res.ok) throw httpError(res.status, text, 'Alpaca', res.headers.get('content-type'));
-      let json: { bars?: { t: string; o: number; h: number; l: number; c: number; v: number }[] | null; next_page_token?: string | null };
-      try {
-        json = JSON.parse(text);
-      } catch {
-        throw new DataProviderError('Alpaca returned a non-JSON response.', 'invalid');
-      }
+      const json = parseJson<{ bars?: { t: string; o: number; h: number; l: number; c: number; v: number }[] | null; next_page_token?: string | null }>(text, 'Alpaca', res.headers.get('content-type'));
       for (const b of json.bars ?? []) {
         const t = Math.floor(Date.parse(b.t) / 1000);
         out.push({ time: t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v ?? 0 });

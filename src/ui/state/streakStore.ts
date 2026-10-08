@@ -150,11 +150,10 @@ export function dismissCelebration(): void {
 /** Spend freezes for missed days and roll the calendar over (on load and at midnight). */
 function settleNow(): void {
   const today = dayKey(new Date());
-  const r = settle(load(), today);
-  if (r.usedFreezes.length) {
-    save(r.data);
-    announceFreezes(r.usedFreezes, streakStatus(r.data, today).current);
-  }
+  const before = load();
+  const r = settle(before, today);
+  if (r.data !== before) save(r.data);
+  if (r.usedFreezes.length) announceFreezes(r.usedFreezes, streakStatus(r.data, today).current);
   useStreak.setState({ data: r.data, today });
 }
 

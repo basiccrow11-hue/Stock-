@@ -21,22 +21,22 @@ export function Watchlist() {
           const q = quotes[sym];
           const pos = positions.find((p) => p.symbol === sym);
           return (
-            <div key={sym} className={`watch-row${sym === active ? ' on' : ''}`} onClick={() => setActiveSymbol(sym)}>
-              <div>
-                <div className="sym">
-                  {sym} {pos && <span className={`badge ${pos.quantity > 0 ? 'pos' : 'neg'}`} style={{ padding: '0 5px' }}>{pos.quantity > 0 ? 'L' : 'S'} {Math.abs(pos.quantity)}</span>}
-                </div>
-              </div>
-              <div className="px">
-                <div>{q ? price(q.last) : '—'}</div>
-                <div className={`small ${q?.changePct ? (q.changePct >= 0 ? 'pos' : 'neg') : 'muted'}`}>{q?.changePct !== null && q?.changePct !== undefined ? pct(q.changePct, 2, true) : '—'}</div>
-              </div>
-            </div>
+            // A button, so the symbol can be switched from the keyboard (Enter; Space plays and pauses,
+            // as on every button of the trade screen).
+            <button key={sym} type="button" className={`watch-row${sym === active ? ' on' : ''}`} aria-pressed={sym === active} onClick={() => setActiveSymbol(sym)}>
+              <span className="sym">
+                {sym} {pos && <span className={`badge ${pos.quantity > 0 ? 'pos' : 'neg'}`} style={{ padding: '0 5px' }}>{pos.quantity > 0 ? 'L' : 'S'} {Math.abs(pos.quantity)}</span>}
+              </span>
+              <span className="px">
+                <span>{q ? price(q.last) : '—'}</span>
+                <span className={`small ${q?.changePct ? (q.changePct >= 0 ? 'pos' : 'neg') : 'muted'}`}>{q?.changePct !== null && q?.changePct !== undefined ? pct(q.changePct, 2, true) : '—'}</span>
+              </span>
+            </button>
           );
         })}
         {session?.mode === 'replay' && (
           <p className="muted small" style={{ padding: '8px 10px' }}>
-            All symbols here replay on the same clock. Click one to chart and trade it. Change the list in Data &amp; Settings.
+            All symbols here replay on the same clock. Click one (or Tab to it and press Enter) to chart and trade it. Change the list in Data &amp; Settings.
           </p>
         )}
       </div>

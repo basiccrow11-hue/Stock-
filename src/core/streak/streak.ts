@@ -44,7 +44,8 @@ export interface StreakData {
   creditedUntil: number;
   /**
    * Milestone waiting to be celebrated. It is kept until the user dismisses it, so a celebration
-   * held back during playback is not lost when the tab is closed or reloaded.
+   * held back during playback is not lost when the tab is closed or reloaded, and dropped once the
+   * streak that reached it has ended (see pendingCelebration).
    */
   celebrate: Celebration | null;
 }
@@ -53,6 +54,8 @@ export interface Celebration {
   milestone: number;
   /** Streak length when it was reached (larger than the milestone when a freeze carried past it). */
   streak: number;
+  /** Day the milestone was reached. */
+  day: DayKey;
 }
 
 export const GOAL_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
@@ -125,7 +128,8 @@ export function sanitizeStreak(raw: unknown): StreakData {
   out.best = Math.floor(nonNeg(r.best));
   out.creditedUntil = nonNeg(r.creditedUntil);
   const c = r.celebrate;
-  if (c && typeof c === 'object' && (MILESTONES as readonly number[]).includes(c.milestone) && Number.isInteger(c.streak) && c.streak >= c.milestone) out.celebrate = { milestone: c.milestone, streak: c.streak };
+  if (c && typeof c === 'object' && (MILESTONES as readonly number[]).includes(c.milestone) && Number.isInteger(c.streak) && c.streak >= c.milestone && typeof c.day === 'string' && DAY_RE.test(c.day))
+    out.celebrate = { milestone: c.milestone, streak: c.streak, day: c.day };
   return out;
 }
 
@@ -218,6 +222,20 @@ export function streakStatus(data: StreakData, today: DayKey): StreakStatus {
   };
 }
 
+/**
+ * The milestone still worth celebrating, or null. A celebration belongs to the streak that reached
+ * it: once that streak has ended (a missed day with no freeze), congratulating the user on it would
+ * contradict the "Fresh start" shown everywhere else.
+ */
+export function pendingCelebration(data: StreakData, today: DayKey): Celebration | null {
+  const c = data.celebrate;
+  if (!c) return null;
+  const end = data.days[today]?.done ? today : addDays(today, -1);
+  const reached = dayNumber(c.day);
+  // The current run covers the days after end - length, up to end.
+  return reached <= dayNumber(end) && reached > dayNumber(end) - streakEndingAt(data, end) ? c : null;
+}
+
 // ------------------------------------------------------------------ transitions
 
 export interface SettleResult {
@@ -231,6 +249,13 @@ export interface SettleResult {
  * enough. Idempotent: calling it again the same day changes nothing.
  */
 export function settle(data: StreakData, today: DayKey): SettleResult {
+  const { data: covered, usedFreezes } = coverGap(data, today);
+  // A celebration whose streak ended is dropped for good. Returns the same object when nothing changed.
+  const stale = covered.celebrate && !pendingCelebration(covered, today);
+  return { data: stale ? { ...covered, celebrate: null } : covered, usedFreezes };
+}
+
+function coverGap(data: StreakData, today: DayKey): SettleResult {
   const last = lastCoveredBefore(data, today);
   if (!last) return { data, usedFreezes: [] };
   const gap = dayNumber(today) - dayNumber(last) - 1;
@@ -325,7 +350,7 @@ export function recordActivity(input: StreakData, today: DayKey, delta: Activity
       data = { ...data, freezes: data.freezes + 1 };
     }
     data = { ...data, best: Math.max(data.best, streak) };
-    if (milestone) data = { ...data, celebrate: { milestone, streak } };
+    if (milestone) data = { ...data, celebrate: { milestone, streak, day: today } };
   }
   return { data, usedFreezes, completedNow, streak, milestone, newBest, earnedFreeze, refundedFreeze };
 }

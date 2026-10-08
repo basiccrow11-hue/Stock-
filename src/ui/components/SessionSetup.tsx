@@ -20,10 +20,10 @@ export function SessionSetup({ mode: initialMode, onClose, presetChallenge }: { 
   return (
     <Modal title="New session" onClose={onClose} wide>
       <div className="seg" style={{ marginBottom: 14 }}>
-        <button className={mode === 'replay' ? 'on' : ''} onClick={() => setMode('replay')}>
+        <button className={mode === 'replay' ? 'on' : ''} aria-pressed={mode === 'replay'} onClick={() => setMode('replay')}>
           Historical replay
         </button>
-        <button className={mode === 'sim' ? 'on' : ''} onClick={() => setMode('sim')}>
+        <button className={mode === 'sim' ? 'on' : ''} aria-pressed={mode === 'sim'} onClick={() => setMode('sim')}>
           Simulated market
         </button>
       </div>

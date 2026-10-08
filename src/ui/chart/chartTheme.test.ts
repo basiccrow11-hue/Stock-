@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mainPriceFormat, percentLabel, percentTickLabels, valueDecimals, valueFormat } from './chartTheme';
+import { lastVisibleIndex, mainPriceFormat, percentLabel, percentTickLabels, valueDecimals, valueFormat } from './chartTheme';
 import { price } from '../services/format';
 
 describe('percent price scale labels', () => {
@@ -53,5 +53,18 @@ describe('indicator pane labels', () => {
     expect(price(-4)).toBe('-4.00');
     expect(price(-0.5)).toBe('-0.5000');
     expect(price(4)).toBe('4.00');
+  });
+});
+
+describe('last-price label', () => {
+  it('follows the last bar on screen, as lightweight-charts does', () => {
+    // At the live edge (a little empty space to the right) it is the newest bar.
+    expect(lastVisibleIndex({ from: 900, to: 1004.5 } as never, 1000)).toBe(999);
+    // Scrolled back, it is the last bar in view (the range is rounded outward).
+    expect(lastVisibleIndex({ from: 400, to: 499.2 } as never, 1000)).toBe(500);
+    expect(lastVisibleIndex({ from: 400, to: 500 } as never, 1000)).toBe(500);
+    // Before the chart has a range, and with no bars.
+    expect(lastVisibleIndex(null, 1000)).toBe(999);
+    expect(lastVisibleIndex(null, 0)).toBe(-1);
   });
 });

@@ -5,7 +5,7 @@ import { toChartTime } from './ChartView';
 import { exchangeOffsetSeconds } from '../../core/time';
 import { CHART_LOCALE } from '../services/format';
 import { useTheme } from '../theme/useTheme';
-import { withAlpha } from '../theme/color';
+import { chartLabelFill, withAlpha } from '../theme/color';
 import { panelChartOptions } from './chartTheme';
 
 export interface LineSpec {
@@ -102,9 +102,11 @@ export function LineChart({
     fittedRef.current = false;
     seriesRef.current = shape.split(';').map((_, k) => {
       const l = linesRef.current[k];
+      // The value label (and its title) is filled with priceLineColor: adjusted so its text stays readable.
+      const label = { title: l.name, priceLineColor: chartLabelFill(l.color) };
       return l.area
-        ? chart.addSeries(AreaSeries, { lineColor: l.color, topColor: withAlpha(l.color, 0.33), bottomColor: withAlpha(l.color, 0.02), lineWidth: 2, title: l.name })
-        : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, title: l.name });
+        ? chart.addSeries(AreaSeries, { lineColor: l.color, topColor: withAlpha(l.color, 0.33), bottomColor: withAlpha(l.color, 0.02), lineWidth: 2, ...label })
+        : chart.addSeries(LineSeries, { color: l.color, lineWidth: 2, lineStyle: l.dashed ? 2 : 0, ...label });
     });
     return () => {
       chart.remove();

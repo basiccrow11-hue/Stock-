@@ -6,6 +6,7 @@ import {
   dayKey,
   dayNumber,
   emptyStreak,
+  pendingCelebration,
   recordActivity,
   sanitizeStreak,
   setGoal,
@@ -181,18 +182,42 @@ describe('milestones and bests across freezes', () => {
     expect(r.streak).toBe(15);
     expect(r.milestone).toBe(14);
     // The celebration states the real streak and explains the freeze, rather than claiming 14.
-    expect(r.data.celebrate).toEqual({ milestone: 14, streak: 15 });
+    expect(r.data.celebrate).toEqual({ milestone: 14, streak: 15, day: '2026-01-15' });
     expect(celebrationLine(r.data.celebrate!)).toMatch(/^You passed the 14-day mark/);
-    expect(celebrationLine({ milestone: 7, streak: 7 })).not.toMatch(/passed/);
+    expect(celebrationLine({ milestone: 7, streak: 7, day: '2026-01-07' })).not.toMatch(/passed/);
   });
 
   it('keeps a milestone waiting until it is dismissed, including across a reload', () => {
     const d = practise(emptyStreak(), run('2026-01-01', 3));
-    expect(d.celebrate).toEqual({ milestone: 3, streak: 3 });
-    expect(sanitizeStreak(JSON.parse(JSON.stringify(d))).celebrate).toEqual({ milestone: 3, streak: 3 });
-    // Junk is dropped.
-    expect(sanitizeStreak({ ...d, celebrate: { milestone: 4, streak: 4 } }).celebrate).toBeNull();
-    expect(sanitizeStreak({ ...d, celebrate: { milestone: 7, streak: 5 } }).celebrate).toBeNull();
+    const c = { milestone: 3, streak: 3, day: '2026-01-03' };
+    expect(d.celebrate).toEqual(c);
+    expect(sanitizeStreak(JSON.parse(JSON.stringify(d))).celebrate).toEqual(c);
+    // Junk is dropped, and so is a celebration without the day it belongs to.
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 4, streak: 4, day: '2026-01-04' } }).celebrate).toBeNull();
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 7, streak: 5, day: '2026-01-05' } }).celebrate).toBeNull();
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 3, streak: 3 } }).celebrate).toBeNull();
+    expect(sanitizeStreak({ ...d, celebrate: { milestone: 3, streak: 3, day: 'yesterday' } }).celebrate).toBeNull();
+  });
+
+  it('keeps a milestone while its streak runs and drops it once the streak has ended', () => {
+    const d = practise(emptyStreak(), run('2026-01-01', 3));
+    // Same day, the next day (not practised yet) and after practising that day: still running.
+    expect(pendingCelebration(d, '2026-01-03')).toEqual(d.celebrate);
+    expect(pendingCelebration(d, '2026-01-04')).toEqual(d.celebrate);
+    expect(pendingCelebration(practise(d, ['2026-01-04']), '2026-01-04')).toEqual(d.celebrate);
+    // A missed day with no freeze ends the streak: nothing to celebrate, and settle clears it.
+    expect(pendingCelebration(d, '2026-01-05')).toBeNull();
+    expect(settle(d, '2026-01-05').data.celebrate).toBeNull();
+    // A new streak practised afterwards does not revive the old celebration.
+    expect(pendingCelebration(practise(d, ['2026-01-06']), '2026-01-06')).toBeNull();
+    // A freeze that covers the gap keeps the streak, and the celebration, alive.
+    const banked = { ...d, freezes: 1 };
+    expect(settle(banked, '2026-01-05').data.celebrate).toEqual(d.celebrate);
+    expect(pendingCelebration(settle(banked, '2026-01-05').data, '2026-01-05')).toEqual(d.celebrate);
+    // A clock set back before the milestone day shows nothing.
+    expect(pendingCelebration(d, '2026-01-02')).toBeNull();
+    // Nothing to drop: settle returns the same data, so nothing is saved.
+    expect(settle(d, '2026-01-04').data).toBe(d);
   });
 
   it('returns a freeze when late practice completes the day it covered', () => {

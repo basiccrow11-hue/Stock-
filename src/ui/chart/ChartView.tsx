@@ -35,7 +35,7 @@ import { getBaseBars, getSimEventsFor, onChartEvent, pickPrice, registerSnapshot
 import { CHART_LOCALE, compactVolume, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { useDrawings } from './drawings';
-import { addMainSeries, chartOptions, lastPriceColor, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, valueDecimals, valueFormat, type MainSeries } from './chartTheme';
+import { addMainSeries, chartOptions, lastPriceColor, lastVisibleIndex, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, valueDecimals, valueFormat, type MainSeries } from './chartTheme';
 import { useTheme } from '../theme/useTheme';
 import { onChart, type ChartPalette } from '../theme/themes';
 import { chartLabelFill, chartLabelText } from '../theme/color';
@@ -175,9 +175,14 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       bump();
       syncPercentBase();
+      syncLastDirection();
     });
+    // The container, and the price pane itself: dragging a pane separator resizes the price pane
+    // (and rescales its prices) without any other event, and drawings must follow.
     const ro = new ResizeObserver(bump);
     ro.observe(el);
+    const pricePane = chart.panes()[0].getHTMLElement();
+    if (pricePane) ro.observe(pricePane);
 
     registerSnapshotProvider(async () => snapshot(chart, el));
     return () => {
@@ -301,7 +306,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     for (const ind of indicatorsRef.current) {
       if (ind.pane > 0) heights.set(ind.cfg.id, chart.panes()[ind.pane]?.getStretchFactor() ?? 0.35);
     }
-    const mainHeight = indicatorsRef.current.length ? chart.panes()[0].getStretchFactor() : 1;
+    const mainHeight = chart.panes()[0].getStretchFactor();
     for (const ind of indicatorsRef.current) for (const s of ind.series) chart.removeSeries(s);
     if (volumeRef.current) chart.removeSeries(volumeRef.current);
     volumeRef.current = null;
@@ -353,7 +358,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       indicatorsRef.current.push({ cfg, series, pane, bands, decimals: 2, maxAbs: 0 });
     }
     for (const ind of indicatorsRef.current) if (ind.pane > 0) chart.panes()[ind.pane]?.setStretchFactor(heights.get(ind.cfg.id) ?? 0.35);
-    chart.panes()[0].setStretchFactor(mainHeight);
+    // The price pane's dragged height only means something next to the panes it was dragged
+    // against. If none of them survived, new oscillator panes start from the default layout.
+    const kept = indicatorsRef.current.some((ind) => ind.pane > 0 && heights.has(ind.cfg.id));
+    chart.panes()[0].setStretchFactor(kept ? mainHeight : 1);
     applyPriceScale();
     fullRedraw();
     // fullRedraw and applyPriceScale are stable for the lifetime of the component (refs only).
@@ -414,13 +422,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     for (const ind of indicatorsRef.current) if (ind.pane === 0) for (const s of ind.series) s.applyOptions({ priceFormat });
   }
 
+  /**
+   * Direction of the bar the price-axis label shows. lightweight-charts labels the last bar on
+   * screen, not the newest one, so after scrolling back the label still matches the candle beside it.
+   */
   function lastUp(): boolean {
     const c = candlesRef.current;
-    const b = c[c.length - 1];
+    const b = c[lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, c.length)];
     return !b || b.close >= b.open;
   }
 
-  /** The last-price line and label follow the newest bar's direction. */
+  /** The last-price label (and line, which shares its colour) follows that bar's direction. */
   function syncLastDirection(): void {
     const series = candleRef.current;
     const up = lastUp();

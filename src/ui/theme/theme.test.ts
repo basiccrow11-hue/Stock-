@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { chartLabelFill, chartLabelText, contrast, distance, fillFor, isHex, mix, normHex, parseHex, readable, saturation, toHex, withAlpha } from './color';
-import { BADGE_TINT, DEFAULT_APPEARANCE, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
+import { chartLabelFill, chartLabelText, chroma, contrast, deltaE, distance, fillFor, isHex, mix, normHex, parseHex, readable, toHex, withAlpha } from './color';
+import { ACCENTS, BADGE_TINT, COLOURFUL, DEFAULT_APPEARANCE, THEMES, THEME_IDS, candlePresets, onChart, resolveTheme, sanitizeAppearance, type Appearance } from './themes';
 import { lastPriceColor } from '../chart/chartTheme';
 
 describe('colour helpers', () => {
@@ -37,10 +37,14 @@ describe('colour helpers', () => {
     for (const bg of ['#7a7a7a', '#888888', '#5f6b7a', '#9a6b3a']) expect(contrast(readable('#808080', bg, 4.5), bg), bg).toBeGreaterThanOrEqual(4.5);
   });
 
-  it('measures saturation', () => {
-    expect(saturation('#808080')).toBe(0);
-    expect(saturation('#ff0000')).toBeCloseTo(1, 5);
-    expect(saturation('#d1d4dc')).toBeLessThan(0.25);
+  it('measures how colourful a colour looks', () => {
+    expect(chroma('#808080')).toBeCloseTo(0, 5);
+    expect(chroma('#ffffff')).toBeCloseTo(0, 5);
+    expect(chroma('#d1d4dc')).toBeLessThan(COLOURFUL);
+    expect(chroma('#ff0000')).toBeGreaterThan(0.2);
+    // Lightening a deep green for a dark panel keeps it green; darkening a pastel for a white panel greys it.
+    expect(chroma('#719b74')).toBeGreaterThan(COLOURFUL);
+    expect(chroma('#5b706f')).toBeLessThan(COLOURFUL);
   });
 
   it('darkens fills so white text stays readable', () => {
@@ -82,17 +86,15 @@ describe('appearance', () => {
     for (const theme of THEME_IDS) {
       const scheme = theme === 'light' ? 'light' : 'dark';
       for (const p of candlePresets(scheme)) {
-        for (const accent of ['#4f8cff', '#ffeb3b', '#111111', '#ffffff']) {
+        for (const accent of [...ACCENTS, '#ffeb3b', '#111111', '#ffffff']) {
           const a: Appearance = sanitizeAppearance({ theme, accent, colors: { up: p.up, down: p.down } });
           const r = resolveTheme(a);
           const panel = r.vars['--panel'];
-          // Text appears on the panel and on the raised panels (risk box, toasts, streak chip).
-          for (const surface of ['--panel', '--panel-2', '--panel-3'])
-            for (const v of ['--text', '--muted', '--pos', '--neg', '--success', '--error', '--warn', '--demo', '--hist', '--sim', '--live', '--streak', '--freeze'])
+          // Text appears on the panel, the raised panels (risk box, toasts, streak chip), hovered
+          // controls (danger buttons, the streak chip) and the selected watchlist row.
+          for (const surface of ['--panel', '--panel-2', '--panel-3', '--hover', '--row-selected'])
+            for (const v of ['--text', '--muted', '--accent-text', '--pos', '--neg', '--success', '--error', '--warn', '--demo', '--hist', '--sim', '--live', '--streak', '--freeze'])
               expect(contrast(r.vars[v], r.vars[surface]), `${theme}/${p.id}/${accent} ${v} on ${surface}`).toBeGreaterThanOrEqual(4.5);
-          expect(contrast(r.vars['--accent-text'], panel), `${theme}/${p.id}/${accent} --accent-text`).toBeGreaterThanOrEqual(4.5);
-          // The streak chip turns --hover under the pointer and keeps its muted count.
-          expect(contrast(r.vars['--muted'], r.vars['--hover']), `${theme} muted on hover`).toBeGreaterThanOrEqual(4.5);
           // White button text, at rest and hovered.
           for (const v of ['--accent-2', '--accent-hover', '--buy-bg', '--buy-hover', '--sell-bg', '--sell-hover'])
             expect(contrast('#ffffff', r.vars[v]), `${theme}/${p.id}/${accent} white on ${v}`).toBeGreaterThanOrEqual(4.5);
@@ -168,12 +170,37 @@ describe('appearance', () => {
       for (const theme of THEME_IDS) {
         const r = resolveTheme(sanitizeAppearance({ theme, colors: { up, down } }));
         if (r.pnlUsesCandles) {
-          expect(saturation(r.vars['--pos']), `${theme} ${up}`).toBeGreaterThanOrEqual(0.25);
+          expect(chroma(r.vars['--pos']), `${theme} ${up}`).toBeGreaterThanOrEqual(COLOURFUL);
           expect(distance(r.vars['--pos'], r.vars['--neg']), `${theme} ${up}`).toBeGreaterThanOrEqual(60);
         }
       }
       expect(resolveTheme(sanitizeAppearance({ theme: 'light', colors: { up, down } })).pnlUsesCandles, up).toBe(false);
     }
+  });
+
+  it('keeps deep, clearly coloured candles as P/L colours on every theme', () => {
+    // Lightened for a dark panel, these lose HSL saturation but still read as plainly green and red.
+    for (const up of ['#1b5e20', '#004d40', '#33691e', '#2e7d32'])
+      for (const down of ['#b71c1c', '#c62828', '#d32f2f', '#880e4f', '#e65100'])
+        for (const theme of THEME_IDS) expect(resolveTheme(sanitizeAppearance({ theme, colors: { up, down } })).pnlUsesCandles, `${theme} ${up}/${down}`).toBe(true);
+  });
+
+  it('adjusts axis label boxes as little as possible', () => {
+    // Just under the chart's switch to black text: lightened a touch rather than darkened to brown.
+    for (const c of ['#ff9800', '#00bcd4']) {
+      const fill = chartLabelFill(c);
+      expect(chartLabelText(fill), c).toBe('#000000');
+      expect(distance(fill, c), c).toBeLessThan(25);
+    }
+    // Never further from the picked colour than plain darkening under white text would be.
+    for (let i = 0; i < 200; i++) {
+      const c = toHex([(i * 97) % 256, (i * 57 + 31) % 256, (i * 151 + 7) % 256]);
+      expect(deltaE(chartLabelFill(c), c), c).toBeLessThanOrEqual(deltaE(fillFor('#ffffff', c, 4.5), c) + 1e-9);
+    }
+    // A strong red stays red rather than turning pink.
+    expect(chartLabelText(chartLabelFill('#ef5350'))).toBe('#ffffff');
+    // Colours that already work are untouched.
+    expect(chartLabelFill('#ffeb3b')).toBe('#ffeb3b');
   });
 
   it('keeps crosshair labels readable whatever the crosshair colour', () => {

@@ -8,6 +8,7 @@ import {
   calendarWeeks,
   celebrationLine,
   minutesText,
+  pendingCelebration,
   streakMessage,
   streakStatus,
   type CalendarCell,
@@ -251,7 +252,8 @@ export function StreakModal() {
  * The pending milestone is stored with the streak, so closing the tab before a pause does not lose it.
  */
 export function StreakCelebration({ view }: { view: View }) {
-  const c = useStreak((s) => s.data.celebrate);
+  // A milestone whose streak has since ended is never shown (it is also cleared on the next settle).
+  const c = useStreak((s) => pendingCelebration(s.data, s.today));
   const playing = useTrading((s) => s.playing);
   const dialogs = useModalCount();
   const [showing, setShowing] = useState(false);
@@ -265,8 +267,12 @@ export function StreakCelebration({ view }: { view: View }) {
   // Held back by playback: say so at once, so reaching the goal mid-session is not silent.
   const toldRef = useRef<string | null>(null);
   useEffect(() => {
-    const key = c ? `${c.milestone}:${c.streak}` : null;
-    if (c && held && !showing && toldRef.current !== key) {
+    if (!c) {
+      toldRef.current = null;
+      return;
+    }
+    const key = `${c.day}:${c.milestone}`;
+    if (held && !showing && toldRef.current !== key) {
       toldRef.current = key;
       const what = c.streak === c.milestone ? 'a milestone' : `past the ${c.milestone}-day milestone`;
       toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration waits until you pause.`, 6000);

@@ -135,13 +135,30 @@ describe('practice tracker', () => {
     let m = await freshStore();
     let stop = m.startPracticeTracker(() => true, () => true);
     practise(10);
-    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3 });
+    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3, day: '2026-10-08' });
     stop();
     // The tab is closed before playback pauses.
     m = await freshStore();
     stop = m.startPracticeTracker(() => true, () => false);
-    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3 });
+    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3, day: '2026-10-08' });
     m.dismissCelebration();
+    expect(m.useStreak.getState().data.celebrate).toBeNull();
+    expect(JSON.parse(localStorage.getItem('stock-replay-streak')!).celebrate).toBeNull();
+    stop();
+  });
+
+  it('drops a held milestone when the user comes back after the streak has ended', async () => {
+    seed(['2026-10-01', '2026-10-02']);
+    vi.setSystemTime(new Date(2026, 9, 3, 12, 0, 0));
+    let m = await freshStore();
+    let stop = m.startPracticeTracker(() => true, () => true);
+    practise(10);
+    expect(m.useStreak.getState().data.celebrate).toEqual({ milestone: 3, streak: 3, day: '2026-10-03' });
+    stop();
+    // Closed during playback; back on 10-06 with 10-04 and 10-05 missed and no freeze.
+    vi.setSystemTime(new Date(2026, 9, 6, 9, 0, 0));
+    m = await freshStore();
+    stop = m.startPracticeTracker(() => true, () => false);
     expect(m.useStreak.getState().data.celebrate).toBeNull();
     expect(JSON.parse(localStorage.getItem('stock-replay-streak')!).celebrate).toBeNull();
     stop();

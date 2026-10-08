@@ -5,7 +5,7 @@
  * concrete values every surface needs: CSS variables for the app chrome and a palette for the
  * canvas charts, with text colours adjusted to stay readable whatever colours were picked.
  */
-import { chartLabelFill, contrast, distance, fillFor, isDark, isHex, mix, normHex, readable, saturation, withAlpha } from './color';
+import { chartLabelFill, chroma, contrast, distance, fillFor, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
 
 export type ThemeId = 'midnight' | 'graphite' | 'light';
 export type ChartStyle = 'candles' | 'hollow' | 'bars' | 'line' | 'area';
@@ -319,6 +319,12 @@ export interface ResolvedTheme {
   panel: PanelChartPalette;
 }
 
+/**
+ * OKLCH chroma below which a colour reads as grey. Pastels darkened for a white panel land around
+ * 0.025 to 0.035 (#5b706f, #7f6669); clearly coloured text is 0.05 and up.
+ */
+export const COLOURFUL = 0.04;
+
 /** Badges and alerts tint their background with this much of their text colour (see styles.css). */
 export const BADGE_TINT = 0.11;
 
@@ -350,15 +356,21 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const ui = t.ui;
   const dark = t.scheme === 'dark';
   const c = a.colors;
-  // Coloured text sits on the panel, the raised panels and the tint badges use.
-  const text = (hue: string) => toneText(readableOnAll(hue, [ui.panel2, ui.panel3]), ui.panel);
-  const muted = readableOnAll(ui.muted, [ui.panel, ui.panel2, ui.panel3, ui.hover]);
+  // The selected watchlist row: a light tint of the accent, with P/L text on it.
+  const rowSelected = mix(ui.panel, a.accent, dark ? 0.1 : 0.07);
+  // Coloured text sits on the panel, the raised panels, hovered controls (a danger button, the
+  // streak chip), the selected row and the tint badges use.
+  const surfaces = [ui.panel2, ui.panel3, ui.hover, rowSelected];
+  const text = (hue: string) => toneText(readableOnAll(hue, surfaces), ui.panel);
+  const muted = readableOnAll(ui.muted, [ui.panel, ...surfaces]);
   const bg = c.background;
   // Candle colours only work as P/L colours when the text actually drawn with them (darkened or
   // lightened for contrast) is clearly coloured, different from each other and from body text, on
   // the panels and on the chart. Monochrome or pastel candles fall back to the standard green and red.
+  // Colourfulness is OKLCH chroma: HSL saturation would call a deep green lightened for a dark
+  // panel "grey" (#1b5e20 becomes #719b74, saturation 0.17), though it still plainly reads as green.
   const tellApart = (x: string, y: string, body: string) =>
-    saturation(x) >= 0.25 && saturation(y) >= 0.25 && distance(x, y) >= 60 && distance(x, body) >= 60 && distance(y, body) >= 60;
+    chroma(x) >= COLOURFUL && chroma(y) >= COLOURFUL && distance(x, y) >= 60 && distance(x, body) >= 60 && distance(y, body) >= 60;
   const pnlUsesCandles =
     a.pnlFollowsCandles && tellApart(text(c.up), text(c.down), ui.text) && tellApart(readable(c.up, bg, 4.5), readable(c.down, bg, 4.5), readable(ui.text, bg, 7));
   const posHue = pnlUsesCandles ? c.up : LABEL_HUES.pos;
@@ -388,13 +400,13 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--shadow': ui.shadow,
     '--backdrop': ui.backdrop,
     '--accent': accentUi,
-    '--accent-text': readable(a.accent, ui.panel, 4.5),
+    '--accent-text': text(a.accent),
     '--accent-2': accentFill,
     '--accent-hover': hoverFill(accentFill),
     '--on-accent': '#ffffff',
     '--selected': selected,
     '--on-selected': dark ? '#ffffff' : ui.text,
-    '--row-selected': mix(ui.panel, a.accent, dark ? 0.1 : 0.07),
+    '--row-selected': rowSelected,
     '--pos': text(posHue),
     '--neg': text(negHue),
     // Errors and confirmations never follow the candle colours.

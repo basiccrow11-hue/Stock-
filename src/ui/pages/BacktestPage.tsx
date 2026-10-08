@@ -25,7 +25,8 @@ import { NumberField, SourceBadge, EmptyState } from '../components/common';
 import { StatsGrid } from './AnalyticsPage';
 import { LineChart, type LineSpec } from '../chart/LineChart';
 import { toChartTime } from '../chart/ChartView';
-import { candleOptions, panelChartOptions } from '../chart/chartTheme';
+import { candleOptions, lastVisibleIndex, panelChartOptions } from '../chart/chartTheme';
+import { chartLabelFill } from '../theme/color';
 import { useTheme } from '../theme/useTheme';
 import { CHART_LOCALE, dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { newId } from '../../core/util/ids';
@@ -189,6 +190,17 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
     const s = chart.addSeries(CandlestickSeries, candleOptions(panel));
     const data = result.candles.map((c: Bar) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }));
     s.setData(data);
+    // The last-price label shows the last candle on screen: fill it in that candle's colour, adjusted
+    // so the label text stays readable.
+    let labelUp: boolean | null = null;
+    const syncLabel = () => {
+      const b = result.candles[lastVisibleIndex(chart.timeScale().getVisibleLogicalRange(), result.candles.length)];
+      const up = !b || b.close >= b.open;
+      if (up === labelUp) return;
+      labelUp = up;
+      s.applyOptions({ priceLineColor: chartLabelFill(up ? panel.up : panel.down) });
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(syncLabel);
     const markers: SeriesMarker<Time>[] = result.fills
       .map((f) => ({
         time: toChartTime(bucketFor(f.time, timeframe).start) as Time,
@@ -203,6 +215,7 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
     const n = data.length;
     if (n > 200) chart.timeScale().setVisibleLogicalRange({ from: n - 200, to: n + 5 });
     else chart.timeScale().fitContent();
+    syncLabel();
     return () => chart.remove();
   }, [result, timeframe, panel]);
   return <div ref={ref} style={{ height: 380, position: 'relative' }} />;
@@ -489,10 +502,10 @@ export function BacktestPage() {
             <h3>Trades on chart</h3>
             <ResultChart result={result.r} timeframe={result.tf} />
             <div className="tabs">
-              <button className={tab === 'trades' ? 'on' : ''} onClick={() => setTab('trades')}>
+              <button className={tab === 'trades' ? 'on' : ''} aria-pressed={tab === 'trades'} onClick={() => setTab('trades')}>
                 Trades <span className="count">{result.r.trades.length}</span>
               </button>
-              <button className={tab === 'signals' ? 'on' : ''} onClick={() => setTab('signals')}>
+              <button className={tab === 'signals' ? 'on' : ''} aria-pressed={tab === 'signals'} onClick={() => setTab('signals')}>
                 Signals <span className="count">{result.r.signals.length}</span>
               </button>
             </div>

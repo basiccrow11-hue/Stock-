@@ -7,6 +7,7 @@ import { closePosition, setPickTarget, submitOrder, useTrading } from '../state/
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
+import { keyBelongsElsewhere } from './common';
 
 const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
   { a: 'buy', label: 'Buy', cls: 'buy' },
@@ -68,7 +69,7 @@ export function OrderTicket() {
   }, [picked]);
 
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && setPickTarget(null);
+    const k = (e: KeyboardEvent) => e.key === 'Escape' && !keyBelongsElsewhere(e) && setPickTarget(null);
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
   }, []);
@@ -168,16 +169,16 @@ export function OrderTicket() {
         <div className="spacer" />
         <span className="mono">{fmtPrice(last)}</span>
       </div>
-      <div className="actions">
+      <div className="actions" role="group" aria-label="Order side">
         {ACTIONS.map((x) => (
-          <button key={x.a} className={`btn sm ${action === x.a ? `${x.cls} sel` : ''}`} onClick={() => setAction(x.a)}>
+          <button key={x.a} className={`btn sm ${action === x.a ? `${x.cls} sel` : ''}`} aria-pressed={action === x.a} onClick={() => setAction(x.a)}>
             {x.label}
           </button>
         ))}
       </div>
-      <div className="seg" style={{ width: '100%' }}>
+      <div className="seg" style={{ width: '100%' }} role="group" aria-label="Order type">
         {TYPES.map((x) => (
-          <button key={x.t} className={type === x.t ? 'on' : ''} style={{ flex: 1 }} onClick={() => setType(x.t)}>
+          <button key={x.t} className={type === x.t ? 'on' : ''} aria-pressed={type === x.t} style={{ flex: 1 }} onClick={() => setType(x.t)}>
             {x.label}
           </button>
         ))}
