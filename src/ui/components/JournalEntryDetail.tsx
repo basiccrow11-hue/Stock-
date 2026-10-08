@@ -2,7 +2,7 @@
  * One journal entry: trade facts, chart snapshot, the Learning Mode review and editable notes.
  * Used by the post-trade review popup and the Journal page.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
 import { loadSnapshot, useJournal } from '../state/journalStore';
 import { blindDayLabel, useTrading } from '../state/tradingStore';
@@ -30,6 +30,11 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   const [notes, setNotes] = useState<JournalNotes>(entry.notes);
   const [tag, setTag] = useState(entry.tag);
   const [saved, setSaved] = useState(true);
+  /** Unsaved edits, so closing the review (or switching entries) inside the debounce still saves them. */
+  const pending = useRef<{ id: string; notes: JournalNotes; tag: string; prevTag: string } | null>(null);
+  useEffect(() => {
+    pending.current = saved ? null : { id: entry.id, notes, tag, prevTag: entry.tag };
+  }, [notes, tag, saved, entry.id, entry.tag]);
 
   useEffect(() => {
     setNotes(entry.notes);
@@ -43,6 +48,12 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
         .catch(() => undefined);
     return () => {
       alive = false;
+      const p = pending.current;
+      pending.current = null;
+      if (p) {
+        void useJournal.getState().updateNotes(p.id, p.notes);
+        if (p.tag !== p.prevTag) void useJournal.getState().update(p.id, { tag: p.tag });
+      }
     };
     // Reset local edits only when switching to another entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -166,7 +177,7 @@ function ReviewView({ review: r }: { review: TradeReview }) {
           <h4 style={{ marginBottom: 6 }}>Your rules</h4>
           {r.rules.map((c, i) => (
             <div key={i} className="rule-row">
-              <span className={c.passed === null ? 'muted' : c.passed ? 'pos' : 'neg'}>{c.passed === null ? '–' : c.passed ? '✓' : '✗'}</span>
+              <span className={c.passed === null ? 'muted' : c.passed ? 'success' : 'error'}>{c.passed === null ? '–' : c.passed ? '✓' : '✗'}</span>
               <b className="small">{c.rule}</b>
               <span className="small muted">{c.detail}</span>
             </div>

@@ -13,7 +13,11 @@ import {
   type StreakStatus,
 } from '../../core/streak/streak';
 import { dismissCelebration, openStreakPanel, setStreakGoal, useStreak } from '../state/streakStore';
+import { useTrading } from '../state/tradingStore';
 import { Modal } from './common';
+import type { View } from './TopBar';
+
+const FREEZE_RULE = `Every ${FREEZE_EVERY}th day you meet your goal within a running streak earns a streak freeze (you can hold ${MAX_FREEZES}). Freezes cover missed days automatically, but only when you have enough for the whole gap.`;
 
 export function FlameIcon({ size = 16, lit = true }: { size?: number; lit?: boolean }) {
   return (
@@ -83,10 +87,17 @@ function fmtCell(c: CalendarCell): string {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+function heatmapSummary(weeks: CalendarCell[][]): string {
+  const cells = weeks.flat().filter((c) => c.state !== 'future');
+  const n = (s: CalendarCell['state']) => cells.filter((c) => c.state === s).length;
+  const days = (k: number) => `${k} day${k === 1 ? '' : 's'}`;
+  return `Practice calendar, last ${weeks.length} weeks: ${days(n('done'))} goal met, ${days(n('frozen'))} covered by a freeze, ${days(n('partial'))} with some practice.`;
+}
+
 function Heatmap({ weeks }: { weeks: CalendarCell[][] }) {
   return (
     <div className="heatmap-wrap">
-      <div className="heatmap" role="img" aria-label="Practice calendar for the last weeks">
+      <div className="heatmap" role="img" aria-label={heatmapSummary(weeks)}>
         <div className="heatmap-days" aria-hidden="true">
           <span />
           <span />
@@ -147,11 +158,14 @@ export function StreakPanel() {
             <span className="muted small">Best </span>
             <b className="num">{s.best}</b>
           </div>
-          <div className="row" style={{ gap: 4 }} title={`Streak freezes banked. One is earned every ${FREEZE_EVERY} practised days (max ${MAX_FREEZES}) and covers a missed day automatically.`}>
+          <div className="row" style={{ gap: 4 }} title={FREEZE_RULE}>
             <span className="muted small">Freezes</span>
             {Array.from({ length: MAX_FREEZES }, (_, i) => (
               <SnowflakeIcon key={i} on={i < s.freezes} />
             ))}
+            <span className="sr-only">
+              {s.freezes} of {MAX_FREEZES} banked
+            </span>
           </div>
         </div>
       </div>
@@ -172,9 +186,11 @@ export function StreakPanel() {
         <div className={`streak-bar${s.todayDone ? ' done' : ''}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct * 100)} aria-label="Today's practice goal">
           <div style={{ width: `${pct * 100}%` }} />
         </div>
-        <div className="small muted">
-          {s.todayTrades} trade{s.todayTrades === 1 ? '' : 's'} closed · {s.todayReviews} journal review{s.todayReviews === 1 ? '' : 's'} today
-        </div>
+        {s.todayReviews > 0 && (
+          <div className="small muted">
+            {s.todayReviews} trade{s.todayReviews === 1 ? '' : 's'} reviewed in the journal today
+          </div>
+        )}
       </div>
 
       {next && (
@@ -196,7 +212,7 @@ export function StreakPanel() {
         <span className="small">Daily goal</span>
         <div className="seg" role="group" aria-label="Daily practice goal in minutes">
           {GOAL_OPTIONS.map((m) => (
-            <button key={m} className={data.goalMinutes === m ? 'on' : ''} onClick={() => setStreakGoal(m)}>
+            <button key={m} aria-pressed={data.goalMinutes === m} className={data.goalMinutes === m ? 'on' : ''} onClick={() => setStreakGoal(m)}>
               {m}
             </button>
           ))}
@@ -210,10 +226,7 @@ export function StreakPanel() {
           Practice time counts while this tab is in front and you are active, on every screen except Data &amp; Settings. A playing replay keeps counting for up to 10 minutes after your last
           click or key press, because watching tape is practice too. Reach your daily goal to extend the streak. Days follow your computer&apos;s calendar, weekends included.
         </p>
-        <p>
-          Every {FREEZE_EVERY} days of practice earns a streak freeze (up to {MAX_FREEZES}). A freeze covers a missed day automatically. Lowering or raising the goal never changes days you already
-          completed.
-        </p>
+        <p>{FREEZE_RULE} Lowering or raising the goal never changes days you already completed.</p>
         <p>The streak rewards practice time, never profit or the number of trades, so there is no reason to force a trade to keep it alive.</p>
       </details>
     </div>
@@ -230,15 +243,17 @@ export function StreakModal() {
   );
 }
 
-export function StreakCelebration() {
+/** Milestone celebration. It waits while a replay is playing on the trade screen, so it never covers live orders. */
+export function StreakCelebration({ view }: { view: View }) {
   const c = useStreak((s) => s.celebrate);
-  if (!c) return null;
+  const playing = useTrading((s) => s.playing);
+  if (!c || (view === 'trade' && playing)) return null;
   return (
     <Modal
       title="Milestone reached"
       onClose={dismissCelebration}
       footer={
-        <button className="btn primary" onClick={dismissCelebration} autoFocus>
+        <button className="btn primary" onClick={dismissCelebration} data-autofocus>
           Keep going
         </button>
       }

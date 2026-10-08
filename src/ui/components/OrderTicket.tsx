@@ -268,7 +268,7 @@ export function OrderTicket() {
             <span className="muted">Dollar risk</span>
             <span className="num">{money(risk?.dollarRisk)}</span>
             <span className="muted">% of account</span>
-            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade ? 'neg' : ''}`}>{pct(risk?.pctRisk)}</span>
+            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade ? 'error' : ''}`}>{pct(risk?.pctRisk)}</span>
             <span className="muted">Potential reward</span>
             <span className="num">{money(risk?.reward)}</span>
             <span className="muted">Reward : risk</span>

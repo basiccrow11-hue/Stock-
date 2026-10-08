@@ -259,7 +259,7 @@ function ApiKeysCard() {
     <div className="card stack">
       <h2>Market data API keys (optional)</h2>
       <p className="muted small">
-        Keys are never hard-coded and never sent anywhere except the vendor, through this app's local proxy. By default they live in memory for this session only. You can save them encrypted with a passphrase, or put them in <code>.env.local</code> on the machine running the app so the browser never sees them (see README).
+        Keys are never hard-coded and go only to the vendor, through this app&apos;s data proxy (the dev server when you run the app yourself, a server function on the hosted site), which forwards them without storing or logging them. By default they live in memory for this session only. You can save them encrypted with a passphrase. If you run the app yourself, you can instead keep them in <code>.env.local</code> so the browser never sees them (see README).
       </p>
       <div className="kv">
         <span className="k">Polygon</span>

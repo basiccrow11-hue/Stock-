@@ -5,7 +5,7 @@
  * concrete values every surface needs: CSS variables for the app chrome and a palette for the
  * canvas charts, with text colours adjusted to stay readable whatever colours were picked.
  */
-import { fillFor, isDark, isHex, mix, normHex, readable, withAlpha } from './color';
+import { contrast, distance, fillFor, isDark, isHex, mix, normHex, readable, saturation, withAlpha } from './color';
 
 export type ThemeId = 'midnight' | 'graphite' | 'light';
 export type ChartStyle = 'candles' | 'hollow' | 'bars' | 'line' | 'area';
@@ -69,7 +69,7 @@ interface ThemeDef {
   chart: Pick<ChartColors, 'background' | 'grid' | 'text' | 'crosshair'>;
 }
 
-const LABEL_HUES = { pos: '#26a69a', neg: '#ef5350', warn: '#f5a623', demo: '#b794f6', hist: '#f5c451', sim: '#38d0e6', live: '#3ddc84' };
+export const LABEL_HUES = { pos: '#26a69a', neg: '#ef5350', warn: '#f5a623', demo: '#b794f6', hist: '#f5c451', sim: '#38d0e6', live: '#3ddc84' };
 
 export const THEMES: Record<ThemeId, ThemeDef> = {
   midnight: {
@@ -167,6 +167,18 @@ export function defaultLineColor(scheme: 'dark' | 'light'): string {
 
 export const ACCENTS = ['#4f8cff', '#2962ff', '#26a69a', '#7e57c2', '#ec407a', '#ff9800', '#00bcd4', '#8bc34a'];
 
+/** Spoken names for the accent swatches. */
+export const ACCENT_NAMES: Record<string, string> = {
+  '#4f8cff': 'Sky blue',
+  '#2962ff': 'Royal blue',
+  '#26a69a': 'Teal',
+  '#7e57c2': 'Purple',
+  '#ec407a': 'Pink',
+  '#ff9800': 'Orange',
+  '#00bcd4': 'Cyan',
+  '#8bc34a': 'Lime',
+};
+
 export const CHART_STYLES: { id: ChartStyle; label: string }[] = [
   { id: 'candles', label: 'Candles' },
   { id: 'hollow', label: 'Hollow' },
@@ -252,8 +264,16 @@ export interface ChartPalette extends ChartColors {
   scheme: 'dark' | 'light';
   scaleBorder: string;
   crosshairLabel: string;
+  /** Axis text, adjusted to stay readable on the chart background. */
+  axisText: string;
+  /** Accent and warning colours for lines drawn on the chart (at least 3:1 against it). */
   accent: string;
   warn: string;
+  /** Fill-marker colours. lightweight-charts draws marker text in the marker colour, so 4.5:1. */
+  markerBuy: string;
+  markerSell: string;
+  markerUp: string;
+  markerDown: string;
   volumeUp: string;
   volumeDown: string;
   histUp: string;
@@ -289,9 +309,30 @@ export interface PanelChartPalette {
 
 export interface ResolvedTheme {
   scheme: 'dark' | 'light';
+  /** P/L text really uses the candle colours (false when they are too grey or too alike to tell apart). */
+  pnlUsesCandles: boolean;
   vars: Record<string, string>;
   chart: ChartPalette;
   panel: PanelChartPalette;
+}
+
+/** Badges and alerts tint their background with this much of their text colour (see styles.css). */
+export const BADGE_TINT = 0.11;
+
+/** Readable at `min` both on the panel and on the tinted background badges use. */
+function toneText(hue: string, panel: string, min = 4.5): string {
+  let c = readable(hue, panel, min);
+  for (let i = 0; i < 6; i++) {
+    const tint = mix(panel, c, BADGE_TINT);
+    if (contrast(c, tint) >= min) return c;
+    c = readable(c, tint, min + 0.05);
+  }
+  return c;
+}
+
+/** Colour for a line drawn on the chart: kept as picked unless it would be hard to see (below 3:1). */
+export function onChart(color: string, background: string): string {
+  return readable(color, background, 3);
 }
 
 export function resolveTheme(a: Appearance): ResolvedTheme {
@@ -299,14 +340,20 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
   const ui = t.ui;
   const dark = t.scheme === 'dark';
   const c = a.colors;
-  const text = (hue: string) => readable(hue, ui.panel, 4.5);
-  const posHue = a.pnlFollowsCandles ? c.up : LABEL_HUES.pos;
-  const negHue = a.pnlFollowsCandles ? c.down : LABEL_HUES.neg;
+  const text = (hue: string) => toneText(hue, ui.panel);
+  // Candle colours only work as P/L colours when they are clearly coloured, different from each
+  // other and from body text. Monochrome candles fall back to the standard green and red.
+  const distinct = (hue: string) => saturation(hue) >= 0.25 && distance(text(hue), ui.text) >= 60;
+  const pnlUsesCandles = a.pnlFollowsCandles && distinct(c.up) && distinct(c.down) && distance(c.up, c.down) >= 60;
+  const posHue = pnlUsesCandles ? c.up : LABEL_HUES.pos;
+  const negHue = pnlUsesCandles ? c.down : LABEL_HUES.neg;
   const buyBg = fillFor('#ffffff', posHue, 4.5);
   const sellBg = fillFor('#ffffff', negHue, 4.5);
   const accentUi = readable(a.accent, ui.panel, 3);
   const accentFill = fillFor('#ffffff', a.accent, 4.5);
   const selected = mix(ui.panel, a.accent, dark ? 0.18 : 0.12);
+  const bg = c.background;
+  const axisText = readable(c.text, bg, 4.5);
 
   const vars: Record<string, string> = {
     '--bg': ui.bg,
@@ -333,6 +380,9 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--row-selected': mix(ui.panel, a.accent, dark ? 0.1 : 0.07),
     '--pos': text(posHue),
     '--neg': text(negHue),
+    // Errors and confirmations never follow the candle colours.
+    '--success': text(LABEL_HUES.pos),
+    '--error': text(LABEL_HUES.neg),
     '--buy-bg': buyBg,
     '--buy-border': mix(buyBg, posHue, 0.5),
     '--sell-bg': sellBg,
@@ -342,24 +392,32 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     '--hist': text(LABEL_HUES.hist),
     '--sim': text(LABEL_HUES.sim),
     '--live': text(LABEL_HUES.live),
-    '--chart-bg': c.background,
-    '--legend-bg': withAlpha(c.background, 0.82),
-    '--chart-text': readable(c.text, c.background, 4.5),
+    '--chart-bg': bg,
+    '--legend-bg': withAlpha(bg, 0.82),
+    '--chart-text': axisText,
+    '--chart-strong': readable(ui.text, bg, 7),
+    '--chart-pos': readable(posHue, bg, 4.5),
+    '--chart-neg': readable(negHue, bg, 4.5),
     '--streak': text('#ff8a3d'),
     '--freeze': text('#5ec8f2'),
     'color-scheme': t.scheme,
   };
 
-  const chartDark = isDark(c.background);
+  const chartDark = isDark(bg);
   const op = a.volumeOpacity;
   const chart: ChartPalette = {
     ...c,
     style: a.chartStyle,
     scheme: t.scheme,
-    scaleBorder: mix(c.background, c.text, 0.18),
+    scaleBorder: mix(bg, c.text, 0.18),
     crosshairLabel: mix(c.crosshair, '#000000', chartDark ? 0.45 : 0.3),
-    accent: a.accent,
-    warn: LABEL_HUES.warn,
+    axisText,
+    accent: onChart(a.accent, bg),
+    warn: onChart(LABEL_HUES.warn, bg),
+    markerBuy: readable(a.accent, bg, 4.5),
+    markerSell: readable(LABEL_HUES.warn, bg, 4.5),
+    markerUp: readable(c.up, bg, 4.5),
+    markerDown: readable(c.down, bg, 4.5),
     volumeUp: withAlpha(c.up, op),
     volumeDown: withAlpha(c.down, op),
     histUp: withAlpha(c.up, 0.6),
@@ -368,8 +426,8 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     bandDown: withAlpha(c.down, 0.53),
     areaTop: withAlpha(c.line, 0.28),
     areaBottom: withAlpha(c.line, 0.02),
-    watermark: withAlpha(c.text, chartDark ? 0.1 : 0.12),
-    watermarkSub: withAlpha(c.text, chartDark ? 0.13 : 0.16),
+    watermark: withAlpha(axisText, chartDark ? 0.1 : 0.12),
+    watermarkSub: withAlpha(axisText, chartDark ? 0.16 : 0.2),
     vertGrid: a.vertGrid,
     horzGrid: a.horzGrid,
     magnet: a.crosshairMagnet,
@@ -382,7 +440,7 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     text: readable(ui.muted, ui.panel, 4.5),
     grid: mix(ui.panel, ui.border, 0.7),
     border: ui.border,
-    accent: a.accent,
+    accent: readable(a.accent, ui.panel, 3),
     benchmark: readable(ui.muted, ui.panel, 3),
     up: c.up,
     down: c.down,
@@ -392,5 +450,5 @@ export function resolveTheme(a: Appearance): ResolvedTheme {
     borderDown: c.borderDown,
   };
 
-  return { scheme: t.scheme, vars, chart, panel };
+  return { scheme: t.scheme, pnlUsesCandles, vars, chart, panel };
 }

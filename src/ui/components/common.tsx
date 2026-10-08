@@ -1,18 +1,65 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import type { DataSourceKind } from '../../core/types';
 import { useToasts } from '../state/toasts';
 
+/** Open modals, innermost last. Only the topmost one reacts to Escape and traps Tab. */
+const modalStack: string[] = [];
+
+/** True while any modal dialog is open (global shortcuts stand down). */
+export function modalOpen(): boolean {
+  return modalStack.length > 0;
+}
+
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+  const id = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // Read during the first render, before anything inside the dialog takes focus.
+  const openerRef = useRef<HTMLElement | null | undefined>(undefined);
+  if (openerRef.current === undefined) openerRef.current = document.activeElement as HTMLElement | null;
+
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', k);
-    return () => window.removeEventListener('keydown', k);
-  }, [onClose]);
+    modalStack.push(id);
+    const opener = openerRef.current;
+    const dialog = dialogRef.current!;
+    // Focus moves into the dialog, to the control marked data-autofocus if there is one, so Tab
+    // starts inside and Space or Enter acts on the dialog rather than on the page behind it.
+    if (!dialog.contains(document.activeElement)) (dialog.querySelector<HTMLElement>('[data-autofocus]') ?? dialog).focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (modalStack[modalStack.length - 1] !== id) return;
+      if (e.key === 'Escape') {
+        onCloseRef.current();
+      } else if (e.key === 'Tab') {
+        const items = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null);
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      modalStack.splice(modalStack.indexOf(id), 1);
+      // Give focus back to whatever opened the dialog, if it is still on the page.
+      if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+    };
+  }, [id]);
+
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true">
+      <div ref={dialogRef} className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}>
         <div className="modal-head">
-          <h2>{title}</h2>
+          <h2 id={`${id}-title`}>{title}</h2>
           <div className="spacer" />
           <button className="btn ghost icon" onClick={onClose} aria-label="Close">
             ✕

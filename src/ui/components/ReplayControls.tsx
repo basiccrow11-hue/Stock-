@@ -17,6 +17,7 @@ import {
 } from '../state/tradingStore';
 import { exchangeDate, exchangeTimeToUnix, formatExchangeTime, parseHHMM } from '../../core/time';
 import { price } from '../services/format';
+import { modalOpen } from './common';
 
 function speedLabel(s: number): string {
   if (s === 1) return '1x real time';
@@ -34,7 +35,21 @@ function confirmRewind(target: number): boolean {
   return parts.length === 0 || window.confirm(`${parts.join('\n\n')}\n\nContinue?`);
 }
 
-export function ReplayControls() {
+/**
+ * Whether a key press belongs to the replay shortcuts (Space, arrows) rather than to the control
+ * that has focus. Text fields, dialogs, popovers and option groups keep their keys; a button keeps
+ * Space (which activates it) unless it is one of the replay bar's own controls.
+ */
+function isReplayShortcut(e: KeyboardEvent): boolean {
+  if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
+  const el = e.target instanceof Element ? e.target : null;
+  if (!el) return true;
+  if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"]')) return false;
+  if (e.code === 'Space' && el.closest('button, a[href], summary, label, [role="button"], [role="checkbox"], [role="switch"]') && !el.closest('.replay-bar')) return false;
+  return true;
+}
+
+export function ReplayControls({ active = true }: { active?: boolean }) {
   const session = useTrading((s) => s.session);
   const playing = useTrading((s) => s.playing);
   const speed = useTrading((s) => s.speed);
@@ -57,9 +72,9 @@ export function ReplayControls() {
   }, [session?.id, playing]);
 
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !session) return;
+      if (!session || !isReplayShortcut(e)) return;
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
@@ -75,7 +90,7 @@ export function ReplayControls() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [session, isReplay, now]);
+  }, [session, isReplay, now, active]);
 
   if (!session) return null;
   const progress = session.end ? Math.min(1, Math.max(0, (now - session.start) / (session.end - session.start))) : 0;

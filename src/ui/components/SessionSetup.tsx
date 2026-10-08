@@ -249,7 +249,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
             ? 'Bundled demo bars are synthetic: realistic intraday behaviour, but not the real prices for that ticker and date.'
             : providerId === 'csv'
               ? 'Replays bars you imported in Data & Settings.'
-              : 'Downloads real 1-minute bars through the local proxy (requires npm run dev or npm run preview).'}
+              : "Downloads real 1-minute bars from the vendor through this app's data proxy."}
         </span>
       </div>
       {range && <div className="small muted">Available data: {range.from} to {range.to}</div>}

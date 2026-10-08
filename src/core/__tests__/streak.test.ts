@@ -170,6 +170,54 @@ describe('milestones, best and freezes', () => {
   });
 });
 
+describe('milestones and bests across freezes', () => {
+  it('celebrates a milestone that a freeze carried the count past', () => {
+    // 13 practised days and a freeze banked; day 14 is missed and frozen; day 15 is practised.
+    const d = practise(emptyStreak(), run('2026-01-01', 13));
+    expect(d.freezes).toBe(1);
+    const r = recordActivity(d, '2026-01-15', { activeSeconds: GOAL });
+    expect(r.usedFreezes).toEqual(['2026-01-14']);
+    expect(r.streak).toBe(15);
+    expect(r.milestone).toBe(14);
+  });
+
+  it('does not repeat a milestone already celebrated', () => {
+    const d = practise(emptyStreak(), run('2026-01-01', 14));
+    const r = recordActivity(d, '2026-01-16', { activeSeconds: GOAL }); // 01-15 frozen
+    expect(r.streak).toBe(16);
+    expect(r.milestone).toBeNull();
+  });
+
+  it('counts frozen days toward the best streak, so it never drops after the streak ends', () => {
+    const d = practise(emptyStreak(), run('2026-01-01', 14)); // best 14, two freezes
+    const settled = settle(d, '2026-01-17').data; // 01-15 and 01-16 frozen
+    expect(settled.best).toBe(16);
+    // The streak ends on 01-18 (01-17 missed, no freezes left): best stays 16.
+    const s = streakStatus(settled, '2026-01-18');
+    expect(s.current).toBe(0);
+    expect(s.best).toBe(16);
+    expect(s.previous?.length).toBe(16);
+  });
+});
+
+describe('time credit across windows', () => {
+  const at = Date.UTC(2026, 9, 8, 12, 0, 0);
+  it('credits overlapping stretches once', () => {
+    let d = recordActivity(emptyStreak(), '2026-10-08', { activeSeconds: 5, at }).data;
+    // Another window reports a 5 s tick ending 2 s later: only 2 s are new.
+    d = recordActivity(d, '2026-10-08', { activeSeconds: 5, at: at + 2_000 }).data;
+    expect(d.days['2026-10-08'].activeSeconds).toBe(7);
+    expect(d.creditedUntil).toBe(at + 2_000);
+  });
+
+  it('starts over after the clock is set back', () => {
+    let d = recordActivity(emptyStreak(), '2026-10-08', { activeSeconds: 5, at }).data;
+    d = recordActivity(d, '2026-10-08', { activeSeconds: 5, at: at - 3_600_000 }).data;
+    expect(d.days['2026-10-08'].activeSeconds).toBe(10);
+    expect(d.creditedUntil).toBe(at - 3_600_000);
+  });
+});
+
 describe('goal changes', () => {
   it('never rewrites completed days, and completes today when lowered', () => {
     let d = practise(emptyStreak(), ['2026-10-01']);

@@ -48,6 +48,21 @@ export function App() {
     void useCredentials.getState().checkServer();
   }, []);
 
+  // "Theme and all colours…" in the chart toolbar: open settings at the Appearance card (the page
+  // loads lazily, so wait for it) and move focus there, so keyboard users are not left on <body>.
+  const openAppearance = () => {
+    setView("settings");
+    let tries = 0;
+    const focusCard = () => {
+      const el = document.getElementById("appearance");
+      if (el) {
+        el.scrollIntoView({ block: "start" });
+        el.focus({ preventScroll: true });
+      } else if (++tries < 60) requestAnimationFrame(focusCard);
+    };
+    requestAnimationFrame(focusCard);
+  };
+
   // Practice time for the daily streak: every screen except settings counts.
   useEffect(
     () =>
@@ -66,7 +81,8 @@ export function App() {
         <Watchlist />
         <ChartPanel
           onNewSession={(mode) => setSetup({ mode })}
-          onOpenSettings={() => setView("settings")}
+          onOpenSettings={openAppearance}
+          active={view === "trade"}
         />
         <RightPanel />
         <BottomPanel
@@ -103,7 +119,7 @@ export function App() {
       )}
       <TradeReviewModal />
       <StreakModal />
-      <StreakCelebration />
+      <StreakCelebration view={view} />
       <Toasts />
     </div>
   );

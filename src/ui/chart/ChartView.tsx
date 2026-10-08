@@ -10,6 +10,7 @@ import {
   HistogramSeries,
   LineSeries,
   LineStyle,
+  PriceScaleMode,
   createChart,
   createSeriesMarkers,
   createTextWatermark,
@@ -34,8 +35,9 @@ import { getBaseBars, getSimEventsFor, onChartEvent, pickPrice, registerSnapshot
 import { CHART_LOCALE, compactVolume, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { useDrawings } from './drawings';
-import { addMainSeries, chartOptions, mainPoint, mainSeriesOptions, priceScaleMode, type MainSeries } from './chartTheme';
+import { PRICE_FORMAT, addMainSeries, chartOptions, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, type MainSeries } from './chartTheme';
 import { useTheme } from '../theme/useTheme';
+import { onChart, type ChartPalette } from '../theme/themes';
 
 /** lightweight-charts renders UTC; shift to exchange time so axes read in ET. */
 export function toChartTime(t: number): UTCTimestamp {
@@ -46,6 +48,15 @@ interface IndicatorSeries {
   cfg: IndicatorConfig;
   series: ISeriesApi<'Line' | 'Histogram'>[];
   pane: number;
+  /** RSI 70/30 guide lines. */
+  bands: IPriceLine[];
+}
+
+/** Line colour per series of an indicator (null for the MACD histogram, coloured per bar). */
+function indicatorColors(cfg: IndicatorConfig, p: ChartPalette): (string | null)[] {
+  if (cfg.type === 'macd') return [null, p.accent, p.warn];
+  const c = onChart(cfg.color, p.background);
+  return cfg.type === 'bb' ? [c, c, c] : [c];
 }
 
 function computeIndicator(cfg: IndicatorConfig, candles: Bar[]): number[][] {
@@ -100,6 +111,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const palRef = useRef(pal);
   palRef.current = pal;
   const styleRef = useRef(pal.style);
+  /** Close of the first visible bar: the 0% line when the price scale shows percent. */
+  const percentBaseRef = useRef<number | null>(null);
+  /** Direction of the newest bar, for the hollow-candle last-price line. */
+  const lastUpRef = useRef(true);
   const [legend, setLegend] = useState<{ bar: Bar; change: number } | null>(null);
 
   const indicators = useSettings((s) => s.indicators);
@@ -121,7 +136,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       autoSize: true,
       layout: { ...base.layout, fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif', panes: { ...base.layout?.panes, enableResize: true } },
       timeScale: { ...base.timeScale, timeVisible: true, secondsVisible: false, rightOffset: 8, barSpacing: 7 },
-      localization: { locale: CHART_LOCALE, priceFormatter: (p: number) => fmtPrice(p) },
+      // No global priceFormatter: it would override every pane, and the main pane may show percent.
+      // Each series carries its own price format instead.
+      localization: { locale: CHART_LOCALE },
     });
     chartRef.current = chart;
 
@@ -139,11 +156,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     chart.subscribeClick((param) => {
       const series = candleRef.current;
       if (!param.point || !series || !useTrading.getState().pickTarget) return;
+      // point.y is relative to the clicked pane; only the price pane maps to prices.
+      if (param.paneIndex !== undefined && param.paneIndex !== 0) return;
       const p = series.coordinateToPrice(param.point.y);
       if (p !== null) pickPrice(Math.round(p * 100) / 100);
     });
     const bump = () => setGeometryVersion((v) => v + 1);
-    chart.timeScale().subscribeVisibleLogicalRangeChange(bump);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      bump();
+      syncPercentBase();
+    });
     const ro = new ResizeObserver(bump);
     ro.observe(el);
 
@@ -175,7 +197,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       chart.removeSeries(old);
       priceLinesRef.current = [];
     }
-    const series = addMainSeries(chart, palRef.current);
+    const series = addMainSeries(chart, palRef.current, lastUp());
     // Keep the price series underneath indicator overlays, as when it was first created.
     series.setSeriesOrder(0);
     styleRef.current = pal.style;
@@ -192,8 +214,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const series = candleRef.current;
     if (!chart || !series) return;
     chart.applyOptions(chartOptions(pal));
-    series.applyOptions(mainSeriesOptions(pal));
-    chart.priceScale('right', 0).applyOptions({ mode: priceScaleMode(pal.priceScale) });
+    lastUpRef.current = lastUp();
+    series.applyOptions(mainSeriesOptions(pal, lastUpRef.current));
+    applyPriceScale();
+    // Indicators are restyled in place: rebuilding them would reset pane heights the user dragged.
+    for (const ind of indicatorsRef.current) {
+      indicatorColors(ind.cfg, pal).forEach((color, k) => color && ind.series[k]?.applyOptions({ color }));
+      ind.bands[0]?.applyOptions({ color: pal.bandDown });
+      ind.bands[1]?.applyOptions({ color: pal.bandUp });
+    }
     // Volume and MACD histogram colours are per point, so their data is re-sent.
     volumeRef.current?.setData(candlesRef.current.map(volumePoint));
     setIndicatorData(0);
@@ -215,7 +244,6 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     chart.applyOptions({
       localization: {
         locale: CHART_LOCALE,
-        priceFormatter: (p: number) => fmtPrice(p),
         timeFormatter: (t: Time) => {
           const p = parts(t as number);
           const label = blind ? blindDayLabel(real(t as number)) : p.date;
@@ -255,8 +283,6 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
   // ---------------------------------------------------------------- indicator series setup
   const indicatorKey = useMemo(() => JSON.stringify(indicators.filter((i) => i.enabled)), [indicators]);
-  // Colours baked into indicator series at creation (MACD lines, RSI bands).
-  const indicatorPalette = `${pal.up}|${pal.down}|${pal.accent}|${pal.warn}`;
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -278,29 +304,83 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         continue;
       }
       const pane = OSCILLATORS.has(cfg.type) ? nextPane++ : 0;
-      const line = (color: string, width: 1 | 2 = 1, style = LineStyle.Solid) =>
-        chart.addSeries(LineSeries, { color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false }, pane);
+      const p = palRef.current;
+      const colors = indicatorColors(cfg, p);
+      const line = (k: number, width: 1 | 2 = 1, style = LineStyle.Solid) =>
+        chart.addSeries(
+          LineSeries,
+          { color: colors[k] ?? undefined, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, priceFormat: PRICE_FORMAT },
+          pane,
+        );
       let series: ISeriesApi<'Line' | 'Histogram'>[] = [];
-      if (cfg.type === 'bb') series = [line(cfg.color, 1, LineStyle.Dashed), line(cfg.color, 1), line(cfg.color, 1, LineStyle.Dashed)];
+      if (cfg.type === 'bb') series = [line(0, 1, LineStyle.Dashed), line(1, 1), line(2, 1, LineStyle.Dashed)];
       else if (cfg.type === 'macd') {
-        series = [
-          chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane),
-          line(pal.accent, 2),
-          line(pal.warn, 1),
-        ];
-      } else series = [line(cfg.color, cfg.type === 'vwap' ? 2 : 1)];
+        series = [chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat: PRICE_FORMAT }, pane), line(1, 2), line(2, 1)];
+      } else series = [line(0, cfg.type === 'vwap' ? 2 : 1)];
+      const bands: IPriceLine[] = [];
       if (cfg.type === 'rsi') {
-        series[0].createPriceLine({ price: 70, color: pal.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
-        series[0].createPriceLine({ price: 30, color: pal.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
+        bands.push(series[0].createPriceLine({ price: 70, color: p.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
+        bands.push(series[0].createPriceLine({ price: 30, color: p.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
       }
-      indicatorsRef.current.push({ cfg, series, pane });
+      indicatorsRef.current.push({ cfg, series, pane, bands });
     }
     for (let p = 1; p < chart.panes().length; p++) chart.panes()[p].setStretchFactor(0.35);
     chart.panes()[0].setStretchFactor(1);
+    applyPriceScale();
     fullRedraw();
-    // fullRedraw is stable for the lifetime of the component (uses refs only).
+    // fullRedraw and applyPriceScale are stable for the lifetime of the component (refs only).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indicatorKey, indicatorPalette]);
+  }, [indicatorKey]);
+
+  // ---------------------------------------------------------------- price scale
+  /**
+   * Log or linear on the price pane. Oscillator panes always stay linear: applying a mode to pane 0
+   * also changes the chart-wide default new panes copy, so the others are pinned explicitly.
+   */
+  function applyPriceScale(): void {
+    const chart = chartRef.current;
+    const series = candleRef.current;
+    if (!chart || !series) return;
+    const p = palRef.current;
+    chart.priceScale('right', 0).applyOptions({ mode: priceScaleMode(p.priceScale) });
+    for (let i = 1; i < chart.panes().length; i++) chart.priceScale('right', i).applyOptions({ mode: PriceScaleMode.Normal });
+    syncPercentBase(true);
+  }
+
+  /** Keep the percent labels measured from the first visible bar, as in TradingView. */
+  function syncPercentBase(force = false): void {
+    const chart = chartRef.current;
+    const series = candleRef.current;
+    if (!chart || !series) return;
+    const percent = palRef.current.priceScale === 'percent';
+    const candles = candlesRef.current;
+    let base: number | null = null;
+    if (percent && candles.length) {
+      const r = chart.timeScale().getVisibleLogicalRange();
+      const i = r ? Math.min(candles.length - 1, Math.max(0, Math.ceil(r.from))) : 0;
+      base = candles[i].close;
+    }
+    if (!force && base === percentBaseRef.current) return;
+    percentBaseRef.current = base;
+    // Re-applying the format makes the scale re-render its labels with the new base.
+    series.applyOptions({ priceFormat: mainPriceFormat(palRef.current.priceScale, () => percentBaseRef.current) });
+  }
+
+  function lastUp(): boolean {
+    const c = candlesRef.current;
+    const b = c[c.length - 1];
+    return !b || b.close >= b.open;
+  }
+
+  /** Hollow candles colour the last-price line by the newest bar's direction. */
+  function syncLastDirection(): void {
+    const series = candleRef.current;
+    const up = lastUp();
+    if (!series || up === lastUpRef.current) return;
+    lastUpRef.current = up;
+    const p = palRef.current;
+    if (p.style === 'hollow') series.applyOptions({ priceLineColor: up ? p.borderUp : p.borderDown });
+  }
 
   // ---------------------------------------------------------------- data
   function setIndicatorData(fromIndex: number): void {
@@ -348,6 +428,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     series.setData(candlesRef.current.map(candlePoint) as never);
     volumeRef.current?.setData(candlesRef.current.map(volumePoint));
     setIndicatorData(0);
+    syncLastDirection();
+    syncPercentBase();
     setGeometryVersion((v) => v + 1);
   }
 
@@ -371,6 +453,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       volumeRef.current?.update(volumePoint(c));
     }
     setIndicatorData(firstChanged);
+    syncLastDirection();
+    syncPercentBase();
   }
 
   useEffect(() => {
@@ -410,7 +494,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         time: toChartTime(bucketFor(f.time, timeframe).start),
         position: buy ? 'belowBar' : 'aboveBar',
         shape: buy ? 'arrowUp' : 'arrowDown',
-        color: buy ? pal.accent : pal.warn,
+        color: buy ? pal.markerBuy : pal.markerSell,
         text: `${f.action.toUpperCase()} ${f.quantity} @ ${fmtPrice(f.price)}`,
       });
     }
@@ -419,13 +503,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         time: toChartTime(bucketFor(ev.time, timeframe).start),
         position: 'aboveBar',
         shape: 'circle',
-        color: ev.impactPct >= 0 ? pal.up : pal.down,
+        color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,
         text: `SIM NEWS: ${ev.headline.replace('[SIMULATED] ', '').slice(0, 40)}`,
       });
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     m.setMarkers(markers);
-  }, [fills, symbol, timeframe, simEventCount, seriesVersion, pal.accent, pal.warn, pal.up, pal.down]);
+  }, [fills, symbol, timeframe, simEventCount, seriesVersion, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
   useEffect(() => {

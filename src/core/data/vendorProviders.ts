@@ -1,7 +1,8 @@
 /**
  * Vendor API providers (real HISTORICAL data). Requests go to same-origin proxy paths
- * (/api/polygon, /api/alpaca) served by the Vite dev/preview server, which forwards them upstream.
- * That avoids browser CORS limits and lets keys live server-side in .env.local if you prefer.
+ * (/api/polygon, /api/alpaca), served by the Vite dev/preview server locally and by a Vercel
+ * function (api/proxy.ts) when deployed, which forward them upstream. That avoids browser CORS
+ * limits and lets keys live server-side if you prefer.
  *
  * Keys are never hardcoded: they are read through a getter at request time.
  */
@@ -15,7 +16,7 @@ export interface VendorCredentials {
   alpacaSecret?: string;
   /** Alpaca data feed: 'iex' (free) or 'sip' (paid, consolidated tape). */
   alpacaFeed?: 'iex' | 'sip';
-  /** True when the dev server has keys in .env.local (browser does not see them). */
+  /** True when the proxy has its own keys (.env.local, or Vercel env with ALLOW_SERVER_KEYS). */
   serverHasPolygonKey?: boolean;
   serverHasAlpacaKey?: boolean;
 }
@@ -25,12 +26,15 @@ type FetchFn = typeof fetch;
 
 const COMMON_SYMBOLS: SymbolInfo[] = DEMO_TICKERS.map((t) => ({ symbol: t.symbol, name: t.name.replace(' (demo)', ''), kind: t.kind }));
 
+/** True on the hosted site and locally alike, so it never sends anyone to a command they cannot run. */
+const PROXY_HINT = "the vendor or this app's data proxy did not answer. Check your connection and try again. If you run the app yourself, start it with npm run dev or npm run preview so the proxy is available.";
+
 function httpError(status: number, body: string, vendor: string): DataProviderError {
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
   if (status === 404) return new DataProviderError(`${vendor}: symbol or data not found.`, 'not_found');
   if (status === 502 || status === 503 || status === 504)
-    return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}). Check your internet connection, and run the app with npm run dev or npm run preview so the local data proxy is available.`, 'network');
+    return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}): ${PROXY_HINT}`, 'network');
   const detail = body.trim().slice(0, 200);
   return new DataProviderError(`${vendor} request failed (HTTP ${status})${detail ? `: ${detail}` : '.'}`, 'network');
 }
@@ -75,7 +79,7 @@ export class PolygonProvider implements HistoricalDataProvider {
         res = await this.fetchFn(url, { headers, signal });
       } catch (e) {
         if ((e as Error).name === 'AbortError') throw e;
-        throw new DataProviderError(`Could not reach Polygon through the local proxy (${(e as Error).message}). Run the app with "npm run dev".`, 'network');
+        throw new DataProviderError(`Could not reach Polygon (${(e as Error).message}): ${PROXY_HINT}`, 'network');
       }
       const text = await res.text();
       if (!res.ok) throw httpError(res.status, text, 'Polygon');
@@ -151,7 +155,7 @@ export class AlpacaProvider implements HistoricalDataProvider {
         res = await this.fetchFn(`${this.baseUrl}/v2/stocks/${encodeURIComponent(req.symbol.toUpperCase())}/bars?${qs}`, { headers, signal });
       } catch (e) {
         if ((e as Error).name === 'AbortError') throw e;
-        throw new DataProviderError(`Could not reach Alpaca through the local proxy (${(e as Error).message}). Run the app with "npm run dev".`, 'network');
+        throw new DataProviderError(`Could not reach Alpaca (${(e as Error).message}): ${PROXY_HINT}`, 'network');
       }
       const text = await res.text();
       if (!res.ok) throw httpError(res.status, text, 'Alpaca');

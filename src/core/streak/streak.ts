@@ -8,9 +8,10 @@
  *    showing up and practising, never P/L or trade count, so it cannot push you into forcing trades.
  *  - Days are the user's LOCAL calendar days ('YYYY-MM-DD'), not exchange days: the app is for
  *    practice when markets are closed, weekends included.
- *  - Every FREEZE_EVERY days in a row earns a streak freeze (at most MAX_FREEZES banked). A freeze is
- *    spent automatically to cover a missed day. If a gap is longer than the banked freezes, the streak
- *    ends and the freezes are kept for the next one.
+ *  - Every FREEZE_EVERY-th goal-met day within a running streak earns a streak freeze (at most
+ *    MAX_FREEZES banked). Freezes are spent automatically to cover missed days, but only when there
+ *    are enough for the whole gap; otherwise the streak ends and the freezes are kept for the next one.
+ *  - Frozen days count toward the streak length (and the best streak), not toward earning freezes.
  *  - Changing the goal never rewrites history: a completed day stays completed.
  */
 
@@ -36,6 +37,11 @@ export interface StreakData {
   freezes: number;
   /** Longest streak ever reached. */
   best: number;
+  /**
+   * Wall-clock time (ms) up to which practice time has been credited. Two open windows credit the
+   * same stretch of real time only once.
+   */
+  creditedUntil: number;
 }
 
 export const GOAL_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
@@ -47,7 +53,7 @@ export const MILESTONES = [3, 7, 14, 30, 50, 100, 150, 200, 365, 500, 750, 1000]
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function emptyStreak(): StreakData {
-  return { version: 1, goalMinutes: DEFAULT_GOAL_MINUTES, days: {}, frozen: [], freezes: 0, best: 0 };
+  return { version: 1, goalMinutes: DEFAULT_GOAL_MINUTES, days: {}, frozen: [], freezes: 0, best: 0, creditedUntil: 0 };
 }
 
 function emptyDay(): DayActivity {
@@ -106,6 +112,7 @@ export function sanitizeStreak(raw: unknown): StreakData {
   if (Array.isArray(r.frozen)) out.frozen = [...new Set(r.frozen.filter((k): k is string => typeof k === 'string' && DAY_RE.test(k)))].sort();
   out.freezes = Math.min(MAX_FREEZES, Math.floor(nonNeg(r.freezes)));
   out.best = Math.floor(nonNeg(r.best));
+  out.creditedUntil = nonNeg(r.creditedUntil);
   return out;
 }
 
@@ -217,17 +224,34 @@ export function settle(data: StreakData, today: DayKey): SettleResult {
   if (gap <= 0 || gap > data.freezes) return { data, usedFreezes: [] };
   const used: DayKey[] = [];
   for (let i = 1; i <= gap; i++) used.push(addDays(last, i));
-  return {
-    data: { ...data, freezes: data.freezes - gap, frozen: [...data.frozen, ...used].sort() },
-    usedFreezes: used,
-  };
+  const covered: StreakData = { ...data, freezes: data.freezes - gap, frozen: [...data.frozen, ...used].sort() };
+  // Frozen days lengthen the streak, so they can set a new best too.
+  return { data: { ...covered, best: Math.max(covered.best, streakEndingAt(covered, addDays(today, -1))) }, usedFreezes: used };
+}
+
+/** Streak length at the most recent goal-met day before `k` within the run that reaches `k`, or 0. */
+function streakAtPreviousPractice(data: StreakData, k: DayKey): number {
+  const frozen = new Set(data.frozen);
+  for (let d = dayNumber(k) - 1; ; d--) {
+    const key = keyFromNumber(d);
+    if (!isCovered(data, key, frozen)) return 0;
+    if (data.days[key]?.done) return streakEndingAt(data, key);
+  }
 }
 
 export interface ActivityDelta {
   activeSeconds?: number;
   tradesClosed?: number;
   reviews?: number;
+  /**
+   * Wall-clock time (ms) at the end of the practice being credited. When given, only time after
+   * `creditedUntil` counts, so overlapping credits from two windows are not added twice.
+   */
+  at?: number;
 }
+
+/** A clock step back larger than this is treated as a clock change, not as overlapping windows. */
+const CLOCK_STEP_MS = 60_000;
 
 export interface RecordResult extends SettleResult {
   /** Today's goal was met by this update. */
@@ -242,10 +266,19 @@ export interface RecordResult extends SettleResult {
 
 /** Add activity to today (settling missed days first) and evaluate the goal. */
 export function recordActivity(input: StreakData, today: DayKey, delta: ActivityDelta): RecordResult {
-  const { data: settled, usedFreezes } = settle(input, today);
+  const { data: settled0, usedFreezes } = settle(input, today);
+  let settled = settled0;
+  let seconds = Math.max(0, delta.activeSeconds ?? 0);
+  if (delta.at !== undefined && seconds > 0) {
+    const until = settled.creditedUntil;
+    // Count only the part of this stretch no other window has credited yet. If the clock jumped
+    // back (a manual change), start over from the new time instead of refusing credit for that long.
+    if (delta.at >= until - CLOCK_STEP_MS) seconds = Math.min(seconds, Math.max(0, (delta.at - until) / 1000));
+    settled = { ...settled, creditedUntil: delta.at < until - CLOCK_STEP_MS ? delta.at : Math.max(until, delta.at) };
+  }
   const prev = settled.days[today] ?? emptyDay();
   const day: DayActivity = {
-    activeSeconds: prev.activeSeconds + Math.max(0, delta.activeSeconds ?? 0),
+    activeSeconds: prev.activeSeconds + seconds,
     tradesClosed: prev.tradesClosed + Math.max(0, Math.floor(delta.tradesClosed ?? 0)),
     reviews: prev.reviews + Math.max(0, Math.floor(delta.reviews ?? 0)),
     done: prev.done,
@@ -258,7 +291,10 @@ export function recordActivity(input: StreakData, today: DayKey, delta: Activity
   let newBest = false;
   let earnedFreeze = false;
   if (completedNow) {
-    milestone = (MILESTONES as readonly number[]).includes(streak) ? streak : null;
+    // A freeze can carry the count past a milestone between two practice days (13 practised, day 14
+    // frozen, day 15 practised): celebrate the highest milestone passed since the last practice.
+    const before = streakAtPreviousPractice(data, today);
+    milestone = [...MILESTONES].reverse().find((m) => m > before && m <= streak) ?? null;
     newBest = streak > data.best && data.best > 0;
     // Freezes are earned by practice, not by other freezes: count only days that met the goal.
     const practised = practisedDaysEndingAt(data, today);

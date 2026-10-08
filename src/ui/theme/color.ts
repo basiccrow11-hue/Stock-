@@ -56,13 +56,9 @@ export function isDark(c: string): boolean {
   return luminance(c) < 0.2;
 }
 
-/**
- * Keep the hue of `fg` but move it toward white (on dark backgrounds) or black (on light ones)
- * until it reaches `min` contrast against `bg`. Returns `fg` unchanged when it already passes.
- */
-export function readable(fg: string, bg: string, min = 4.5): string {
-  if (contrast(fg, bg) >= min) return normHex(fg);
-  const target = isDark(bg) ? '#ffffff' : '#000000';
+/** Blend `fg` toward `target` just far enough to reach `min` contrast against `bg` (null if it never does). */
+function towards(fg: string, target: string, bg: string, min: number): string | null {
+  if (contrast(target, bg) < min) return null;
   let lo = 0;
   let hi = 1;
   for (let i = 0; i < 18; i++) {
@@ -71,6 +67,35 @@ export function readable(fg: string, bg: string, min = 4.5): string {
     else lo = mid;
   }
   return mix(fg, target, hi);
+}
+
+/**
+ * Keep the hue of `fg` but move it toward white (on dark backgrounds) or black (on light ones)
+ * until it reaches `min` contrast against `bg`. Returns `fg` unchanged when it already passes. On a
+ * mid-tone background where the preferred direction cannot get there, the other direction is used,
+ * and if neither can, whichever of black or white reads better.
+ */
+export function readable(fg: string, bg: string, min = 4.5): string {
+  if (contrast(fg, bg) >= min) return normHex(fg);
+  const [first, second] = isDark(bg) ? ['#ffffff', '#000000'] : ['#000000', '#ffffff'];
+  return towards(fg, first, bg, min) ?? towards(fg, second, bg, min) ?? (contrast(first, bg) >= contrast(second, bg) ? first : second);
+}
+
+/** HSL saturation, 0..1. Greys and near-greys are close to 0. */
+export function saturation(c: string): number {
+  const [r, g, b] = parseHex(c).map((v) => v / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return 0;
+  return (max - min) / (1 - Math.abs(2 * l - 1));
+}
+
+/** Euclidean distance in RGB, 0..441. A rough "do these look alike" measure. */
+export function distance(a: string, b: string): number {
+  const x = parseHex(a);
+  const y = parseHex(b);
+  return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
 }
 
 /** White or near-black text, whichever reads better on a filled background. */

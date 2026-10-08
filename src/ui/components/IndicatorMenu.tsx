@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useSettings, type IndicatorConfig, type IndicatorType } from '../state/settingsStore';
 import { newId } from '../../core/util/ids';
+import { usePopover } from './usePopover';
 
 const LABEL: Record<IndicatorType, string> = {
   sma: 'SMA',
@@ -32,18 +33,18 @@ const DEFAULTS: Record<IndicatorType, Partial<IndicatorConfig>> = {
 };
 
 export function IndicatorMenu() {
-  const [open, setOpen] = useState(false);
+  const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const { indicators, updateIndicator, addIndicator, removeIndicator } = useSettings();
   const [addType, setAddType] = useState<IndicatorType>('sma');
   const num = (v: string, min = 1) => Math.max(min, Math.round(Number(v) || min));
 
   return (
-    <div style={{ position: 'relative' }}>
-      <button className={`btn sm${open ? ' active' : ''}`} onClick={() => setOpen(!open)}>
+    <div ref={boxRef} style={{ position: 'relative' }}>
+      <button ref={triggerRef} className={`btn sm${open ? ' active' : ''}`} onClick={toggle} aria-expanded={open}>
         Indicators ({indicators.filter((i) => i.enabled).length})
       </button>
       {open && (
-        <div className="card popover" style={{ width: 340 }}>
+        <div ref={popRef} className="card popover" style={{ width: 'min(340px, calc(100vw - 16px))' }} role="dialog" aria-label="Indicators">
           <div className="stack">
             {indicators.map((i) => (
               <div key={i.id} className="row" style={{ gap: 6 }}>
@@ -82,7 +83,7 @@ export function IndicatorMenu() {
                 Add
               </button>
               <div className="spacer" />
-              <button className="btn sm" onClick={() => setOpen(false)}>
+              <button className="btn sm" onClick={() => close()}>
                 Done
               </button>
             </div>

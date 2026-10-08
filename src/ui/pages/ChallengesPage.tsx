@@ -74,7 +74,7 @@ export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mod
                   <td>{CHALLENGES.find((c) => c.id === a.challengeId)?.title ?? a.challengeId}</td>
                   <td className="small">{a.label}</td>
                   <td>
-                    <span className={`badge ${a.result.status === 'passed' ? 'pos' : a.result.status === 'failed' ? 'neg' : 'neutral'}`}>{a.result.status === 'in_progress' ? 'abandoned' : a.result.status}</span>
+                    <span className={`badge ${a.result.status === 'passed' ? 'success' : a.result.status === 'failed' ? 'error' : 'neutral'}`}>{a.result.status === 'in_progress' ? 'abandoned' : a.result.status}</span>
                     {!a.result.official && <span className="badge warn" style={{ marginLeft: 4 }}>unofficial</span>}
                   </td>
                   <td className="small muted">{a.result.detail}</td>

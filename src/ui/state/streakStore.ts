@@ -2,10 +2,12 @@
  * Daily practice streak: persistence, the active-time tracker and user-facing events.
  *
  * Rules live in core/streak/streak.ts. Storage is read-modify-write on every change (not a cached
- * copy) so two open tabs do not overwrite each other's progress.
+ * copy) so two open tabs do not overwrite each other's progress. If storage is blocked or full, the
+ * streak keeps working in memory for the rest of the session.
  */
 import { create } from 'zustand';
 import {
+  MAX_FREEZES,
   dayKey,
   emptyStreak,
   milestoneLine,
@@ -29,21 +31,44 @@ const IDLE_SECONDS = 90;
 const WATCHING_SECONDS = 600;
 const TICK_MS = 5_000;
 
+/** False once localStorage refused a read or write; from then on `memory` is the source of truth. */
+let storageOk = true;
+let memory: StreakData | null = null;
+
 function load(): StreakData {
-  try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? sanitizeStreak(JSON.parse(raw)) : emptyStreak();
-  } catch {
-    return emptyStreak();
+  if (storageOk) {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(KEY);
+    } catch {
+      storageOk = false;
+    }
+    if (storageOk) {
+      try {
+        return raw ? sanitizeStreak(JSON.parse(raw)) : emptyStreak();
+      } catch {
+        return emptyStreak(); // damaged record: start clean rather than crash
+      }
+    }
   }
+  return memory ?? emptyStreak();
 }
 
 function save(d: StreakData): void {
+  memory = d;
+  if (!storageOk) return;
   try {
     localStorage.setItem(KEY, JSON.stringify(d));
   } catch {
-    /* storage full or blocked: the streak keeps working in memory for this session */
+    // Full or blocked. Reading the stale stored copy back would undo progress, so stop using it.
+    storageOk = false;
   }
+}
+
+/** Test hook: forget the in-memory fallback. */
+export function resetStreakStorageForTests(): void {
+  storageOk = true;
+  memory = null;
 }
 
 interface StreakStore {
@@ -69,7 +94,8 @@ function fmtDay(k: DayKey): string {
 function announceFreezes(used: DayKey[], streak: number): void {
   if (!used.length) return;
   const days = used.map(fmtDay).join(' and ');
-  toast('info', `A streak freeze covered ${days}. Your ${streak}-day streak is safe.`, 8000);
+  const what = used.length === 1 ? 'A streak freeze' : `${used.length} streak freezes`;
+  toast('info', `${what} covered ${days}. Your ${streak}-day streak is safe.`, 8000);
 }
 
 function announce(r: RecordResult): void {
@@ -77,19 +103,19 @@ function announce(r: RecordResult): void {
   if (!r.completedNow) return;
   if (r.milestone) useStreak.setState({ celebrate: { streak: r.milestone, line: milestoneLine(r.milestone) } });
   else toast('success', `Daily goal reached. ${r.streak}-day streak${r.newBest ? ', a new personal best' : ''}. See you tomorrow.`, 6000);
-  if (r.earnedFreeze) toast('info', `You earned a streak freeze (${r.data.freezes} banked). It covers a missed day automatically.`, 8000);
+  if (r.earnedFreeze) toast('info', `You earned a streak freeze (${r.data.freezes} of ${MAX_FREEZES} banked). It covers a missed day automatically.`, 8000);
 }
 
-function commit(fn: (d: StreakData, today: DayKey) => RecordResult): void {
-  const today = dayKey(new Date());
-  const r = fn(load(), today);
+function commit(fn: (d: StreakData, today: DayKey) => RecordResult, day: DayKey = dayKey(new Date())): void {
+  const r = fn(load(), day);
   save(r.data);
-  useStreak.setState({ data: r.data, today });
+  useStreak.setState({ data: r.data, today: dayKey(new Date()) });
   announce(r);
 }
 
-export function recordPractice(delta: ActivityDelta): void {
-  commit((d, today) => recordActivity(d, today, delta));
+/** Add activity to today, or to `day` (used for the seconds just before midnight). */
+export function recordPractice(delta: ActivityDelta, day?: DayKey): void {
+  commit((d, k) => recordActivity(d, k, delta), day);
 }
 
 export function recordTradeClosed(): void {
@@ -123,21 +149,33 @@ function settleNow(): void {
   useStreak.setState({ data: r.data, today });
 }
 
+/** Local midnight at the start of the day containing `ms`. */
+function startOfDay(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 /**
  * Count active practice time. A tick counts when the tab is in front, the current screen counts
  * (`counting()`), and the user was active in the last 90 s, or a replay is playing and they were
  * active in the last 10 minutes. Returns a cleanup function.
+ *
+ * Idle time and tick length are measured on the monotonic clock (performance.now), so changing the
+ * system clock cannot turn idle time into practice. Wall-clock time is only used for the calendar day
+ * and for not double-counting time across windows.
  */
 export function startPracticeTracker(counting: () => boolean, playing: () => boolean): () => void {
-  let lastInput = Date.now();
-  let lastTick = Date.now();
+  let lastInput = performance.now();
+  let lastTick = performance.now();
+  let lastWall = Date.now();
   const onInput = () => {
-    lastInput = Date.now();
+    lastInput = performance.now();
   };
   const onVisibility = () => {
     if (document.visibilityState === 'visible') {
       // Time spent hidden never counts; pick up changes another tab made.
-      lastTick = Date.now();
+      lastTick = performance.now();
+      lastWall = Date.now();
       settleNow();
     }
   };
@@ -151,14 +189,26 @@ export function startPracticeTracker(counting: () => boolean, playing: () => boo
 
   settleNow();
   const timer = setInterval(() => {
-    const now = Date.now();
+    const now = performance.now();
+    const wall = Date.now();
     // Cap a tick's credit so a sleeping laptop or a throttled timer cannot add a burst of time.
     const dt = Math.min(now - lastTick, TICK_MS * 2) / 1000;
+    const prevWall = lastWall;
     lastTick = now;
-    if (dayKey(new Date()) !== useStreak.getState().today) settleNow();
-    if (document.visibilityState !== 'visible' || !counting()) return;
-    const idle = (now - lastInput) / 1000;
-    if (idle < IDLE_SECONDS || (playing() && idle < WATCHING_SECONDS)) recordPractice({ activeSeconds: dt });
+    lastWall = wall;
+    const active =
+      document.visibilityState === 'visible' && counting() && (now - lastInput < IDLE_SECONDS * 1000 || (playing() && now - lastInput < WATCHING_SECONDS * 1000));
+    const midnight = startOfDay(wall);
+    if (active && dt > 0 && prevWall < midnight && wall - prevWall < 60_000) {
+      // The tick spans midnight: the seconds before it belong to yesterday, which may still need them.
+      const before = Math.min(dt, (midnight - prevWall) / 1000);
+      recordPractice({ activeSeconds: before, at: midnight }, dayKey(new Date(midnight - 1)));
+      settleNow();
+      if (dt - before > 0) recordPractice({ activeSeconds: dt - before, at: wall });
+      return;
+    }
+    if (dayKey(new Date(wall)) !== useStreak.getState().today) settleNow();
+    if (active && dt > 0) recordPractice({ activeSeconds: dt, at: wall });
   }, TICK_MS);
 
   return () => {

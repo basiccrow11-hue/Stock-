@@ -1,28 +1,35 @@
 /** Appearance controls: app theme, accent and chart styling, plus a live chart preview. */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { HistogramSeries, createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
 import { useSettings } from '../state/settingsStore';
-import { ACCENTS, CHART_STYLES, THEMES, THEME_IDS, candlePresets, type ChartColors, type ChartStyle, type PriceScaleKind } from '../theme/themes';
+import { ACCENTS, ACCENT_NAMES, CHART_STYLES, THEMES, THEME_IDS, candlePresets, type ChartColors, type ChartStyle, type PriceScaleKind } from '../theme/themes';
 import { useTheme } from '../theme/useTheme';
-import { contrast, normHex } from '../theme/color';
-import { addMainSeries, chartOptions, mainPoint, mainSeriesOptions, priceScaleMode, type MainSeries } from '../chart/chartTheme';
+import { contrast, distance, normHex } from '../theme/color';
+import { addMainSeries, chartOptions, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, type MainSeries } from '../chart/chartTheme';
+import { usePopover } from './usePopover';
 import { CHART_LOCALE } from '../services/format';
 import type { Bar } from '../../core/types';
 
 const COLOR_INPUT_STYLE = { width: 30, height: 26, padding: 0, border: 0, background: 'none', cursor: 'pointer' } as const;
 
 function ColorField({ label, value, onChange, hint }: { label: string; value: string; onChange: (v: string) => void; hint?: string | null }) {
+  const hintId = useId();
   return (
     <label className="color-field" title={hint ?? undefined}>
-      <input type="color" value={value} onChange={(e) => onChange(normHex(e.target.value))} style={COLOR_INPUT_STYLE} aria-label={label} />
+      <input type="color" value={value} onChange={(e) => onChange(normHex(e.target.value))} style={COLOR_INPUT_STYLE} aria-label={label} aria-describedby={hint ? hintId : undefined} />
       <span className="color-field-text">
         <span>{label}</span>
         <span className="mono muted small">{value}</span>
       </span>
       {hint && (
-        <span className="color-warn" aria-label={hint}>
-          !
-        </span>
+        <>
+          <span className="color-warn" aria-hidden="true">
+            !
+          </span>
+          <span id={hintId} className="sr-only">
+            {hint}
+          </span>
+        </>
       )}
     </label>
   );
@@ -32,12 +39,12 @@ export function ThemePicker() {
   const theme = useSettings((s) => s.appearance.theme);
   const applyTheme = useSettings((s) => s.applyTheme);
   return (
-    <div className="theme-tiles" role="radiogroup" aria-label="App theme">
+    <div className="theme-tiles" role="group" aria-label="App theme">
       {THEME_IDS.map((id) => {
         const t = THEMES[id];
         return (
-          <button key={id} role="radio" aria-checked={theme === id} className={`theme-tile${theme === id ? ' on' : ''}`} onClick={() => applyTheme(id)}>
-            <span className="theme-swatch" style={{ background: t.ui.bg, borderColor: t.ui.border }}>
+          <button key={id} aria-pressed={theme === id} className={`theme-tile${theme === id ? ' on' : ''}`} onClick={() => applyTheme(id)}>
+            <span className="theme-swatch" aria-hidden="true" style={{ background: t.ui.bg, borderColor: t.ui.border }}>
               <span style={{ background: t.ui.panel, borderColor: t.ui.border }} />
               <span style={{ background: t.chart.background, borderColor: t.ui.border }}>
                 <i style={{ background: '#26a69a', height: 14, marginTop: 6 }} />
@@ -56,13 +63,14 @@ export function ThemePicker() {
 export function AccentPicker() {
   const accent = useSettings((s) => s.appearance.accent);
   const update = useSettings((s) => s.updateAppearance);
+  const custom = !ACCENTS.includes(accent);
   return (
-    <div className="row wrap" style={{ gap: 6 }} role="radiogroup" aria-label="Accent colour">
+    <div className="row wrap" style={{ gap: 6 }} role="group" aria-label="Accent colour">
       {ACCENTS.map((c) => (
-        <button key={c} role="radio" aria-checked={accent === c} aria-label={c} className={`swatch${accent === c ? ' on' : ''}`} style={{ background: c }} onClick={() => update({ accent: c })} />
+        <button key={c} aria-pressed={accent === c} aria-label={ACCENT_NAMES[c] ?? c} title={ACCENT_NAMES[c]} className={`swatch${accent === c ? ' on' : ''}`} style={{ background: c }} onClick={() => update({ accent: c })} />
       ))}
-      <label className="swatch custom" title="Custom accent colour">
-        <input type="color" value={accent} onChange={(e) => update({ accent: normHex(e.target.value) })} aria-label="Custom accent colour" />
+      <label className={`swatch custom${custom ? ' on' : ''}`} title={custom ? `Custom accent colour (${accent})` : 'Custom accent colour'}>
+        <input type="color" value={accent} onChange={(e) => update({ accent: normHex(e.target.value) })} aria-label={custom ? `Custom accent colour, ${accent}, selected` : 'Custom accent colour'} />
       </label>
     </div>
   );
@@ -74,7 +82,7 @@ export function ChartStylePicker() {
   return (
     <div className="seg" role="group" aria-label="Chart type">
       {CHART_STYLES.map((s) => (
-        <button key={s.id} className={style === s.id ? 'on' : ''} onClick={() => update({ chartStyle: s.id as ChartStyle })}>
+        <button key={s.id} aria-pressed={style === s.id} className={style === s.id ? 'on' : ''} onClick={() => update({ chartStyle: s.id as ChartStyle })}>
           {s.label}
         </button>
       ))}
@@ -87,13 +95,13 @@ export function CandlePresetPicker() {
   const apply = useSettings((s) => s.applyCandlePreset);
   const presets = candlePresets(THEMES[a.theme].scheme);
   return (
-    <div className="row wrap" style={{ gap: 6 }}>
+    <div className="row wrap" style={{ gap: 6 }} role="group" aria-label="Candle colours">
       {presets.map((p) => {
         const on = a.colors.up === p.up && a.colors.down === p.down;
         return (
-          <button key={p.id} className={`btn sm preset${on ? ' active' : ''}`} onClick={() => apply(p.id)} title={p.label}>
-            <span className="preset-swatch" style={{ background: p.up }} />
-            <span className="preset-swatch" style={{ background: p.down }} />
+          <button key={p.id} aria-pressed={on} className={`btn sm preset${on ? ' active' : ''}`} onClick={() => apply(p.id)} title={p.label}>
+            <span className="preset-swatch" aria-hidden="true" style={{ background: p.up }} />
+            <span className="preset-swatch" aria-hidden="true" style={{ background: p.down }} />
             {p.label.replace(' (colour-blind safe)', '')}
           </button>
         );
@@ -111,12 +119,8 @@ function visibilityHints(c: ChartColors): Partial<Record<keyof ChartColors, stri
   faint('up', 'Up colour');
   faint('down', 'Down colour');
   faint('line', 'Line colour');
-  faint('text', 'Text');
-  if (!out.up && !out.down && contrast(c.up, c.down) < 1.12) {
-    const [r1, g1, b1] = [1, 3, 5].map((i) => parseInt(c.up.slice(i, i + 2), 16));
-    const [r2, g2, b2] = [1, 3, 5].map((i) => parseInt(c.down.slice(i, i + 2), 16));
-    if (Math.hypot(r1 - r2, g1 - g2, b1 - b2) < 70) out.down = 'Up and down colours look almost the same.';
-  }
+  if (contrast(c.text, c.background) < 4.5) out.text = 'Too faint on this background, so the chart shows it lighter or darker to keep labels readable.';
+  if (!out.up && !out.down && contrast(c.up, c.down) < 1.12 && distance(c.up, c.down) < 70) out.down = 'Up and down colours look almost the same.';
   return out;
 }
 
@@ -128,14 +132,19 @@ export function ChartColorsEditor({ compact = false }: { compact?: boolean }) {
   const hints = visibilityHints(c);
   const usesLine = a.chartStyle === 'line' || a.chartStyle === 'area';
   const usesCandles = a.chartStyle === 'candles' || a.chartStyle === 'hollow';
+  const hollow = a.chartStyle === 'hollow';
+  const unlinked = usesCandles && !a.linkCandleParts;
+  // Hollow up candles have no body fill: with parts unlinked, the up colour only drives volume and P/L.
+  const upLabel = hollow ? (unlinked ? 'Up (volume)' : 'Up') : usesCandles ? 'Up body' : 'Up';
   return (
     <div className="stack" style={{ gap: 8 }}>
       <div className="color-grid">
-        <ColorField label={usesCandles ? 'Up body' : 'Up'} value={c.up} onChange={(v) => setColor('up', v)} hint={hints.up} />
+        {hollow && unlinked && <ColorField label="Up outline" value={c.borderUp} onChange={(v) => setColor('borderUp', v)} />}
+        <ColorField label={upLabel} value={c.up} onChange={(v) => setColor('up', v)} hint={hints.up} />
         <ColorField label={usesCandles ? 'Down body' : 'Down'} value={c.down} onChange={(v) => setColor('down', v)} hint={hints.down} />
-        {usesCandles && !a.linkCandleParts && (
+        {unlinked && (
           <>
-            <ColorField label="Up border" value={c.borderUp} onChange={(v) => setColor('borderUp', v)} />
+            {!hollow && <ColorField label="Up border" value={c.borderUp} onChange={(v) => setColor('borderUp', v)} />}
             <ColorField label="Down border" value={c.borderDown} onChange={(v) => setColor('borderDown', v)} />
             <ColorField label="Up wick" value={c.wickUp} onChange={(v) => setColor('wickUp', v)} />
             <ColorField label="Down wick" value={c.wickDown} onChange={(v) => setColor('wickDown', v)} />
@@ -190,7 +199,7 @@ export function ChartOptionsEditor() {
                 ['percent', '%'],
               ] as [PriceScaleKind, string][]
             ).map(([k, label]) => (
-              <button key={k} className={a.priceScale === k ? 'on' : ''} onClick={() => update({ priceScale: k })}>
+              <button key={k} aria-pressed={a.priceScale === k} className={a.priceScale === k ? 'on' : ''} onClick={() => update({ priceScale: k })} title={k === 'percent' ? 'Percent change from the first bar on screen' : undefined}>
                 {label}
               </button>
             ))}
@@ -279,7 +288,8 @@ export function ChartPreview({ height = 200 }: { height?: number }) {
       styleRef.current = pal.style;
       mainRef.current.setData(SAMPLE.map((b) => mainPoint(pal.style, b.time as UTCTimestamp, b)) as never);
     }
-    mainRef.current!.applyOptions(mainSeriesOptions(pal));
+    const last = SAMPLE[SAMPLE.length - 1];
+    mainRef.current!.applyOptions({ ...mainSeriesOptions(pal, last.close >= last.open), priceFormat: mainPriceFormat(pal.priceScale, () => SAMPLE[0].close) });
     chart.priceScale('right', 0).applyOptions({ mode: priceScaleMode(pal.priceScale) });
     if (!volRef.current) {
       volRef.current = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
@@ -304,10 +314,11 @@ export function AppearanceCard() {
   const a = useSettings((s) => s.appearance);
   const update = useSettings((s) => s.updateAppearance);
   const reset = useSettings((s) => s.resetAppearance);
+  const pnlUsesCandles = useTheme().pnlUsesCandles;
   return (
-    <div className="card stack" id="appearance">
+    <div className="card stack" id="appearance" tabIndex={-1} aria-labelledby="appearance-title">
       <div className="row">
-        <h2>Appearance</h2>
+        <h2 id="appearance-title">Appearance</h2>
         <div className="spacer" />
         <button className="btn sm" onClick={() => window.confirm('Reset theme and chart colours to the defaults?') && reset()}>
           Reset appearance
@@ -350,8 +361,13 @@ export function AppearanceCard() {
       <label className="check">
         <input type="checkbox" checked={a.pnlFollowsCandles} onChange={(e) => update({ pnlFollowsCandles: e.target.checked })} /> Profit and loss text uses the candle up/down colours
       </label>
+      {a.pnlFollowsCandles && !pnlUsesCandles && (
+        <p className="small muted" style={{ margin: 0 }}>
+          These candle colours are too grey or too alike to tell gains from losses, so profit and loss stays green and red.
+        </p>
+      )}
       <p className="small muted" style={{ margin: 0 }}>
-        Text colours are adjusted automatically when needed so numbers stay readable on any theme. Data source labels (DEMO, HISTORICAL, SIMULATED) always stay on the chart.
+        Text, markers and indicator lines are adjusted automatically when a colour would be hard to read on its background. Data source labels (DEMO, HISTORICAL, SIMULATED) always stay on the chart.
       </p>
     </div>
   );
@@ -359,28 +375,14 @@ export function AppearanceCard() {
 
 /** Quick chart appearance menu in the chart toolbar. */
 export function ChartSettingsMenu({ onOpenSettings }: { onOpenSettings?: () => void }) {
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent) => {
-      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
-    window.addEventListener('pointerdown', onDown);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('pointerdown', onDown);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
+  const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
-      <button className={`btn sm${open ? ' active' : ''}`} onClick={() => setOpen(!open)} title="Chart appearance" aria-expanded={open}>
+      <button ref={triggerRef} className={`btn sm${open ? ' active' : ''}`} onClick={toggle} title="Chart appearance" aria-expanded={open}>
         Chart style
       </button>
       {open && (
-        <div className="card popover chart-settings-pop">
+        <div ref={popRef} className="card popover chart-settings-pop" role="dialog" aria-label="Chart style">
           <div className="stack" style={{ gap: 10 }}>
             <ChartStylePicker />
             <CandlePresetPicker />
@@ -391,7 +393,7 @@ export function ChartSettingsMenu({ onOpenSettings }: { onOpenSettings?: () => v
                 <button
                   className="btn sm ghost"
                   onClick={() => {
-                    setOpen(false);
+                    close(false);
                     onOpenSettings();
                   }}
                 >
@@ -399,7 +401,7 @@ export function ChartSettingsMenu({ onOpenSettings }: { onOpenSettings?: () => v
                 </button>
               )}
               <div className="spacer" />
-              <button className="btn sm" onClick={() => setOpen(false)}>
+              <button className="btn sm" onClick={() => close()}>
                 Done
               </button>
             </div>

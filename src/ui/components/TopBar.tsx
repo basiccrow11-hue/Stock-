@@ -28,8 +28,8 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
   return (
     <header className="topbar">
       <div className="brand">
-        <span className="logo" />
-        Stock Replay
+        <span className="logo" aria-hidden="true" />
+        <span className="brand-name">Stock Replay</span>
       </div>
       <nav className="nav">
         {VIEWS.map(([v, label]) => (
@@ -38,16 +38,21 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
           </button>
         ))}
       </nav>
-      <StreakChip />
+      {/* Source labels come before anything optional, so they are the last thing to be squeezed off screen. */}
       <div className="integrity">
         {session ? (
           <>
             <SourceBadge source={session.source} />
             <span className="badge neutral">{session.mode === 'replay' ? 'REPLAY' : 'SIM MARKET'}</span>
             {ms && (
-              <span className={`badge ${ms === 'regular' ? 'pos' : ms === 'closed' ? 'neutral' : 'warn'}`} title="Simulated market status at the replay clock">
+              <span className={`badge ${ms === 'regular' ? 'success' : ms === 'closed' ? 'neutral' : 'warn'}`} title="Simulated market status at the replay clock">
                 <span className={`dot${playing ? ' pulse' : ''}`} />
-                {SESSION_LABEL[ms]} · {session.blind ? blindDayLabel(now) : exchangeDate(now)} {formatExchangeTime(now)} ET
+                {SESSION_LABEL[ms]}
+                {/* The replay bar under the chart shows the same clock, so this part is dropped first on narrow screens. */}
+                <span className="session-when">
+                  {' '}
+                  · {session.blind ? blindDayLabel(now) : exchangeDate(now)} {formatExchangeTime(now)} ET
+                </span>
               </span>
             )}
           </>
@@ -55,34 +60,37 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
           <span className="badge neutral">NO ACTIVE SESSION</span>
         )}
       </div>
-      {account && (
-        <div className="metrics">
-          <div className="metric">
-            <span className="k">Account value</span>
-            <span className="v">{money(account.equity)}</span>
+      <div className="topbar-right">
+        {account && (
+          <div className="metrics">
+            <div className="metric">
+              <span className="k">Account value</span>
+              <span className="v">{money(account.equity)}</span>
+            </div>
+            <div className="metric opt">
+              <span className="k">Cash</span>
+              <span className="v">{money(account.cash)}</span>
+            </div>
+            <div className="metric opt">
+              <span className="k">Buying power</span>
+              <span className="v">{money(account.buyingPower)}</span>
+            </div>
+            <div className="metric">
+              <span className="k">Day P/L</span>
+              <span className={`v ${pnlClass(account.dayPnl)}`}>{signedMoney(account.dayPnl)}</span>
+            </div>
+            <div className="metric opt">
+              <span className="k">Unrealized</span>
+              <span className={`v ${pnlClass(account.unrealizedPnl)}`}>{signedMoney(account.unrealizedPnl)}</span>
+            </div>
+            <div className="metric opt">
+              <span className="k">Realized</span>
+              <span className={`v ${pnlClass(account.realizedPnl)}`}>{signedMoney(account.realizedPnl)}</span>
+            </div>
           </div>
-          <div className="metric opt">
-            <span className="k">Cash</span>
-            <span className="v">{money(account.cash)}</span>
-          </div>
-          <div className="metric opt">
-            <span className="k">Buying power</span>
-            <span className="v">{money(account.buyingPower)}</span>
-          </div>
-          <div className="metric">
-            <span className="k">Day P/L</span>
-            <span className={`v ${pnlClass(account.dayPnl)}`}>{signedMoney(account.dayPnl)}</span>
-          </div>
-          <div className="metric opt">
-            <span className="k">Unrealized</span>
-            <span className={`v ${pnlClass(account.unrealizedPnl)}`}>{signedMoney(account.unrealizedPnl)}</span>
-          </div>
-          <div className="metric opt">
-            <span className="k">Realized</span>
-            <span className={`v ${pnlClass(account.realizedPnl)}`}>{signedMoney(account.realizedPnl)}</span>
-          </div>
-        </div>
-      )}
+        )}
+        <StreakChip />
+      </div>
     </header>
   );
 }

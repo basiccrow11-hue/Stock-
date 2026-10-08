@@ -9,7 +9,7 @@ import { EmptyState } from './common';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
 
-export function ChartPanel({ onNewSession, onOpenSettings }: { onNewSession: (mode: 'replay' | 'sim') => void; onOpenSettings?: () => void }) {
+export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { onNewSession: (mode: 'replay' | 'sim') => void; onOpenSettings?: () => void; active?: boolean }) {
   const session = useTrading((s) => s.session);
   const symbol = useTrading((s) => s.activeSymbol);
   const timeframe = useTrading((s) => s.timeframe);
@@ -83,7 +83,7 @@ export function ChartPanel({ onNewSession, onOpenSettings }: { onNewSession: (mo
           </div>
         )}
       </div>
-      <ReplayControls />
+      <ReplayControls active={active} />
     </section>
   );
 }

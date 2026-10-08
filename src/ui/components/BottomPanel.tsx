@@ -237,7 +237,7 @@ function OrdersTab({ orders }: { orders: Order[] }) {
                 <td className="num">{isOpen(o) ? <OrderPriceEditor order={o} /> : orderPriceText(o)}</td>
                 <td>{o.tif.toUpperCase()}</td>
                 <td>
-                  <span className={`badge ${o.status === 'filled' ? 'pos' : o.status === 'rejected' ? 'neg' : o.status === 'pending' ? 'warn' : 'neutral'}`}>{o.status.replace('_', ' ')}</span>
+                  <span className={`badge ${o.status === 'filled' ? 'success' : o.status === 'rejected' ? 'error' : o.status === 'pending' ? 'warn' : 'neutral'}`}>{o.status.replace('_', ' ')}</span>
                 </td>
                 <td className="muted small">{o.rejectReason ?? (o.status === 'pending' ? 'Waits for the session to open' : o.type === 'stop_limit' && o.triggered ? 'Stop triggered' : '')}</td>
                 <td className="num">
@@ -388,7 +388,7 @@ function LogTab() {
                 {time(e.time)}
               </td>
               <td style={{ width: 90 }}>
-                <span className={`badge ${e.kind === 'filled' ? 'pos' : e.kind === 'rejected' ? 'neg' : e.kind === 'partial' || e.kind === 'triggered' ? 'warn' : 'neutral'}`}>{e.kind}</span>
+                <span className={`badge ${e.kind === 'filled' ? 'success' : e.kind === 'rejected' ? 'error' : e.kind === 'partial' || e.kind === 'triggered' ? 'warn' : 'neutral'}`}>{e.kind}</span>
               </td>
               <td>{e.message}</td>
             </tr>
