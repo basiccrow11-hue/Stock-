@@ -572,23 +572,29 @@ export class SimBroker {
    * read just before the clock, so at the very end of a bar's session (16:00 after the 15:59 bar, or a
    * daily bar's close) the symbol still trades at its close.
    */
-  private symbolSession(symbol: string): MarketSession {
+  private symbolSession(symbol: string, clock = this.s.clock): MarketSession {
     const bar = this.s.lastBar[symbol];
-    if (!bar || exchangeDate(this.s.clock - 1) > exchangeDate(bar.time)) return 'closed';
+    if (!bar || exchangeDate(clock - 1) > exchangeDate(bar.time)) return 'closed';
     const own = marketSession(bar.time);
-    return this.s.clock > bar.time && marketSession(this.s.clock - 1) !== own ? 'closed' : own;
+    return clock > bar.time && marketSession(clock - 1) !== own ? 'closed' : own;
   }
 
   /**
    * Where an order is expected to fill, which its stop loss and target are checked against: a market
    * order at the quote (buys pay the ask, sells hit the bid), a stop at its stop price, a limit at its
    * limit, unless the stop or limit is already through the market and fills at once, at the quote.
-   * `quote` is that quote.
+   * `quote` is that quote: the wider extended-hours one only for an order that can trade outside the
+   * regular session (an extended-hours limit); market and stop orders wait for it. `clock` is the time
+   * the order is placed at (the broker's own clock, or the replay's ahead of it).
    */
-  private expectedEntry(o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): { price: number; quote: number; atOnce: boolean } {
+  private expectedEntry(
+    o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>,
+    clock = this.s.clock,
+  ): { price: number; quote: number; atOnce: boolean } {
     const last = this.s.lastPrice[o.symbol] ?? 0;
-    const session = this.symbolSession(o.symbol);
-    const hs = halfSpread(this.cfg, last, session !== 'regular');
+    const session = this.symbolSession(o.symbol, clock);
+    const extended = session !== 'regular' && o.type === 'limit' && !!o.extendedHours && this.cfg.allowExtendedHours;
+    const hs = halfSpread(this.cfg, last, extended);
     const buy = actionSide(o.action) === 'buy';
     const quote = last + (buy ? hs : -hs);
     if (o.type === 'market') return { price: quote, quote, atOnce: false };
@@ -607,17 +613,19 @@ export class SimBroker {
    * lets trade at once. The ticket sizes from this and Strict Mode checks risk at it, so a trade sized
    * to the rule's % passes the review's check of that %. A market order that waits for the next bar's
    * open, or a stop that price gaps through, can still fill elsewhere. Null before the symbol has a price.
+   * `now` is the replay's or simulated market's time, which submit brings the clock up to first.
    */
-  estimateFill(o: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number | null {
+  estimateFill(o: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>, now?: UnixSeconds): number | null {
     const symbol = o.symbol.toUpperCase();
     if (o.type === 'limit' || o.type === 'stop_limit') return o.limitPrice ?? null;
     const last = this.s.lastPrice[symbol];
     if (last === undefined) return null;
-    const expected = this.expectedEntry({ ...o, symbol, extendedHours: !!o.extendedHours });
+    const expected = this.expectedEntry({ ...o, symbol, extendedHours: !!o.extendedHours }, Math.max(now ?? this.s.clock, this.s.clock));
     const x = o.type === 'market' || expected.atOnce ? last : o.stopPrice!;
     const volume = this.s.lastBar[symbol]?.volume ?? 0;
     const qty = Math.min(o.quantity, this.barCapacity(volume, this.s.barVolumeUsed?.[symbol] ?? 0));
-    return this.marketFill(actionSide(o.action), x, qty, volume, this.symbolSession(symbol) !== 'regular').price;
+    // Market and stop orders only trade in the regular session, at its spread.
+    return this.marketFill(actionSide(o.action), x, qty, volume, false).price;
   }
 
   /** Shares that can still trade against a bar of `volume` once `used` have: a bar without volume (none recorded) is not capped. */

@@ -230,8 +230,19 @@ describe('CSV import', () => {
     // 6-hour bars, close-stamped, are still refused.
     expect(() => parseCsv(rows(days.slice(0, 2), () => ['15:30', '16:00']), { timestampsAreBarClose: true })).toThrow('The bars in this file are 6 hours apart');
     expect(() => parseCsv(rows(days.slice(0, 2), () => ['10:00', '16:00', '20:00']), { timestampsAreBarClose: true })).toThrow('The bars in this file are 6 hours apart');
-    // Daily rows stamped at the close stay daily.
-    expect(parseCsv(rows(days, () => ['16:00']), { timestampsAreBarClose: true }).baseTimeframe).toBe('1D');
+    // Hourly on the clock hour: 09:30-10:00 stamped 10:00, then 10:00-11:00 ... 15:00-16:00.
+    const clock = parseCsv(rows(days.slice(0, 2), () => ['10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00']), { timestampsAreBarClose: true });
+    expect([clock.baseTimeframe, starts(clock).slice(0, 7)]).toEqual(['1h', ['11-26 09:30', '11-26 10:00', '11-26 11:00', '11-26 12:00', '11-26 13:00', '11-26 14:00', '11-26 15:00']]);
+    // 2-hour bars on the clock are refused either way, with no pointer to the option.
+    const twoHour = rows(days.slice(0, 2), () => ['10:00', '12:00', '14:00', '16:00']);
+    for (const timestampsAreBarClose of [false, true]) expect(() => parseCsv(twoHour, { timestampsAreBarClose })).toThrow(/^The bars in this file are 2 hours apart, [^.]*\. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars\.$/);
+    // 4-hour bars from 08:00 with extended hours: 08:00-12:00, 12:00-16:00, 16:00-20:00.
+    const ext4 = parseCsv(rows(days.slice(0, 2), () => ['12:00', '16:00', '20:00']), { timestampsAreBarClose: true });
+    expect([ext4.baseTimeframe, starts(ext4).slice(0, 3)]).toEqual(['4h', ['11-26 08:00', '11-26 12:00', '11-26 16:00']]);
+    // Daily rows stamped at the close (13:00 on a half day), at the open or at midnight stay daily.
+    for (const stamp of [(d: string) => [d === '2024-11-29' ? '13:00' : '16:00'], () => ['09:30'], () => ['00:00']]) {
+      expect(parseCsv(rows(days, stamp), { timestampsAreBarClose: true }).baseTimeframe).toBe('1D');
+    }
     expect(r4.warnings).toEqual([]);
     expect(r1.warnings).toEqual([]);
   });

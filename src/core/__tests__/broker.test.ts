@@ -348,6 +348,26 @@ describe('order validation', () => {
     expect(broker.submit({ ...order, quantity: 483, stopLoss: 98.01 }).ok).toBe(true);
     expect(broker.state.fills.at(-1)!.price).toBe(100.07);
   });
+
+  it('estimates market and stop orders at the regular spread they fill at, and at the time the order is placed', () => {
+    const strictRisk = { enabled: true, maxRiskPctPerTrade: 1, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...DEFAULT_EXECUTION_CONFIG, strictRisk }, idPrefix: 't' });
+    // Regular-hours data: the day's last bar, then the replay's clock at the next day's 09:30 open.
+    broker.onBar(S, bar(et('2025-01-14', '15:59'), 100, 100, 100, 100, 1_000_000));
+    const now = et('2025-01-15', '09:30');
+    const order = { symbol: S, action: 'buy' as const, type: 'market' as const, quantity: 980 };
+    // 100 + 0.01 half spread, + 1 bp slippage and 0.49 bp impact: the same before and after the clock moves on.
+    expect(broker.estimateFill(order)).toBe(100.03);
+    expect(broker.estimateFill(order, now)).toBe(100.03);
+    expect(broker.estimateFill({ ...order, type: 'stop', stopPrice: 100.5 }, now)).toBe(100.53);
+    // Sized to 1% at that estimate (980 x 1.02 = $999.60 + no commission), Strict Mode accepts it once the clock has moved on, and it fills there.
+    broker.syncClock(now);
+    expect(broker.submit({ ...order, stopLoss: 99.01 }).ok).toBe(true);
+    broker.onBar(S, bar(now, 100, 100, 100, 100, 1_000_000));
+    expect(broker.state.fills.at(-1)!.price).toBe(100.03);
+    // An extended-hours limit can trade outside the regular session, at its own price.
+    expect(broker.estimateFill({ ...order, type: 'limit', limitPrice: 99.9, extendedHours: true }, now)).toBe(99.9);
+  });
 });
 
 describe('opening orders that meet a position the other way', () => {

@@ -204,37 +204,29 @@ const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-
  *
  * With `closeStamped`, each stamp is a bar's end: the gap into a stamp is that bar's length, except
  * for a bar that ends at a session's edge (09:30, the close, 20:00), which may be cut short (a 4-hour
- * file's 13:30-16:00 bar), and a day's first bar is the time since the day began trading (09:30 in a
- * regular-hours file, 04:00 otherwise).
+ * file's 13:30-16:00 bar), or a gap across one. A day's first bar has no gap into it; only a
+ * regular-hours file whose every bar touches the open or the close (4-hour bars, 09:30-13:30 and
+ * 13:30-16:00) is sized by the bars from the 09:30 open.
  */
 function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): Timeframe {
   const all: number[] = [];
   const inner: number[] = [];
   // Gaps of 6 hours or more within a day, and how many of the file's days have more than one row.
   const long: number[] = [];
+  // Close-stamped regular-hours files: each day's first bar, from the 09:30 open to its stamp.
+  const firsts: number[] = [];
+  const regular = closeStamped && regularStamps(bars);
   let days = 0;
   let multiDays = 0;
-  const edges = (date: string) => [REGULAR_OPEN, regularCloseMinute(date), AFTERHOURS_CLOSE];
-  const dayStart = closeStamped && regularStamps(bars) ? REGULAR_OPEN : PREMARKET_OPEN;
   for (let i = 0; i < bars.length && all.length < 20_000; i++) {
     const date = exchangeDate(bars[i].time);
     const prevDate = i > 0 ? exchangeDate(bars[i - 1].time) : '';
     const m = exchangeMinuteOfDay(bars[i].time);
-    if (date !== prevDate) days++;
-    else if (i < 2 || exchangeDate(bars[i - 2].time) !== date) multiDays++;
-    if (closeStamped && !dateOnly) {
-      const start = date !== prevDate ? (m > dayStart ? dayStart : null) : exchangeMinuteOfDay(bars[i - 1].time);
-      const d = start === null ? 0 : (m - start) * 60;
-      if (d <= 0) continue;
-      if (d >= 6 * 3600) long.push(d);
-      else {
-        all.push(d);
-        // A bar that ends at a session's edge may be cut short, and a gap across one may hide a short
-        // bar before it (a thin day with no bar at the open), so neither sets the size.
-        if (!edges(date).some((e) => m === e || (start! < e && m > e))) inner.push(d);
-      }
-      continue;
-    }
+    if (date !== prevDate) {
+      days++;
+      // A day's only bar ending at the close is a daily row or a half day's bar, cut short by it.
+      if (regular && m < regularCloseMinute(date)) firsts.push((m - REGULAR_OPEN) * 60);
+    } else if (i < 2 || exchangeDate(bars[i - 2].time) !== date) multiDays++;
     if (i === 0) continue;
     const d = bars[i].time - bars[i - 1].time;
     if (dateOnly || !(d > 0)) continue;
@@ -244,9 +236,17 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): 
     }
     all.push(d);
     const pm = exchangeMinuteOfDay(bars[i - 1].time);
+    if (closeStamped) {
+      // A bar that ends at a session's edge may be cut short, and a gap across one may hide a short
+      // bar before it (a thin day with no bar at the open), so neither sets the size.
+      const edges = [REGULAR_OPEN, regularCloseMinute(date), AFTERHOURS_CLOSE];
+      if (date === prevDate && !edges.some((e) => pm < e && m >= e)) inner.push(d);
+      continue;
+    }
     const spansPart = exchangeDate(bars[i - 1].time) === date && [REGULAR_OPEN, regularCloseMinute(date)].some((edge) => pm < edge && m >= edge);
     if (!spansPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
+  if (closeStamped && !inner.length && multiDays * 2 >= days) for (const d of firsts) (d >= 6 * 3600 ? long : inner).push(d);
   // Bars 6 hours or more apart within most days (6, 8 or 12-hour bars) are not daily bars: read as
   // daily, each day would keep only its last bar. A daily file with the odd second row on a day is.
   // Close-stamped, such bars can come with a short one at the close (6-hour bars 09:30-15:30, 15:30-16:00).

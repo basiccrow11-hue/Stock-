@@ -126,11 +126,14 @@ export function OrderTicket() {
 
   const sizeByRisk = () => {
     const stopPx = parse(sl);
-    const r = Number(riskPct);
-    if (!entry || !stopPx || !account || !(r > 0)) {
+    const asked = Number(riskPct);
+    if (!entry || !stopPx || !account || !(asked > 0)) {
       toast('warning', 'Set a stop loss (and entry price for non-market orders) first. Position size = risk ÷ stop distance.');
       return;
     }
+    // Strict Mode would reject more risk than its own limit, so the size never asks for more.
+    const strictLimits = exec.strictRisk.enabled ? exec.strictRisk : null;
+    const r = strictLimits ? Math.min(asked, strictLimits.maxRiskPctPerTrade) : asked;
     // The largest size whose risk at its own estimated fill (a bigger order pays more market impact),
     // with commissions in and out, is within the %: what the ticket shows and Strict Mode checks.
     const budget = (account.equity * r) / 100;
@@ -150,10 +153,25 @@ export function OrderTicket() {
       toast('warning', 'Stop is on the wrong side or too close to the entry.');
       return;
     }
-    // A tight stop can imply more shares than the account can hold; cap at buying power (with a small buffer for spread and slippage).
-    const affordable = Math.floor((account.buyingPower * 0.995) / entry);
-    if (affordable < n) toast('info', `${r}% risk would need ${n} shares, but buying power covers ${affordable}. Sized to ${affordable}; actual risk is lower.`, 6000);
-    setQuantity(String(Math.max(0, Math.min(n, affordable))));
+    // A tight stop can imply more shares than the account can hold, or than Strict Mode lets one
+    // position be: cap at buying power (with a small buffer for spread and slippage) and at Strict
+    // Mode's position limit, checked at the size's own estimated fill as Strict Mode checks it.
+    const caps: { n: number; why: string }[] = [{ n: Math.floor((account.buyingPower * 0.995) / entry), why: 'buying power covers' }];
+    if (strictLimits) {
+      const maxValue = (account.equity * strictLimits.maxPositionPctOfEquity) / 100;
+      let m = Math.floor(maxValue / (estimate(n) ?? entry));
+      for (let k = 0; k < 100 && m > 0; k++) {
+        const e = estimate(m) ?? entry;
+        if (m * e <= maxValue + 1e-9) break;
+        m = Math.min(m - 1, Math.floor(maxValue / e));
+      }
+      caps.push({ n: m, why: `Strict Mode's ${strictLimits.maxPositionPctOfEquity}% position limit allows` });
+    }
+    const cap = caps.reduce((a, c) => (c.n < a.n ? c : a));
+    const note = r < asked ? `Sized at Strict Mode's ${r}% risk limit. ` : '';
+    if (cap.n < n) toast('info', `${note}${r}% risk would need ${n} shares, but ${cap.why} ${cap.n}. Sized to ${cap.n}; actual risk is lower.`, 6000);
+    else if (note) toast('info', note.trim(), 6000);
+    setQuantity(String(Math.max(0, Math.min(n, cap.n))));
   };
 
   const targetFromR = (mult: number) => {
@@ -358,7 +376,11 @@ export function OrderTicket() {
           {w}
         </div>
       ))}
-      {strict && opening && <div className="alert info">Strict risk controls are ON: max {exec.strictRisk.maxRiskPctPerTrade}% risk per trade{exec.strictRisk.requireStopLoss ? ', stop required' : ''}.</div>}
+      {strict && opening && (
+        <div className="alert info">
+          Strict risk controls are ON: max {exec.strictRisk.maxRiskPctPerTrade}% risk per trade, positions up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? ', stop required' : ''}.
+        </div>
+      )}
       <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || !!risk?.errors.length}>
         {label}
       </button>

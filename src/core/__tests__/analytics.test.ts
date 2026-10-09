@@ -365,10 +365,19 @@ describe('learning review', () => {
       });
       expect(rest.review.exitReason).toBe('stop_loss');
       expect(rest.find('Your stop fired, and the rest filled after price came back')).toBe(
-        "Your stop at 98.00 fired, but the volume cap (Data & Settings) let only 200 of its 1000 shares sell on the bar it fired, at 98.00. A stop that has fired is a market order, so the rest sold over the next bars as price came back, for an average of 100.80: +$800.00 on the trade after costs. That went your way this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.",
+        "Your stop at 98.00 fired, but the volume cap (Data & Settings) let only 200 of its 1000 shares sell on the bar it fired, at 98.00. A stop that has fired is a market order, so the rest sold over the next bars as price came back, for an average of 100.80. That helped this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.",
       );
       expect(rest.find('Your moved stop closed the trade')).toBeUndefined();
-      expect(rest.find('Stop did its job')).toBeUndefined();
+
+      // A losing stop-out whose rest filled a little better still gets the verdict on what price did next.
+      const lossRest = thin((next) => {
+        next(100, 100.2, 97.8, 98.5, 3200); // the stop takes 800 at 98
+        next(98.5, 101, 98.4, 100.9, 100_000); // and the last 200 at this bar's open, 98.50
+        for (let i = 0; i < 25; i++) next(100.9, 101.1, 100.8, 101, 100_000);
+      });
+      expect(lossRest.review.outcome).toBe('loss');
+      expect(lossRest.find('Your stop fired, and the rest filled after price came back')).toContain('for an average of 98.10. That helped this time');
+      expect(lossRest.find('Stopped out, then price went your way')).toContain('price moved 3.00 (1.5R)');
 
       const half = thin((next) => {
         next(100, 102.5, 100.7, 101.2, 2000); // the target takes 500 at 102
@@ -639,6 +648,28 @@ describe('learning review', () => {
     });
   });
 
+  it('calls an add’s own bracket stop that, not a stop the user moved', () => {
+    const t0 = et('2025-01-15', '09:30');
+    const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const bars = [bar(t0, 100, 100, 100, 100)];
+    const next = (o: number, h: number, l: number, c: number) => {
+      bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+      b.onBar('T', bars[bars.length - 1]);
+    };
+    b.onBar('T', bars[0]);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 500, stopLoss: 98 });
+    next(100, 100, 99, 99);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 500, stopLoss: 97 }); // the add brings its own stop
+    next(99, 99, 96.5, 96.6); // both stops fire; neither was ever modified
+    const st = b.state;
+    const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    const titles = review.findings.map((f) => f.title);
+    expect(titles).not.toContain('You widened your stop');
+    expect(review.findings.find((f) => f.title === "Your add's stop was wider")?.detail).toBe(
+      "The stop that came with your add, at 97.00, was further from your entry than your first stop at 98.00, so this exit was -1.67R per share instead of the planned -1.00R. An add with a wider stop takes the trade's risk past what you planned for it.",
+    );
+  });
+
   it('treats one entry order filled in parts by the volume cap as one entry, not as adds past the stop', () => {
     const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
     const t0 = et('2025-01-15', '10:00');
@@ -737,6 +768,32 @@ describe('learning review', () => {
     const earlier = [bar(et('2025-01-15', '09:30'), 100, 104.5, 95, 103), bar(et('2025-01-15', '09:30'), 50, 50.5, 49, 49.2)] as const;
     for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
       expect(run(order, ...earlier), order.join()).toEqual({ stopFirst: true, rules: [[false, '1.04%'], [false, 'Down 3.50% on the day at entry']] });
+    }
+  });
+
+  it('counts another symbol’s stop that gapped through at the open an entry filled at, whichever symbol is listed first', () => {
+    const run = (order: string[]) => {
+      const flat = (n: number, p: number) => Array.from({ length: n }, () => [p, p + 0.05, p - 0.05, p] as [number, number, number, number]);
+      const data: Record<string, Bar[]> = {
+        // AAA is held overnight with a stop at 97; the 15th opens at 95, through it.
+        AAA: [...minuteBars('2025-01-14', '15:58', flat(2, 100)), ...minuteBars('2025-01-15', '09:30', flat(30, 95))],
+        BBB: [...minuteBars('2025-01-14', '15:58', flat(2, 50)), ...minuteBars('2025-01-15', '09:30', flat(30, 50))],
+      };
+      const engines = order.map((x) => new ReplayEngine({ symbol: x, start: et('2025-01-14', '16:00'), end: et('2025-01-15', '10:00'), baseTimeframe: '1m' }, data[x]));
+      const s = new ReplaySession(engines, { symbol: order[0], date: '2025-01-14', startTime: '16:00', endDate: '2025-01-15', endTime: '10:00', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'g', 'HISTORICAL');
+      s.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 1000, stopLoss: 97, takeProfit: 110, tif: 'gtc' });
+      s.jumpTo(et('2025-01-15', '09:00'));
+      // BBB sized to 1% of the $100,000 the account shows before the open, filled at the 09:30 open.
+      s.submit({ symbol: 'BBB', action: 'buy', type: 'market', quantity: 2000, stopLoss: 49.5, takeProfit: 52, tif: 'day' });
+      s.step();
+      const st = s.broker.state;
+      const a = st.roundTrips.find((t) => t.symbol === 'AAA')!;
+      const b = st.roundTrips.find((t) => t.symbol === 'BBB')!;
+      const rev = reviewTrade({ trip: b, fills: st.fills, orders: st.orders, revealedBars: s.engineFor('BBB')!.visibleBaseBars(), timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return { same: a.exitTime === b.entryTime, equity: rev.equityAtEntry, rules: rev.rules.filter((r) => /^Risk|^Stop trading/.test(r.rule)).map((r) => [r.passed, r.detail]) };
+    };
+    for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+      expect(run(order), order.join()).toEqual({ same: true, equity: 95_000, rules: [[false, '1.05%'], [false, 'Down 5.00% on the day at entry']] });
     }
   });
 

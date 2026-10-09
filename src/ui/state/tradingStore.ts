@@ -824,9 +824,10 @@ export function closeReview(): void {
   useTrading.setState({ reviewId: queue[0] ?? null, reviewQueue: queue.slice(1) });
 }
 
-/** Where an order would be expected to fill if placed now, with its costs (SimBroker.estimateFill). */
+/** Where an order would be expected to fill if placed now, with its costs (SimBroker.estimateFill), at the time submit would place it. */
 export function estimateFill(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number | null {
-  return broker()?.estimateFill(req) ?? null;
+  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  return broker()?.estimateFill(req, now) ?? null;
 }
 
 export function lastPrice(symbol: string): number | null {
