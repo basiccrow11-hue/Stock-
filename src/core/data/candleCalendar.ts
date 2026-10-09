@@ -140,8 +140,8 @@ export function candleCalendar(candles: readonly Bar[], timeframe: Timeframe): C
 }
 
 /**
- * The candles of each day, from the data's last full day (the newest day may still be forming):
- * its own candles set the open and where they fall, so bars a vendor placed on the clock hour (or a
+ * The candles of each day, from the data's last full day (the newest day may still be forming, but
+ * its candles before that day's first one count too): its own candles set the open and where they fall, so bars a vendor placed on the clock hour (or a
  * 09:30-10:00 first hourly bar) keep their places; gaps wider than a candle are filled at the
  * timeframe's step, and the steps run on past its last candle so a normal day can follow an early
  * close. A day ends with the candle holding the session's final minute (after-hours when the data
@@ -168,6 +168,9 @@ function sessionCandles(candles: readonly Bar[], timeframe: Timeframe): DayCandl
       let f = j;
       while (f > 0 && exchangeDate(candles[f - 1].time) === refDay) f--;
       mins = minutesOn(f, refDay);
+      // The newest day's candles before the reference day's first one open the day earlier (a file
+      // whose first day starts mid-session, a thinner pre-market yesterday).
+      mins = [...minutesOn(j + 1, newest).filter((m) => m < mins[0]), ...mins];
     }
   }
   const ref = refDay ?? (n ? exchangeDate(candles[0].time) : NORMAL_DAY);

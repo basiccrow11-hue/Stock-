@@ -166,5 +166,18 @@ describe('candle calendar past the data', () => {
     const fromHalf = candleCalendar(at_(['2024-11-29', '2024-12-02'], half).slice(0, half.length + 1), '1h');
     walks(fromHalf, at('2024-12-02', '04:00'), yf.slice(1).map((t) => at('2024-12-02', t)));
   });
+
+  it("counts from today's own candles when they start before the reference day's", () => {
+    // A file whose first day starts at 13:00, replayed on its second day at 10:00.
+    const partial = candleCalendar([...day('2024-03-12', '13:00', '15:59', 1), ...day('2024-03-13', '09:30', '10:00', 1)], '1m');
+    walks(partial, at('2024-03-13', '10:00'), [at('2024-03-13', '10:01'), at('2024-03-13', '10:02')]);
+    expect(partial.after(at('2024-03-13', '10:00'), 30)).toBe(at('2024-03-13', '10:30'));
+    // And the next day opens at 09:30, not where the file's first day began.
+    expect(partial.next(at('2024-03-13', '15:59'))).toBe(at('2024-03-14', '09:30'));
+    // Yesterday's pre-market began at 06:30, today's at 05:00.
+    const thin = candleCalendar([...day('2024-03-12', '06:30', '19:59', 1), ...day('2024-03-13', '05:00', '05:30', 1)], '1m');
+    expect(thin.after(at('2024-03-13', '05:30'), 1)).toBe(at('2024-03-13', '05:31'));
+    expect(thin.slots(at('2024-03-13', '05:30'), at('2024-03-13', '06:30'))).toBe(60);
+  });
 });
 

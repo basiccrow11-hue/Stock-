@@ -22,6 +22,7 @@ export interface ChartGeometry {
   chart: IChartApi;
   series: ISeriesApi<SeriesType>;
   candles: () => Bar[];
+  /** The candles' own size: the chart's timeframe, or the data's bar size when that is coarser. */
   timeframe: Timeframe;
   paneHeight: () => number;
   paneWidth: () => number;

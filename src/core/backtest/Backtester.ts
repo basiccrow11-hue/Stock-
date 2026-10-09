@@ -20,7 +20,7 @@ import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
 import { roundToTick } from '../util/math';
 import { exchangeDate, exchangeTimeToUnix, marketSession, regularCloseMinute } from '../time';
-import { barEndTime } from '../replay/ReplayEngine';
+import { barEnds } from '../replay/ReplayEngine';
 import { computeSeries, evalCondition, seriesKey, type StrategyDefinition } from './strategy';
 
 export interface BacktestParams {
@@ -64,7 +64,11 @@ const EXIT_ORDER: OrderAction[] = ['sell', 'cover', 'buy', 'short'];
 export function runBacktest(p: BacktestParams): BacktestResult {
   const { strategy, symbol } = p;
   const warnings: string[] = [];
-  const base = strategy.regularHoursOnly ? p.bars.filter((b) => marketSession(b.time) === 'regular') : [...p.bars];
+  const keep = (b: Bar) => !strategy.regularHoursOnly || marketSession(b.time) === 'regular';
+  const base = p.bars.filter(keep);
+  // When each bar ends, from the whole tape: a short bar ends as the next one (kept or not) opens.
+  const allEnds = barEnds(p.bars, p.baseTimeframe);
+  const ends = allEnds.filter((_, i) => keep(p.bars[i]));
   if (base.length === 0) throw new Error('No bars in the selected range.');
   if (strategy.rules.length === 0) throw new Error('Add at least one rule.');
   if (strategy.exitAtSessionEnd && p.baseTimeframe === '1D') warnings.push('Flatten before the close does not apply to daily bars: each bar is a whole session, so positions are held overnight.');
@@ -223,10 +227,10 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     if (marketSession(b.time) === 'regular') {
       const date = exchangeDate(b.time);
       regularDate = date;
-      if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && barEndTime(b, p.baseTimeframe) >= exchangeTimeToUnix(date, regularCloseMinute(date))) flatten(date);
+      if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && ends[j] >= exchangeTimeToUnix(date, regularCloseMinute(date))) flatten(date);
     }
 
-    broker.onBar(symbol, b, barEndTime(b, p.baseTimeframe) - b.time);
+    broker.onBar(symbol, b, ends[j] - b.time);
     if (owedDate && broker.position(symbol).quantity === 0) owedDate = '';
 
     if (b.time >= p.tradeFrom) {

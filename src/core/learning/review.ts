@@ -12,6 +12,7 @@ import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, equityBeforeEntry, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
 import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, REGULAR_OPEN } from '../time';
 import { formatTick } from '../util/math';
+import { pctAgainst } from '../risk/risk';
 
 /** Moved to analytics, where the broker's Strict Mode measures a trade's risk against it too. */
 export { equityBeforeEntry };
@@ -69,6 +70,8 @@ export interface TradeReview {
   /** The planned risk to the initial stop (the R unit). */
   riskDollars: number | null;
   riskPctOfEquity: number | null;
+  /** The risk rule's limit (%) when the review was made, so a percentage over it reads as over. Absent on older reviews. */
+  riskLimitPct?: number;
   /** Adds past the initial stop moved the average entry past it: the trade risked more than planned. */
   addedPastStop?: boolean;
   equityAtEntry: number;
@@ -346,7 +349,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       title: tight ? 'Stop was tight relative to normal movement' : 'Stop distance',
       detail: `Your stop was ${dist(riskPerShare)} away${
         basis?.from === 'planned' ? (stopOrder?.type === 'market' ? ' from the price when you placed your order' : ' from your order’s price') : basis?.from === 'first' ? ' from your first entry' : ''
-      }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${dist(atrAtEntry!)}).${
+      }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry! < 0.01 ? atrAtEntry!.toFixed(4) : dist(atrAtEntry!)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
     });
@@ -360,8 +363,12 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const inR = (px: number) => ((px - trip.avgEntry) * dir) / riskPerShare;
     const fmtR = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`;
     // How far past the stop it filled: more than a quarter of the planned risk is not slippage noise.
+    // The half spread every fill pays is left out: on a sub-dollar stock it alone is many ticks.
     const past = (stopAt - exitPx) * dir;
-    const filledPast = past >= 2 * tick - 1e-9 && past > 0.25 * riskPerShare;
+    const mainFills = input.fills.filter((f) => f.orderId === main!.order.id && trip.fills.includes(f.id));
+    const halfSpread = mainFills.reduce((a, f) => a + f.spreadCost, 0) / Math.max(1, mainFills.reduce((a, f) => a + f.quantity, 0));
+    const beyond = past - halfSpread;
+    const filledPast = beyond >= 2 * tick - 1e-9 && beyond > 0.25 * riskPerShare;
     // The closing stop is judged by its own history: the stop an add brought with it (its own bracket)
     // starts at that add's stop loss, any other at the first stop; a price other than its start is the
     // user's move.
@@ -383,7 +390,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       findings.push({
         tone: 'neutral',
         title: 'Your stop fired, and the rest filled after price came back',
-        detail: `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${first.price.toFixed(2)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. That helped this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`,
+        detail: `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${formatTick(first.price)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. That helped this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`,
       });
     }
     if (pastStop) {
@@ -516,12 +523,12 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: 'bad',
       title: 'Added past your stop',
-      detail: `You added at prices past your original stop at ${formatTick(trip.initialStop!)}, which moved your average entry to ${formatTick(trip.avgEntry)}. Your plan risked ${dist(riskPerShare!)} per share from your first entry at ${bracketEntry.toFixed(2)} (${money(riskDollars!)} at this size). Shares bought past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
+      detail: `You added at prices past your original stop at ${formatTick(trip.initialStop!)}, which moved your average entry to ${formatTick(trip.avgEntry)}. Your plan risked ${dist(riskPerShare!)} per share from your first entry at ${formatTick(bracketEntry)} (${money(riskDollars!)} at this size). Shares bought past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
     });
   } else if (riskPctOfEquity !== null) {
     findings.push({
-      tone: riskPctOfEquity > rules.maxRiskPctPerTrade ? 'bad' : 'good',
-      title: `Risked ${riskPctOfEquity.toFixed(2)}% of the account`,
+      tone: riskPctOfEquity > rules.maxRiskPctPerTrade + 1e-9 ? 'bad' : 'good',
+      title: `Risked ${pctAgainst(riskPctOfEquity, rules.maxRiskPctPerTrade)}% of the account`,
       detail: `${money(riskDollars!)} at risk to your stop with ${money(equityAtEntry)} equity. Your rule is ${rules.maxRiskPctPerTrade}% or less.`,
     });
   }
@@ -537,6 +544,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     capturePct,
     riskDollars,
     riskPctOfEquity,
+    riskLimitPct: rules.maxRiskPctPerTrade,
     ...(addedPastStop ? { addedPastStop } : {}),
     equityAtEntry,
     atrAtEntry,
@@ -579,7 +587,7 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
         ? hasStop
           ? 'Not measurable: the stop sat past your average entry'
           : 'Risk undefined without a stop'
-        : `${riskPctOfEquity.toFixed(2)}%`,
+        : `${pctAgainst(riskPctOfEquity, rules.maxRiskPctPerTrade)}%`,
   });
   if (rules.minRewardRisk > 0) {
     out.push({

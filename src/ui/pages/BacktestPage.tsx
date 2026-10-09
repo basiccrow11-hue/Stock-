@@ -256,6 +256,8 @@ export function BacktestPage() {
   const [spread, setSpread] = useState<number | ''>(settings.execution.spread.mode === 'bps' ? settings.execution.spread.value : 2);
   const [running, setRunning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** What a screen reader is told when a run finishes. */
+  const [announce, setAnnounce] = useState('');
   const [result, setResult] = useState<{ r: BacktestResult; tf: Timeframe; label: string; source: DataSourceKind } | null>(null);
   const [tab, setTab] = useState<'trades' | 'signals'>('trades');
 
@@ -278,6 +280,7 @@ export function BacktestPage() {
   const run = async () => {
     if (validation) return;
     setError(null);
+    setAnnounce('');
     setRunning('Loading bars…');
     try {
       // Warm-up history so indicators are valid from the first tradable candle.
@@ -309,8 +312,10 @@ export function BacktestPage() {
         source: provider.source,
       });
       setResult({ r, tf: timeframe, label: `${strategy.name} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, source: provider.source });
+      setAnnounce(`Backtest done: ${r.stats.totalTrades} ${r.stats.totalTrades === 1 ? 'trade' : 'trades'}, strategy return ${r.stats.totalReturnPct.toFixed(2)}%.`);
     } catch (e) {
       if ((e as Error).message !== 'Cancelled') setError((e as Error).message);
+      else setAnnounce('Backtest cancelled.');
     } finally {
       setRunning(null);
     }
@@ -466,20 +471,19 @@ export function BacktestPage() {
             {providerId === 'demo' && <span className="small muted">Synthetic data: results show how the rules behave, not how they would have done on the real ticker.</span>}
             <div className="spacer" />
             {validation && <span className="small warn">{validation}</span>}
-            {running ? (
-              <>
-                <span className="small muted">{running}</span>
-                <button className="btn" onClick={cancelBacktests}>
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button className="btn primary" disabled={!!validation} onClick={() => void run()}>
-                Run backtest
-              </button>
-            )}
+            {running && <span className="small muted">{running}</span>}
+            {/* One button that turns into Cancel while running, so keyboard focus stays on it. */}
+            <button className={running ? 'btn' : 'btn primary'} disabled={!running && !!validation} onClick={running ? cancelBacktests : () => void run()}>
+              {running ? 'Cancel' : 'Run backtest'}
+            </button>
           </div>
           {error && <div className="alert error">{error}</div>}
+          <div className="sr-only" role="alert">
+            {error ?? ''}
+          </div>
+          <div className="sr-only" role="status">
+            {running ?? announce}
+          </div>
         </div>
 
         {!result ? (

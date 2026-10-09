@@ -853,6 +853,14 @@ export function exposure(symbol: string, action: 'buy' | 'short'): Exposure | nu
   return broker()?.exposure(symbol, action) ?? null;
 }
 
+/**
+ * The risk of the open trade in `symbol` once `quantity` more shares fill at `price`, as the trade
+ * review and the challenges measure it, from its first stop (SimBroker.plannedRisk).
+ */
+export function plannedRisk(symbol: string, action: 'buy' | 'short', quantity: number, price: number): { pct: number; stop: number } | null {
+  return broker()?.plannedRisk(symbol, action, { quantity, price }) ?? null;
+}
+
 /** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */
 export function affordableQuantity(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number {
   const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;

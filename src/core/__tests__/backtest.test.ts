@@ -319,5 +319,25 @@ describe("signals on data at its own bar size", () => {
     const yf = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00'];
     expect(run(yf, '15:30')).toEqual([et('2024-03-06', '15:30')]);
   });
+
+  it("fills a signal on a 09:30-10:00 first bar at the 10:00 bar's open", () => {
+    const times = ['09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'];
+    // Each bar of the last day opens a dollar higher, so the fill names the bar it came from.
+    const bars = ['2024-03-04', '2024-03-05', '2024-03-06'].flatMap((d, i) =>
+      times.map((t, k) => {
+        const px = i < 2 ? 99 : 101 + k;
+        return bar(et(d, t), px, px + 0.2, px - 0.2, px, 100_000);
+      }),
+    );
+    const strategy = {
+      name: 'cross',
+      rules: [{ id: 'r', conditions: [{ left: { kind: 'close' }, op: 'crosses_above', right: { kind: 'value', value: 100 } }], logic: 'all', action: 'buy' }],
+      sizing: { mode: 'shares', shares: 10 },
+      exitAtSessionEnd: false,
+      regularHoursOnly: false,
+    } as StrategyDefinition;
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1h', timeframe: '1h', tradeFrom: bars[0].time, config: ZERO_COST_CONFIG }));
+    expect(r.fills.map((f) => [f.time, f.price])).toEqual([[et('2024-03-06', '10:00'), 102]]);
+  });
 });
 

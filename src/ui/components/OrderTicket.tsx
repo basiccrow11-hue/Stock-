@@ -3,8 +3,8 @@ import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
 import { assessRisk } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
-import { roundToTick } from '../../core/util/math';
-import { affordableQuantity, closePosition, estimateFill, exposure, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
+import { formatTick, roundToTick } from '../../core/util/math';
+import { affordableQuantity, closePosition, estimateFill, exposure, plannedRisk, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
@@ -204,6 +204,22 @@ export function OrderTicket() {
         why: joined ? `${limit} leaves room for ${m} beside ${held}` : `${limit} allows ${m}`,
         none: joined ? `${held[0].toUpperCase()}${held.slice(1)} are ${show(joined.valuePct)}% of equity, so ${limit} leaves no room for more.` : `${limit} allows less than one share.`,
       });
+    }
+    if (joined) {
+      // An add is also measured as the review and the challenges measure the trade: from its first
+      // stop, so a first stop moved up does not make room for more than they allow.
+      const planned = (m: number) => plannedRisk(symbol, action === 'short' ? 'short' : 'buy', m, estimate(m) ?? entry);
+      const first = planned(1);
+      if (first) {
+        const fits = (m: number) => (planned(m)?.pct ?? 0) <= limitPct + 1e-9;
+        const m = fits(1) ? largest(n, fits) : 0;
+        const from = `measured from the trade's first stop at ${formatTick(first.stop)}, as the review and the challenges measure it`;
+        caps.push({
+          n: m,
+          why: `${from}, Strict Mode's ${limitPct}% limit leaves room for ${m}`,
+          none: `${from[0].toUpperCase()}${from.slice(1)}, even one more share would take this trade past Strict Mode's ${limitPct}% limit.`,
+        });
+      }
     }
     const cap = caps.reduce((a, c) => (c.n < a.n ? c : a));
     if (cap.n <= 0) {

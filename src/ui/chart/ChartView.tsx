@@ -27,7 +27,7 @@ import {
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
 import { roundToTick } from '../../core/util/math';
-import { aggregateBars, candleFor, mergeBars } from '../../core/data/aggregate';
+import { aggregateBars, candleFor, mergeBars, ownCandles } from '../../core/data/aggregate';
 import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
 import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
@@ -689,7 +689,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       chart,
       series,
       candles: () => candlesRef.current,
-      timeframe,
+      // The candles' own size: at the data's bar size or finer, each bar of the data is a candle.
+      timeframe: ownCandles(timeframe, baseTfRef.current) ? baseTfRef.current : timeframe,
       paneHeight: () => chart.panes()[0]?.getHeight() ?? 0,
       paneWidth: () => chart.timeScale().width(),
       container,

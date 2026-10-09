@@ -29,7 +29,7 @@ import type { ExecutionConfig } from './config';
 import { DEFAULT_EXECUTION_CONFIG, commissionFor, halfSpread } from './config';
 import { assessRisk, over, strictRiskViolation, type Exposure } from '../risk/risk';
 import { formatTick, roundToTick } from '../util/math';
-import { equityBeforeEntry } from '../analytics/stats';
+import { equityBeforeEntry, riskBasis } from '../analytics/stats';
 import {
   exchangeDate,
   exchangeMinuteOfDay,
@@ -347,20 +347,30 @@ export class SimBroker {
   }
 
   /**
-   * The stop loss and target a working entry's unfilled shares will get: once it has started filling,
-   * those of its live bracket (which take its later shares, wherever they have been moved; `stopAt`
-   * prices one stop as if moved there), else its own.
+   * The stop loss and target a working entry's unfilled shares will get once it fills at `px` (by
+   * default its own price): once it has started filling, those of its live bracket, which take its
+   * later shares wherever they have been moved (`stopAt` prices one stop as if moved there), else its
+   * own. A bracket stop that has fired, or sits at or past `px` (moved to breakeven), closes the held
+   * shares before price can reach the entry again, and the later shares then get the entry's own.
    */
-  private bracketLevels(o: Order, stopAt?: { id: string; price: number }): { stopLoss?: number; takeProfit?: number } {
+  private bracketLevels(o: Order, stopAt?: { id: string; price: number }, px = this.entryPrice(o)): { stopLoss?: number; takeProfit?: number } {
     let { stopLoss, takeProfit } = o;
     if (o.filledQty > 0) {
+      const dir = o.action === 'buy' ? 1 : -1;
       for (const c of this.workingOrders(o.symbol)) {
         if (c.parentId !== o.id) continue;
-        if (c.type === 'stop' || c.type === 'stop_limit') stopLoss = stopAt?.id === c.id ? stopAt.price : c.stopPrice;
-        else if (c.type === 'limit') takeProfit = c.limitPrice;
+        if (c.type === 'stop' || c.type === 'stop_limit') {
+          const stop = stopAt?.id === c.id ? stopAt.price : c.stopPrice!;
+          if (!c.triggered && (px - stop) * dir > 0) stopLoss = stop;
+        } else if (c.type === 'limit' && (c.limitPrice! - px) * dir > 0) takeProfit = c.limitPrice;
       }
     }
     return { stopLoss, takeProfit };
+  }
+
+  /** The price a working entry's unfilled shares are counted at: its limit, else its stop, else the last price. */
+  private entryPrice(o: Pick<Order, 'symbol' | 'limitPrice' | 'stopPrice'>): number {
+    return o.limitPrice ?? o.stopPrice ?? this.s.lastPrice[o.symbol] ?? 0;
   }
 
   /**
@@ -407,10 +417,10 @@ export class SimBroker {
     for (const o of this.workingOrders(symbol)) {
       if (o.action !== action || o.id === excludeId) continue;
       const n = o.quantity - o.filledQty;
-      const px = o.limitPrice ?? o.stopPrice ?? last;
+      const px = this.entryPrice(o);
       shares += n;
       value += n * px;
-      const { stopLoss } = this.bracketLevels(o, stopAt);
+      const { stopLoss } = this.bracketLevels(o, stopAt, px);
       if (stopLoss !== undefined) risk += n * Math.max(0, (px - stopLoss) * dir);
       else unprotected += n;
     }
@@ -427,15 +437,43 @@ export class SimBroker {
   }
 
   /**
+   * The open trade's risk in `symbol` on `action`'s side once `add` and its other working entries (all
+   * but `excludeId`) have filled, measured as the trade review, the risk rule and the challenges
+   * measure it: from the trade's first stop, over its largest size, against the equity it started
+   * with. Null with no open trade there or no first stop to measure from.
+   */
+  plannedRisk(symbol: string, action: 'buy' | 'short', add: { quantity: number; price: number }, excludeId?: string): { pct: number; stop: number } | null {
+    symbol = symbol.toUpperCase();
+    const dir = action === 'buy' ? 1 : -1;
+    const held = this.position(symbol).quantity * dir;
+    const trip = held > 0 ? this.s.roundTrips.find((t) => t.symbol === symbol && !t.closed) : undefined;
+    if (!trip || trip.initialStop === undefined) return null;
+    let n = add.quantity;
+    let value = add.quantity * add.price;
+    for (const o of this.workingOrders(symbol)) {
+      if (o.action !== action || o.id === excludeId) continue;
+      n += o.quantity - o.filledQty;
+      value += (o.quantity - o.filledQty) * this.entryPrice(o);
+    }
+    const entryQtyTotal = trip.entryQtyTotal + n;
+    const after = { ...trip, entryQtyTotal, avgEntry: (trip.avgEntry * trip.entryQtyTotal + value) / entryQtyTotal, maxQuantity: Math.max(trip.maxQuantity, held + n) };
+    const basis = riskBasis(after);
+    const equity = equityBeforeEntry(trip, this.s.fills, this.s.equityCurve, this.s.startingBalance);
+    return basis && equity > 0 ? { pct: ((basis.risk * after.maxQuantity) / equity) * 100, stop: trip.initialStop } : null;
+  }
+
+  /**
    * The checks an opening order must pass when it is placed or changed: its stop loss and target on the
    * right side of where it is expected to fill, Strict Mode's limits for the whole trade it joins, and
    * buying power. `own` is the working order being changed: it is left out of what the trade already
    * holds, and the buying power it holds back is available to it. `o.quantity` is its unfilled shares.
+   * `strictChecks` narrows Strict Mode to its position limit, or leaves it out.
    */
   private openingCheck(
     o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'stopLoss' | 'takeProfit' | 'extendedHours'> & { quantity: number },
     own?: Order,
-  ): { error?: string; strict?: boolean; warnings: string[]; quote: number } {
+    strictChecks: 'all' | 'position' | 'none' = 'all',
+  ): { error?: string; warnings: string[]; quote: number } {
     // Orders are checked against the price they would actually get: buys pay the ask, sells hit the bid.
     const expected = this.expectedEntry(o);
     const refPrice = expected.price;
@@ -450,9 +488,20 @@ export class SimBroker {
     const fillAt = this.estimateFill(o) ?? refPrice;
     const costed = fillAt === refPrice ? risk : assess(fillAt);
     const strict = this.cfg.strictRisk;
-    const existing = strict.enabled ? this.exposure(o.symbol, o.action === 'short' ? 'short' : 'buy', own?.id) : undefined;
-    const violation = strictRiskViolation(strict, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity, existing });
-    if (violation) return { ...fail(violation), strict: true };
+    if (strict.enabled && strictChecks !== 'none') {
+      const side = o.action === 'short' ? 'short' : 'buy';
+      const existing = this.exposure(o.symbol, side, own?.id);
+      const violation = strictRiskViolation(strict, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity, existing }, strictChecks);
+      if (violation) return fail(violation);
+      // An add is also judged as the review and the challenges will judge the trade: from its first
+      // stop, so a first stop moved up to breakeven does not make room for more than they allow.
+      const planned = strictChecks === 'all' ? this.plannedRisk(o.symbol, side, { quantity: o.quantity, price: fillAt }, own?.id) : null;
+      if (planned && planned.pct > strict.maxRiskPctPerTrade + 1e-9) {
+        return fail(
+          `Strict risk: measured from its first stop at ${formatTick(planned.stop)}, as the trade review and the challenges measure it, this trade risks ${over(planned.pct, strict.maxRiskPctPerTrade, 2)}% with the ${existing.shares} ${existing.symbol} shares you already hold or have working (limit ${strict.maxRiskPctPerTrade}%).`,
+        );
+      }
+    }
     // A limit may still fill anywhere up to its price.
     const needed = o.quantity * (o.type === 'limit' ? o.limitPrice! : refPrice);
     const avail = this.availableBuyingPower() + (own ? this.reservation(own) : 0);
@@ -464,12 +513,13 @@ export class SimBroker {
 
   submit(input: OrderRequest): SubmitResult {
     const warnings: string[] = [];
-    // Prices are normalised to the exchange tick so fills land on real price levels.
+    // Prices are normalised to the exchange tick so fills land on real price levels. A price the order
+    // type does not use (a limit price on a stop order) is dropped, so it cannot pass for its entry.
     const tick = (v: number | undefined) => (v === undefined || !Number.isFinite(v) || v <= 0 ? undefined : roundToTick(v));
     const req: OrderRequest = {
       ...input,
-      limitPrice: tick(input.limitPrice),
-      stopPrice: tick(input.stopPrice),
+      limitPrice: input.type === 'limit' || input.type === 'stop_limit' ? tick(input.limitPrice) : undefined,
+      stopPrice: input.type === 'stop' || input.type === 'stop_limit' ? tick(input.stopPrice) : undefined,
       stopLoss: tick(input.stopLoss),
       takeProfit: tick(input.takeProfit),
     };
@@ -609,11 +659,14 @@ export class SimBroker {
     if (isOpeningAction(o.action)) {
       if (!cutOnly) {
         // Its unfilled shares take the live bracket's stop and target once it has started filling.
-        const next = { ...o, ...this.bracketLevels(o), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
-        const { error, strict } = this.openingCheck(next, o);
-        // Strict Mode never refuses a change that takes risk off the order (a price nearer its stop)
-        // while the riskier order would stay working.
-        if (error && !(strict && this.noRiskier(o, next))) return { ok: false, error };
+        const px = this.entryPrice({ symbol: o.symbol, limitPrice, stopPrice });
+        const next = { ...o, ...this.bracketLevels(o, undefined, px), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
+        // Strict Mode never refuses a change that takes risk off the order (fewer shares, a price nearer
+        // its stop) while the riskier order would stay working; its position limit still holds a change
+        // that raises the order's value (a short entry moved up toward its stop).
+        const less = this.lessRisk(o, next);
+        const { error } = this.openingCheck(next, o, !less.risk ? 'all' : less.valueGrew ? 'position' : 'none');
+        if (error) return { ok: false, error };
       }
     } else if (stopPrice !== undefined && stopPrice !== o.stopPrice && this.cfg.strictRisk.enabled) {
       // Under Strict Mode an exit stop cannot be moved away to put more than the limit at risk.
@@ -636,14 +689,17 @@ export class SimBroker {
     return { ok: true };
   }
 
-  /** Whether `next` (unfilled shares, prices) puts no more value or risk to its stop on the line than `o`'s unfilled shares. */
-  private noRiskier(o: Order, next: Pick<Order, 'limitPrice' | 'stopPrice' | 'stopLoss'> & { quantity: number }): boolean {
+  /**
+   * Whether `next` (unfilled shares, prices) puts no more shares and no more risk to their stop on the
+   * line than `o`'s unfilled shares (risk: true), and whether it raises their value.
+   */
+  private lessRisk(o: Order, next: Pick<Order, 'symbol' | 'limitPrice' | 'stopPrice' | 'stopLoss'> & { quantity: number }): { risk: boolean; valueGrew: boolean } {
     const dir = o.action === 'buy' ? 1 : -1;
-    const last = this.s.lastPrice[o.symbol] ?? 0;
-    const was = { n: o.quantity - o.filledQty, px: o.limitPrice ?? o.stopPrice ?? last };
-    const now = { n: next.quantity, px: next.limitPrice ?? next.stopPrice ?? last };
-    const risk = (x: { n: number; px: number }) => (next.stopLoss === undefined ? x.n : x.n * Math.max(0, (x.px - next.stopLoss) * dir));
-    return now.n <= was.n && now.n * now.px <= was.n * was.px + 1e-9 && risk(now) <= risk(was) + 1e-9;
+    const was = { n: o.quantity - o.filledQty, px: this.entryPrice(o), stop: this.bracketLevels(o).stopLoss };
+    const now = { n: next.quantity, px: this.entryPrice(next), stop: next.stopLoss };
+    // Shares with no stop have no limit to their risk: fewer of them is still less.
+    const risk = (x: typeof was) => (x.stop === undefined ? Infinity : x.n * Math.max(0, (x.px - x.stop) * dir));
+    return { risk: now.n <= was.n && risk(now) <= risk(was) + 1e-9, valueGrew: now.n * now.px > was.n * was.px + 1e-9 };
   }
 
   /**

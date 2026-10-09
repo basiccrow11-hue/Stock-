@@ -6,6 +6,7 @@
 import type { EquityPoint, Fill, RoundTrip } from '../types';
 import { plannedRR, plannedRRGap, initialRiskPerShare, riskBasis } from '../analytics/stats';
 import { equityBeforeEntry, followedAllRules, checkRules, type TradingRules } from '../learning/review';
+import { over } from '../risk/risk';
 
 export interface ChallengeContext {
   trips: readonly RoundTrip[];
@@ -60,7 +61,7 @@ export const CHALLENGES: ChallengeDefinition[] = [
         const r = riskPct(t, ctx);
         if (r === null) return { status: 'failed', progress: 0, detail: `The risk of a trade on ${t.symbol} to its stop could not be measured.` };
         if (riskBasis(t)?.from === 'first') return { status: 'failed', progress: 0, detail: `A trade on ${t.symbol} added past its stop, so it risked more than planned.` };
-        if (r > 1 + 1e-6) return { status: 'failed', progress: 0, detail: `A trade risked ${r.toFixed(2)}% (limit 1%).` };
+        if (r > 1 + 1e-6) return { status: 'failed', progress: 0, detail: `A trade risked ${over(r, 1, 2)}% (limit 1%).` };
       }
       const target = ctx.startingBalance * 1.2;
       const progress = Math.max(0, Math.min(1, (ctx.equity - ctx.startingBalance) / (target - ctx.startingBalance)));

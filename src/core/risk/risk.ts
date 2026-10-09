@@ -145,20 +145,29 @@ export function over(v: number, limit: number, digits: number): string {
 /**
  * Returns a reason the order must be blocked under strict risk controls, or null. With `existing`, the
  * risk and position limits apply to the whole trade the order would join, not to the order alone, so
- * adds and several working entries cannot build past them.
+ * adds and several working entries cannot build past them. `checks: 'position'` applies the position
+ * limit alone.
  */
 export function strictRiskViolation(
   cfg: StrictRiskConfig,
   assessment: RiskAssessment,
   ctx: { dayPnl: number; dayStartEquity: number; existing?: Exposure },
+  checks: 'all' | 'position' = 'all',
 ): string | null {
   if (!cfg.enabled || !assessment.opening) return null;
+  const ex = ctx.existing && ctx.existing.shares > 0 ? ctx.existing : undefined;
+  const already = ex ? ` with the ${ex.shares} ${ex.symbol} shares you already hold or have working` : '';
+  const position = () => {
+    const positionPct = assessment.positionPctOfEquity + (ex?.valuePct ?? 0);
+    return positionPct > cfg.maxPositionPctOfEquity + 1e-9
+      ? `Strict risk: position is ${over(positionPct, cfg.maxPositionPctOfEquity, 0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`
+      : null;
+  };
+  if (checks === 'position') return position();
   if (ctx.dayStartEquity > 0 && (-ctx.dayPnl / ctx.dayStartEquity) * 100 >= cfg.maxDailyLossPct) {
     return `Strict risk: daily loss limit of ${cfg.maxDailyLossPct}% reached. New positions are blocked for today.`;
   }
   if (cfg.requireStopLoss && assessment.dollarRisk === null) return 'Strict risk: a valid stop loss is required.';
-  const ex = ctx.existing && ctx.existing.shares > 0 ? ctx.existing : undefined;
-  const already = ex ? ` with the ${ex.shares} ${ex.symbol} shares you already hold or have working` : '';
   if (ex && cfg.requireStopLoss && ex.unprotected > 0) {
     return `Strict risk: ${ex.unprotected} of the ${ex.shares} ${ex.symbol} shares you already hold or have working have no stop, so this trade's risk has no limit. Give them a stop first.`;
   }
@@ -168,9 +177,10 @@ export function strictRiskViolation(
   if (pctRisk !== null && pctRisk > cfg.maxRiskPctPerTrade + 1e-9) {
     return `Strict risk: this trade risks ${over(pctRisk, cfg.maxRiskPctPerTrade, 2)}%${already} (limit ${cfg.maxRiskPctPerTrade}%).`;
   }
-  const positionPct = assessment.positionPctOfEquity + (ex?.valuePct ?? 0);
-  if (positionPct > cfg.maxPositionPctOfEquity + 1e-9) {
-    return `Strict risk: position is ${over(positionPct, cfg.maxPositionPctOfEquity, 0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`;
-  }
-  return null;
+  return position();
+}
+
+/** `v` as a percentage with `digits` decimals; past `limit`, with enough decimals to show it is over. */
+export function pctAgainst(v: number, limit: number | undefined, digits = 2): string {
+  return limit !== undefined && v > limit + 1e-9 ? over(v, limit, digits) : v.toFixed(digits);
 }

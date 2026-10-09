@@ -102,7 +102,11 @@ describe('ReplayEngine: no look-ahead', () => {
     const e = new ReplayEngine({ symbol: 'TEST', start: et(D, '09:30'), end: et(D, '16:00'), baseTimeframe: '1h' }, hourly);
     // The 09:30-10:00 bar and the 10:00 bar are two candles, not one 09:30-anchored hour.
     expect(e.stepCandle('1h').map((b) => b.time)).toEqual([et(D, '09:30')]);
+    // That first bar ends as the next one opens: it is shown at 10:00, not an hour after 09:30.
+    expect(e.now).toBe(et(D, '10:00'));
+    expect(e.barSeconds(hourly[0])).toBe(1800);
     expect(e.stepCandle('1h').map((b) => b.time)).toEqual([et(D, '10:00')]);
+    expect(e.now).toBe(et(D, '11:00'));
   });
 });
 

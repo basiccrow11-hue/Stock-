@@ -18,7 +18,7 @@ import type { Bar, OrderRequest, Timeframe, UnixSeconds } from '../types';
 import type { HistoricalDataProvider } from '../data/provider';
 import type { ExecutionConfig } from '../broker/config';
 import { SimBroker, type BrokerCheckpoint, type SubmitResult } from '../broker/SimBroker';
-import { ReplayEngine, barEndTime } from './ReplayEngine';
+import { ReplayEngine } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
@@ -203,7 +203,7 @@ export class ReplaySession {
    */
   private process(broker: SimBroker, bars: RevealedBar[]): RevealedBar[] {
     const rank = new Map(this.symbols.map((s, i) => [s, i]));
-    const keyed = bars.map((r) => ({ r, end: barEndTime(r.bar, this.engines.get(r.symbol)!.baseTimeframe), rank: rank.get(r.symbol)! }));
+    const keyed = bars.map((r) => ({ r, end: r.bar.time + this.engines.get(r.symbol)!.barSeconds(r.bar), rank: rank.get(r.symbol)! }));
     keyed.sort((a, b) => a.end - b.end || a.r.bar.time - b.r.bar.time || a.rank - b.rank);
     for (const { r } of keyed) broker.onBar(r.symbol, r.bar, this.engines.get(r.symbol)!.barSeconds(r.bar));
     return keyed.map((k) => k.r);

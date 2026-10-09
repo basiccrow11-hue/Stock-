@@ -47,7 +47,7 @@ export class ReplayEngine {
     const sorted = [...bars].filter((b) => b.time < window.end).sort((a, b) => a.time - b.time);
     // Freeze copies so nothing outside can mutate the tape.
     this.#bars = Object.freeze(sorted.map((b) => Object.freeze({ ...b })));
-    this.#ends = this.#bars.map((b) => barEndTime(b, window.baseTimeframe));
+    this.#ends = barEnds(this.#bars, window.baseTimeframe);
     this.#now = window.start;
     this.#cursor = lastIndexAtOrBefore(this.#ends, window.start, (t) => t);
     this.#firstSessionIndex = this.#cursor + 1;
@@ -182,9 +182,10 @@ export class ReplayEngine {
     return Math.min(this.#ends[this.#cursor + 1], this.end);
   }
 
-  /** How long `bar` trades, in seconds: its timeframe, or for 1D its regular session (shorter on early closes). */
+  /** How long `bar` trades, in seconds (see barEnds). */
   barSeconds(bar: Bar): number {
-    return barEndTime(bar, this.baseTimeframe) - bar.time;
+    const i = lastIndexAtOrBefore(this.#bars, bar.time, (b) => b.time);
+    return (i >= 0 && this.#bars[i].time === bar.time ? this.#ends[i] : barEndTime(bar, this.baseTimeframe)) - bar.time;
   }
 
   /** Copies of the revealed bars with index in [from, to); `to` stops at what has been revealed. */
@@ -206,6 +207,20 @@ export class ReplayEngine {
   }
 }
 
+/**
+ * When each of `bars` (oldest first) ends: after its timeframe, but never after the next bar starts. A
+ * vendor's short bar (an hourly 09:30-10:00 first bar, yfinance's 09:00-09:30 pre-market hour) ends
+ * as the next one opens. The next bar's start is known the moment it opens, so nothing is seen early.
+ */
+export function barEnds(bars: readonly Bar[], tf: Timeframe): UnixSeconds[] {
+  return bars.map((b, i) => {
+    const end = barEndTime(b, tf);
+    const next = bars[i + 1]?.time;
+    return next !== undefined && next > b.time ? Math.min(end, next) : end;
+  });
+}
+
+/** When `bar` ends by its timeframe alone: its length, or for 1D its regular session (shorter on early closes). */
 export function barEndTime(bar: Bar, tf: Timeframe): UnixSeconds {
   if (tf === '1D') {
     // Daily bars are stamped at their session's open (csv.ts files them so); a bar never ends before it starts.

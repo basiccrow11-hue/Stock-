@@ -971,5 +971,59 @@ describe('the review of a sub-dollar stock', () => {
     expect(gaveBack.review.capturePct).toBeCloseTo(11.11, 1);
     expect(gaveBack.text).toContain('Gave back most of the open profit');
   });
+
+  it('leaves the half spread out of how far past the stop it filled, and writes every price to the tick', () => {
+    const t1 = et('2025-03-04', '10:00');
+    const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const bars: Bar[] = [];
+    const next = (o: number, h: number, l: number, c: number) => {
+      bars.push(bar(t1 + 60 * bars.length, o, h, l, c, 10_000_000));
+      b.onBar('T', bars[bars.length - 1]);
+    };
+    next(0.4523, 0.4523, 0.4523, 0.4523);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 20_000, stopLoss: 0.441 });
+    // Price trades down through the stop with no gap: the sell gets the bid, half a cent under.
+    next(0.445, 0.445, 0.4405, 0.4405);
+    const st = b.state;
+    const exit = st.fills.find((f) => f.action === 'sell')!;
+    expect(exit.price).toBe(0.4359);
+    const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    expect(review.findings.map((f) => f.title)).not.toContain('Stop filled well past its price');
+  });
+
+  it('names the first entry of a trade that added past its stop to the tick', () => {
+    const { text } = run(0.441, 0.4523, (b, next) => {
+      b.cancel(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id);
+      next(0.45, 0.4502, 0.43, 0.431);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100_000 });
+      next(0.431, 0.433, 0.43, 0.432);
+      b.closePosition('T');
+    });
+    expect(text).toContain('from your first entry at 0.4523');
+  });
+});
+
+describe('a risk just over the limit', () => {
+  it('reads as over it in the review, the rules and the 1% challenge', () => {
+    const b = new SimBroker({ startingBalance: 10_000, config: { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' } });
+    const t0 = et('2025-01-15', '10:00');
+    const bars: Bar[] = [];
+    const next = (o: number, h: number, l: number, c: number) => {
+      bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+      b.onBar('T', bars[bars.length - 1]);
+    };
+    next(50, 50, 50, 50);
+    // 40 shares with a 2.50 stop risk $100 at 50.00; the next open is a cent higher, $100.40.
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 40, stopLoss: 47.5 });
+    next(50.01, 50.2, 49.9, 50.1);
+    b.closePosition('T');
+    next(50.1, 50.2, 50, 50.1);
+    const st = b.state;
+    const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    expect(review.findings.find((f) => f.title.startsWith('Risked'))).toMatchObject({ tone: 'bad', title: 'Risked 1.004% of the account' });
+    expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '1.004%' });
+    const ch = evaluateChallenge(CHALLENGES[0], { trips: st.roundTrips, fills: st.fills, equityCurve: st.equityCurve, startingBalance: 10_000, equity: b.account().equity, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+    expect(ch).toMatchObject({ status: 'failed', detail: 'A trade risked 1.004% (limit 1%).' });
+  });
 });
 

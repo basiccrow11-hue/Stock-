@@ -10,6 +10,7 @@ import { money, pct, pnlClass, price, qty, signedMoney } from '../services/forma
 import { useEntryTime } from './useEntryTime';
 import { formatDuration } from '../../core/time';
 import type { TradeReview } from '../../core/learning/review';
+import { pctAgainst } from '../../core/risk/risk';
 
 const NOTE_FIELDS: { key: keyof JournalNotes; label: string }[] = [
   { key: 'why', label: 'Why did I enter?' },
@@ -199,7 +200,7 @@ function ReviewView({ review: r }: { review: TradeReview }) {
         <Stat k="Kept of best open profit" v={r.capturePct !== null ? `${r.capturePct.toFixed(0)}%` : '—'} />
         <Stat
           k="Risk taken"
-          v={r.riskDollars === null ? 'No stop' : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)} · ${r.riskPctOfEquity?.toFixed(2)}%`}
+          v={r.riskDollars === null ? 'No stop' : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)}${r.riskPctOfEquity === null ? '' : ` · ${pctAgainst(r.riskPctOfEquity, r.riskLimitPct)}%`}`}
           cls={r.riskDollars === null || r.addedPastStop ? 'warn' : ''}
         />
         <Stat k="Planned R:R" v={r.plannedRR !== null ? `${r.plannedRR.toFixed(2)}:1` : '—'} />
