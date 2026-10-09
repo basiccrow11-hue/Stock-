@@ -95,6 +95,15 @@ describe('ReplayEngine: no look-ahead', () => {
     expect(e.now).toBe(et(D, '09:35'));
     expect(e.stepCandle('5m')).toHaveLength(5);
   });
+
+  it("steps one bar per candle at the data's own bar size, wherever the vendor put the bars", () => {
+    const times = ['09:30', '10:00', '11:00', '12:00'];
+    const hourly = times.map((t, i) => bar(et(D, t), 100 + i, 101 + i, 99 + i, 100 + i));
+    const e = new ReplayEngine({ symbol: 'TEST', start: et(D, '09:30'), end: et(D, '16:00'), baseTimeframe: '1h' }, hourly);
+    // The 09:30-10:00 bar and the 10:00 bar are two candles, not one 09:30-anchored hour.
+    expect(e.stepCandle('1h').map((b) => b.time)).toEqual([et(D, '09:30')]);
+    expect(e.stepCandle('1h').map((b) => b.time)).toEqual([et(D, '10:00')]);
+  });
 });
 
 function setupFor() {

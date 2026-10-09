@@ -415,7 +415,7 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
     expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 99, quantity: 50, stopLoss: 98 }).ok).toBe(true);
     expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 2, stopLoss: 98 })).toMatchObject({
       ok: false,
-      error: 'Strict risk: position is 25% of equity with the 250 TEST shares you already hold or have working (limit 25%).',
+      error: 'Strict risk: position is 25.1% of equity with the 250 TEST shares you already hold or have working (limit 25%).',
     });
   });
 
@@ -450,6 +450,62 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
       error: "Take profit must be above the entry price for a long: this stop is already through the market, so it would fill at the next bar's open at about 100.00.",
     });
     expect(broker.submit({ ...order, stopLoss: 99.5 }).ok).toBe(true);
+  });
+
+  it("prices a partly filled entry's later shares at its live bracket stop", () => {
+    const { broker, next } = setup({ ...strict(), maxParticipation: 0.25 });
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 99.5, quantity: 400, stopLoss: 99 }).ok).toBe(true);
+    next(99.6, 99.6, 99.4, 99.5, 400);
+    const entry = broker.state.orders[0];
+    expect(entry.filledQty).toBe(100);
+    const stop = broker.state.orders.find((o) => o.parentId === entry.id && o.type === 'stop')!;
+    // The 300 still to come join that stop wherever it is moved: 400 x 2.60 = $1,040.
+    expect(broker.modify(stop.id, { stopPrice: 96.9 })).toEqual({ ok: false, error: 'Strict risk: with this stop at 96.90, the trade risks 1.04% (limit 1%).' });
+    expect(broker.modify(stop.id, { stopPrice: 98 })).toEqual({ ok: true });
+    expect(broker.exposure(S, 'buy').riskPct).toBeCloseTo(0.6, 9);
+  });
+
+  it('lets a change that takes risk off a working entry through, even past the limits', () => {
+    const { broker, next } = setup(strict({ maxDailyLossPct: 0.5 }));
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 98, quantity: 200, stopLoss: 97 }).ok).toBe(true);
+    const id = broker.state.orders[0].id;
+    // A $500 stop-out reaches the 0.5% daily loss limit.
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 500, stopLoss: 99 }).ok).toBe(true);
+    next(99.6, 99.6, 98.9, 99.2);
+    expect(broker.position(S).quantity).toBe(0);
+    const blocked = 'Strict risk: daily loss limit of 0.5% reached. New positions are blocked for today.';
+    expect(broker.modify(id, { limitPrice: 98.5 })).toEqual({ ok: false, error: blocked });
+    expect(broker.modify(id, { limitPrice: 97.5 })).toEqual({ ok: true });
+    expect(broker.modify(id, { quantity: 100 })).toEqual({ ok: true });
+    expect(broker.modify(id, { quantity: 150 })).toEqual({ ok: false, error: blocked });
+  });
+
+  it('always lets a working entry be cut back, even once price is past its stop loss', () => {
+    // A buy stop that fired and is filling in parts under the volume cap.
+    const { broker, next } = setup({ maxParticipation: 0.25 });
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 100.5, quantity: 400, stopLoss: 99.5 }).ok).toBe(true);
+    const id = broker.state.orders[0].id;
+    next(100.6, 100.6, 100.4, 100.5, 400);
+    next(99.4, 99.4, 99.3, 99.3, 4);
+    const entry = broker.state.orders[0];
+    expect(entry).toMatchObject({ triggered: true, status: 'partially_filled' });
+    // Price is below the 99.50 stop loss, so the order cannot grow, but it can be cut back.
+    expect(broker.modify(id, { quantity: 500 })).toEqual({ ok: false, error: expect.stringContaining('Stop loss must be below the entry price') });
+    expect(broker.modify(id, { quantity: entry.filledQty + 50 })).toEqual({ ok: true });
+  });
+
+  it("measures an add against the equity the trade started with, as the review does", () => {
+    const { broker, next } = setup(strict(), 10_000);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 50, stopLoss: 99 }).ok).toBe(true);
+    next(100, 150, 100, 150);
+    expect(broker.account().equity).toBe(12_500);
+    // 50 held risk $50 to their stop and one more share at 150 another $51: $101 is 1.01% of the
+    // $10,000 the trade started with (0.81% of today's $12,500).
+    expect(broker.exposure(S, 'buy')).toMatchObject({ riskEquity: 10_000, riskPct: 0.5 });
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1, stopLoss: 99 })).toMatchObject({
+      ok: false,
+      error: 'Strict risk: this trade risks 1.01% with the 50 TEST shares you already hold or have working (limit 1%).',
+    });
   });
 });
 

@@ -19,7 +19,6 @@ import { useCredentials } from '../state/credentials';
 import { TIMEFRAMES, type Bar, type DataSourceKind, type OrderAction, type Timeframe } from '../../core/types';
 import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
 import { AFTERHOURS_CLOSE, exchangeTimeToUnix, isTradingDay, nextTradingDay, prevTradingDay, tradingDayOnOrBefore } from '../../core/time';
-import { bucketFor } from '../../core/data/aggregate';
 import { runBacktestAsync, cancelBacktests } from '../services/backtestClient';
 import { NumberField, SourceBadge, EmptyState, useFocusRescue, useNumberDraft } from '../components/common';
 import { StatsGrid } from './AnalyticsPage';
@@ -30,6 +29,7 @@ import { chartLabelFill } from '../theme/color';
 import { useTheme } from '../theme/useTheme';
 import { CHART_LOCALE, dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { newId } from '../../core/util/ids';
+import { lastIndexAtOrBefore } from '../../core/util/math';
 import { formatDuration } from '../../core/time';
 
 const SERIES_KINDS: { kind: SeriesRef['kind']; label: string }[] = [
@@ -214,7 +214,8 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
     chart.timeScale().subscribeVisibleLogicalRangeChange(syncLabel);
     const markers: SeriesMarker<Time>[] = result.fills
       .map((f) => ({
-        time: toChartTime(bucketFor(f.time, timeframe).start) as Time,
+        // On the candle holding the fill: data at its own bar size keeps the vendor's bar times.
+        time: toChartTime(result.candles[Math.max(0, lastIndexAtOrBefore(result.candles, f.time, (c) => c.time))].time) as Time,
         position: f.side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
         color: f.side === 'buy' ? panel.markerUp : panel.markerDown,
         shape: f.side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),

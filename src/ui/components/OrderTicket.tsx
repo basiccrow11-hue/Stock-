@@ -136,7 +136,7 @@ export function OrderTicket() {
     }
     const sign = direction === 'long' ? 1 : -1;
     // Strict Mode judges the whole trade an order joins, so the shares already held or working in it
-    // use up part of its risk and position limits, and it never asks for more risk than its own limit.
+    // use up part of its risk and position limits. Its risk limit caps the asked % only where it binds.
     const strictLimits = exec.strictRisk.enabled ? exec.strictRisk : null;
     const ex = strictLimits ? exposure(symbol, action === 'short' ? 'short' : 'buy') : null;
     const joined = ex && ex.shares > 0 ? ex : null;
@@ -145,9 +145,15 @@ export function OrderTicket() {
       toast('warning', `${joined.unprotected} of ${held} have no stop, so Strict Mode refuses adding to the trade. Give them a stop first.`);
       return;
     }
-    const r = strictLimits ? Math.min(asked, strictLimits.maxRiskPctPerTrade) : asked;
-    const rLeft = r - (joined?.riskPct ?? 0);
-    const budget = (account.equity * rLeft) / 100;
+    const limitPct = strictLimits?.maxRiskPctPerTrade ?? Infinity;
+    // What Strict Mode leaves, of the equity it measures the trade against (while a position is open,
+    // the equity the trade started with, as the trade review does).
+    const strictPct = limitPct - (joined?.riskPct ?? 0);
+    const strictBudget = strictLimits ? ((ex?.riskEquity ?? account.equity) * strictPct) / 100 : Infinity;
+    const askedBudget = (account.equity * asked) / 100;
+    const strictBinds = strictBudget < askedBudget;
+    const budget = Math.min(askedBudget, strictBudget);
+    const budgetPct = strictBinds ? strictPct : asked;
     const show = (v: number) => String(+v.toFixed(2));
     // Risk at the size's own estimated fill (a bigger order pays more market impact), with commissions
     // in and out: what the ticket shows and Strict Mode checks. It only grows with the size.
@@ -164,9 +170,9 @@ export function OrderTicket() {
     if (one > budget + 1e-9) {
       toast(
         'warning',
-        joined && joined.riskPct > 0
-          ? `${held[0].toUpperCase()}${held.slice(1)} already risk ${show(joined.riskPct)}% of Strict Mode's ${r}% limit, which leaves no room for another share at this stop.`
-          : `Even one share would risk more than ${show(r)}% of the account at this stop${2 * commissionFor(exec, 1, estimate(1)!) > 0 ? ', with commissions in and out' : ''}.`,
+        strictBinds && joined && joined.riskPct > 0
+          ? `${held[0].toUpperCase()}${held.slice(1)} already risk ${show(joined.riskPct)}% of Strict Mode's ${limitPct}% limit, which leaves no room for another share at this stop.`
+          : `Even one share would risk more than ${show(budgetPct)}% of the account at this stop${2 * commissionFor(exec, 1, estimate(1)!) > 0 ? ', with commissions in and out' : ''}.`,
       );
       return;
     }
@@ -204,13 +210,12 @@ export function OrderTicket() {
       toast('warning', cap.none);
       return;
     }
-    const note =
-      joined && joined.riskPct > 0
-        ? `${held[0].toUpperCase()}${held.slice(1)} risk ${show(joined.riskPct)}% of Strict Mode's ${r}% limit, so this order is sized to the other ${show(rLeft)}%. `
-        : r < asked
-          ? `Sized at Strict Mode's ${r}% risk limit. `
-          : '';
-    if (cap.n < n) toast('info', `${note}${show(rLeft)}% risk would need ${n} shares, but ${cap.why}. Sized to ${cap.n}; actual risk is lower.`, 6000);
+    const note = !strictBinds
+      ? ''
+      : joined && joined.riskPct > 0
+        ? `${held[0].toUpperCase()}${held.slice(1)} risk ${show(joined.riskPct)}% of Strict Mode's ${limitPct}% limit, so this order is sized to the other ${show(strictPct)}%. `
+        : `Sized at Strict Mode's ${limitPct}% risk limit. `;
+    if (cap.n < n) toast('info', `${note}${show(budgetPct)}% risk would need ${n} shares, but ${cap.why}. Sized to ${cap.n}; actual risk is lower.`, 6000);
     else if (note) toast('info', note.trim(), 6000);
     setQuantity(String(Math.min(n, cap.n)));
   };

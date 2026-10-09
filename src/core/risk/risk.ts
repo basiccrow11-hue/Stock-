@@ -121,13 +121,25 @@ export function positionSizeForRisk(equity: number, riskPct: number, entry: numb
  * those in its other working entries, as % of equity, with their risk to their stops. A held share's
  * risk runs from the position's average price to the stop protecting it, an entry's from its price to
  * its stop loss; a stop past that price counts as no risk. Shares with no stop have no measurable risk.
+ * Risk is a % of `riskEquity`: while a position is open, the equity its trade started with, which is
+ * what the trade review, the risk rule and the challenges measure the whole trade's risk against.
  */
 export interface Exposure {
   symbol: string;
   shares: number;
+  /** % of the account's equity now. */
   valuePct: number;
+  /** % of riskEquity. */
   riskPct: number;
+  riskEquity: number;
   unprotected: number;
+}
+
+/** `v` (over `limit`) written with `digits` decimals, or more where fewer would not show it is over. */
+export function over(v: number, limit: number, digits: number): string {
+  let d = digits;
+  while (d < 4 && Number(v.toFixed(d)) <= limit) d++;
+  return v.toFixed(d);
 }
 
 /**
@@ -150,13 +162,15 @@ export function strictRiskViolation(
   if (ex && cfg.requireStopLoss && ex.unprotected > 0) {
     return `Strict risk: ${ex.unprotected} of the ${ex.shares} ${ex.symbol} shares you already hold or have working have no stop, so this trade's risk has no limit. Give them a stop first.`;
   }
-  const pctRisk = assessment.pctRisk === null ? null : assessment.pctRisk + (ex?.riskPct ?? 0);
+  // Joined to a trade, the order's risk is measured against the same equity as the trade's.
+  const pctRisk =
+    assessment.pctRisk === null ? null : ex && ex.riskEquity > 0 && assessment.dollarRisk !== null ? (assessment.dollarRisk / ex.riskEquity) * 100 + ex.riskPct : assessment.pctRisk + (ex?.riskPct ?? 0);
   if (pctRisk !== null && pctRisk > cfg.maxRiskPctPerTrade + 1e-9) {
-    return `Strict risk: this trade risks ${pctRisk.toFixed(2)}%${already} (limit ${cfg.maxRiskPctPerTrade}%).`;
+    return `Strict risk: this trade risks ${over(pctRisk, cfg.maxRiskPctPerTrade, 2)}%${already} (limit ${cfg.maxRiskPctPerTrade}%).`;
   }
   const positionPct = assessment.positionPctOfEquity + (ex?.valuePct ?? 0);
   if (positionPct > cfg.maxPositionPctOfEquity + 1e-9) {
-    return `Strict risk: position is ${positionPct.toFixed(0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`;
+    return `Strict risk: position is ${over(positionPct, cfg.maxPositionPctOfEquity, 0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`;
   }
   return null;
 }

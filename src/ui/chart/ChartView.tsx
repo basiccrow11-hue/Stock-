@@ -27,12 +27,12 @@ import {
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
 import { roundToTick } from '../../core/util/math';
-import { aggregateBars, bucketFor, mergeBars } from '../../core/data/aggregate';
+import { aggregateBars, candleFor, mergeBars } from '../../core/data/aggregate';
 import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
 import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
-import { getBaseBars, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
+import { candleStartFor, getBaseBars, getBaseTimeframe, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
 import { CHART_LOCALE, compactVolume, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { useDrawings } from './drawings';
@@ -127,6 +127,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const indicatorsRef = useRef<IndicatorSeries[]>([]);
   const baseRef = useRef<Bar[]>([]);
+  const baseTfRef = useRef<Timeframe>('1m');
   const candlesRef = useRef<Bar[]>([]);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null);
@@ -565,7 +566,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const series = candleRef.current;
     if (!series) return;
     baseRef.current = getBaseBars(symbol);
-    candlesRef.current = aggregateBars(baseRef.current, timeframe);
+    baseTfRef.current = getBaseTimeframe(symbol);
+    candlesRef.current = aggregateBars(baseRef.current, timeframe, baseTfRef.current);
     series.setData(candlesRef.current.map(candlePoint) as never);
     volumeRef.current?.setData(candlesRef.current.map(volumePoint));
     setIndicatorData(0);
@@ -579,15 +581,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const base = baseRef.current;
     const series = candleRef.current;
     if (!series || !base.length) return;
-    const key = bucketFor(base[Math.min(from, base.length - 1)].time, timeframe).key;
+    const candleOf = (t: number) => candleFor(t, timeframe, baseTfRef.current);
+    const key = candleOf(base[Math.min(from, base.length - 1)].time).key;
     let start = Math.min(from, base.length - 1);
-    while (start > 0 && bucketFor(base[start - 1].time, timeframe).key === key) start--;
-    const bucketStart = bucketFor(base[start].time, timeframe).start;
+    while (start > 0 && candleOf(base[start - 1].time).key === key) start--;
+    const bucketStart = candleOf(base[start].time).start;
     const candles = candlesRef.current;
     // Only the forming (last) candle can change; drop it and rebuild from its first base bar.
     while (candles.length && candles[candles.length - 1].time >= bucketStart) candles.pop();
     const firstChanged = candles.length;
-    const tail = aggregateBars(base.slice(start), timeframe);
+    const tail = aggregateBars(base.slice(start), timeframe, baseTfRef.current);
     for (const c of tail) {
       candles.push(c);
       series.update(candlePoint(c) as never);
@@ -624,7 +627,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (f.symbol !== symbol) continue;
       const buy = f.side === 'buy';
       markers.push({
-        time: ct(bucketFor(f.time, timeframe).start),
+        time: ct(candleStartFor(symbol, f.time, timeframe)),
         position: buy ? 'belowBar' : 'aboveBar',
         shape: buy ? 'arrowUp' : 'arrowDown',
         color: buy ? pal.markerBuy : pal.markerSell,
@@ -633,7 +636,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
     for (const ev of getSimEventsFor(symbol)) {
       markers.push({
-        time: ct(bucketFor(ev.time, timeframe).start),
+        time: ct(candleStartFor(symbol, ev.time, timeframe)),
         position: 'aboveBar',
         shape: 'circle',
         color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,

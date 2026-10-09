@@ -12,7 +12,7 @@
  */
 import type { Bar, Timeframe, UnixSeconds } from '../types';
 import { TIMEFRAME_MINUTES } from '../types';
-import { BarAggregator, aggregateBars, bucketFor } from '../data/aggregate';
+import { BarAggregator, aggregateBars, candleFor } from '../data/aggregate';
 import { exchangeDate, exchangeTimeToUnix, regularCloseMinute } from '../time';
 import { lastIndexAtOrBefore } from '../util/math';
 
@@ -98,6 +98,12 @@ export class ReplayEngine {
     return this.#bars.slice(0, this.#cursor + 1).map((b) => ({ ...b }));
   }
 
+  /** Start of the revealed bar holding time `t` (the last one starting at or before it), or null. */
+  barStartAtOrBefore(t: UnixSeconds): UnixSeconds | null {
+    const i = Math.min(this.#cursor, lastIndexAtOrBefore(this.#bars, t, (b) => b.time));
+    return i >= 0 ? this.#bars[i].time : null;
+  }
+
   /** Revealed bars aggregated to `timeframe`. The last candle may be still forming. */
   visibleBars(timeframe: Timeframe): Bar[] {
     return aggregateBars(this.#bars.slice(0, this.#cursor + 1), timeframe, this.baseTimeframe);
@@ -141,8 +147,8 @@ export class ReplayEngine {
     const out: Bar[] = [];
     if (this.finished) return out;
     // The candle the next bar belongs to: the one currently forming, or the next one.
-    const key = bucketFor(this.#bars[this.#cursor + 1].time, timeframe).key;
-    while (!this.finished && bucketFor(this.#bars[this.#cursor + 1].time, timeframe).key === key) {
+    const key = candleFor(this.#bars[this.#cursor + 1].time, timeframe, this.baseTimeframe).key;
+    while (!this.finished && candleFor(this.#bars[this.#cursor + 1].time, timeframe, this.baseTimeframe).key === key) {
       const b = this.step();
       if (!b) break;
       out.push(b);
@@ -188,7 +194,7 @@ export class ReplayEngine {
 
   /** Incremental aggregator primed with all revealed bars; useful for efficient chart updates. */
   createAggregator(timeframe: Timeframe): { aggregator: BarAggregator; bars: Bar[] } {
-    const aggregator = new BarAggregator(timeframe);
+    const aggregator = new BarAggregator(timeframe, this.baseTimeframe);
     const bars: Bar[] = [];
     for (let i = 0; i <= this.#cursor; i++) {
       const r = aggregator.push(this.#bars[i]);

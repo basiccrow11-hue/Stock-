@@ -6,6 +6,7 @@
  * a small event bus so the chart can update incrementally instead of re-rendering.
  */
 import { create } from 'zustand';
+import { bucketFor, ownCandles } from '../../core/data/aggregate';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
 import { ReplaySession, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult } from '../../core/broker/SimBroker';
@@ -187,6 +188,21 @@ export function getBaseBars(symbol: string): Bar[] {
   if (eng.replay) return eng.replay.engineFor(symbol)?.visibleBaseBars() ?? [];
   if (eng.sim) return eng.sim.getHistory(symbol);
   return [];
+}
+
+/** The size of `symbol`'s base bars: the replay's data, or the simulated market's 1-minute bars. */
+export function getBaseTimeframe(symbol: string): Timeframe {
+  return eng.replay?.engineFor(symbol)?.baseTimeframe ?? '1m';
+}
+
+/**
+ * Start of the candle holding time `t` on a `timeframe` chart of `symbol`: at the data's own bar
+ * size, the revealed bar holding it (bars need not sit on the 09:30 grid), else its bucket.
+ */
+export function candleStartFor(symbol: string, t: UnixSeconds, timeframe: Timeframe): UnixSeconds {
+  const e = eng.replay?.engineFor(symbol);
+  if (e && ownCandles(timeframe, e.baseTimeframe)) return e.barStartAtOrBefore(t) ?? t;
+  return bucketFor(t, timeframe).start;
 }
 
 export function getSimEventsFor(symbol: string): SimEvent[] {
@@ -415,6 +431,7 @@ function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean, rules: 
     orders: st.orders,
     revealedBars: getBaseBars(trip.symbol),
     timeframe: base && TIMEFRAMES.indexOf(base) > TIMEFRAMES.indexOf(timeframe) ? base : timeframe,
+    baseTimeframe: base,
     equityCurve: st.equityCurve,
     startingBalance: st.startingBalance,
     allTrips: st.roundTrips,

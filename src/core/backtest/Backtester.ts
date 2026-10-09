@@ -15,7 +15,7 @@
 import type { Bar, DataSourceKind, EquityPoint, Fill, OrderAction, RoundTrip, Timeframe, UnixSeconds } from '../types';
 import type { ExecutionConfig } from '../broker/config';
 import { SimBroker } from '../broker/SimBroker';
-import { aggregateBars, bucketFor } from '../data/aggregate';
+import { aggregateBars, candleFor } from '../data/aggregate';
 import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
 import { roundToTick } from '../util/math';
@@ -84,7 +84,9 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     }
   }
   const candleIndex = new Map<string, number>();
-  candles.forEach((c, i) => candleIndex.set(bucketFor(c.time, p.timeframe).key, i));
+  // Keyed as the base bars are below: at the data's own bar size each bar is its own candle (hourly
+  // bars on the clock hour, a 09:30-10:00 first bar), coarser candles are 09:30-anchored buckets.
+  candles.forEach((c, i) => candleIndex.set(candleFor(c.time, p.timeframe, p.baseTimeframe).key, i));
 
   const broker = new SimBroker({
     startingBalance: p.startingBalance,
@@ -145,7 +147,7 @@ export function runBacktest(p: BacktestParams): BacktestResult {
 
   for (let j = 0; j < base.length; j++) {
     const b = base[j];
-    const { key } = bucketFor(b.time, p.timeframe);
+    const { key } = candleFor(b.time, p.timeframe, p.baseTimeframe);
     // Orders placed as this bar opens belong to the session they can fill in, even after a gap in the
     // data (a thin stock's day with no bar at the close), so they do not expire before their first bar.
     broker.syncClock(b.time);

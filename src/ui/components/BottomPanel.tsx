@@ -224,7 +224,8 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       ref={inputRef}
       autoFocus
       type="number"
-      step="0.01"
+      // The price tick, as on the ticket: a hundredth of a cent below $1.
+      step={current !== undefined && current < 1 ? 0.0001 : 0.01}
       value={val}
       aria-label={`New ${what}`}
       style={{ width: 90 }}

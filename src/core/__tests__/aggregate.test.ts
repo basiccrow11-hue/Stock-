@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BarAggregator, aggregateBars, mergeBars } from '../data/aggregate';
+import { BarAggregator, aggregateBars, candleFor, mergeBars } from '../data/aggregate';
 import { bar, et, randomBars } from './helpers';
 
 describe('bar aggregation', () => {
@@ -55,3 +55,28 @@ describe('merging bars into a chart', () => {
     expect(mergeBars([], [bar(t, 1, 1, 1, 1, 1)])).toBe(0);
   });
 });
+
+describe("candles at the data's own bar size", () => {
+  const d = '2024-03-12';
+  const hourly = (times: string[]) => times.map((t, i) => bar(et(d, t), 100 + i, 101 + i, 99 + i, 100.5 + i, 1000));
+
+  it('keeps vendor bars where they are: clock hours, a 09:30-10:00 first bar, 4-hour bars from 04:00', () => {
+    const clock = hourly(['09:30', '10:00', '11:00', '12:00']);
+    expect(aggregateBars(clock, '1h', '1h').map((c) => c.time)).toEqual(clock.map((b) => b.time));
+    // A finer chart of the same data shows the same candles.
+    expect(aggregateBars(clock, '30m', '1h').map((c) => c.time)).toEqual(clock.map((b) => b.time));
+    const four = hourly(['04:00', '08:00', '12:00', '16:00']);
+    expect(aggregateBars(four, '4h', '4h').map((c) => c.time)).toEqual(four.map((b) => b.time));
+    // The incremental aggregator agrees.
+    const agg = new BarAggregator('1h', '1h');
+    expect(clock.map((b) => agg.push(b)!.isNew)).toEqual([true, true, true, true]);
+    expect(candleFor(et(d, '10:00'), '1h', '1h')).toEqual({ key: String(et(d, '10:00')), start: et(d, '10:00') });
+  });
+
+  it('still buckets coarser candles from 09:30', () => {
+    const clock = hourly(['09:30', '10:00', '11:00', '12:00', '13:00', '14:00']);
+    expect(aggregateBars(clock, '4h', '1h').map((c) => c.time)).toEqual([et(d, '09:30'), et(d, '13:30')]);
+    expect(candleFor(et(d, '10:00'), '4h', '1h').start).toBe(et(d, '09:30'));
+  });
+});
+

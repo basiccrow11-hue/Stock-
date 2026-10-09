@@ -42,50 +42,86 @@ export interface CandleCalendar {
 
 /** A trading day without an early close, to count a normal day's candles. */
 const NORMAL_DAY = '2024-03-12';
+const DAY_MINUTES = 24 * 60;
 
-/** `candles` are aggregated to `timeframe`, oldest first. */
+/** The start minutes (exchange time, ascending) of a trading day's candles. */
+type DayCandles = (date: string) => readonly number[];
+
+/** `candles` are the chart's candles on `timeframe`, oldest first. */
 export function candleCalendar(candles: readonly Bar[], timeframe: Timeframe): CandleCalendar {
   const daily = timeframe === '1D';
   const step = daily ? 86_400 : TIMEFRAME_MINUTES[timeframe] * 60;
-  const { firstOf, lastOf } = daily ? dailyCandles() : sessionCandles(candles, timeframe);
-  const perDay = (date: string) => Math.round((lastOf(date) - firstOf(date)) / step) + 1;
-  const normal = perDay(NORMAL_DAY);
+  const daysCandles: DayCandles = daily ? () => [REGULAR_OPEN] : sessionCandles(candles, timeframe);
+  const cache = new Map<string, readonly number[]>();
+  const minutesOn = (date: string) => {
+    let m = cache.get(date);
+    if (!m) cache.set(date, (m = daysCandles(date)));
+    return m;
+  };
+
+  /** Index of the last candle on `date` starting at or before minute `m` (-1 if none). */
+  const atOrBefore = (date: string, m: number) => {
+    const minutes = minutesOn(date);
+    let lo = 0;
+    let hi = minutes.length - 1;
+    let ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (minutes[mid] <= m) {
+        ans = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return ans;
+  };
+  /** Candles on trading day `date`. */
+  const count = (date: string) => minutesOn(date).length;
+  const at = (date: string, k: number) => exchangeTimeToUnix(date, minutesOn(date)[k]);
+  /** Minute of the exchange day, with seconds as a fraction. */
+  const minuteOf = (t: UnixSeconds) => exchangeMinuteOfDay(t) + (t % 60) / 60;
+  /** Index of the candle on `date` that `t` (at or after the day's first candle) falls in. */
+  const index = (date: string, t: UnixSeconds) => Math.max(0, atOrBefore(date, minuteOf(t)));
+  const normal = count(NORMAL_DAY);
 
   /** Candle slots on the trading days in [a, b). */
   const slotsIn = (a: string, b: string): number => {
     if (b <= a) return 0;
     let n = tradingDaysBetween(a, b) * normal;
-    for (let y = parseDate(a).y; y <= parseDate(b).y; y++) for (const e of earlyCloses(y)) if (e >= a && e < b) n -= normal - perDay(e);
+    for (let y = parseDate(a).y; y <= parseDate(b).y; y++) for (const e of earlyCloses(y)) if (e >= a && e < b) n -= normal - count(e);
     return n;
   };
-
-  /** Slots from the first candle of trading day `day` to the candle starting at `c`. */
-  const inDay = (day: string, c: UnixSeconds) => (c - firstOf(day)) / step;
 
   return {
     next: (t) => {
       const date = exchangeDate(t);
-      // Trading days never contain a DST switch (those happen early on Sundays): a day's candles are evenly spaced.
-      return t < lastOf(date) ? t + step : firstOf(nextTradingDay(date));
+      if (isTradingDay(date)) {
+        const k = atOrBefore(date, minuteOf(t)) + 1;
+        if (k < count(date)) return at(date, k);
+      }
+      return at(nextTradingDay(date), 0);
     },
     slots: (from, t) => {
       const fromDay = exchangeDate(from);
       // The candle at or before t.
       const date = exchangeDate(t);
       let day = date;
-      let c: UnixSeconds;
-      if (isTradingDay(date) && t >= firstOf(date)) c = Math.min(firstOf(date) + Math.floor((t - firstOf(date)) / step) * step, lastOf(date));
-      else c = lastOf((day = prevTradingDay(date)));
+      let k: number;
+      if (isTradingDay(date) && t >= at(date, 0)) k = index(date, t);
+      else k = count((day = prevTradingDay(date))) - 1;
+      let c = at(day, k);
       if (c < from) {
         c = from;
         day = fromDay;
+        k = index(fromDay, from);
       }
-      const whole = slotsIn(fromDay, day) + inDay(day, c) - inDay(fromDay, from);
-      return whole + Math.min(1, (t - c) / step);
+      const whole = slotsIn(fromDay, day) + k - index(fromDay, from);
+      // The candle's own length: a day's short first candle (a 09:30-10:00 hourly bar) is crossed faster.
+      const len = k + 1 < count(day) ? Math.min(step, at(day, k + 1) - c) : step;
+      return whole + Math.min(1, (t - c) / len);
     },
     after: (from, k) => {
       const fromDay = exchangeDate(from);
-      const target = inDay(fromDay, from) + k;
+      const target = index(fromDay, from) + k;
       let day = fromDay;
       let passed = 0;
       // Gallop: whole decades, years, weeks, then days.
@@ -98,28 +134,31 @@ export function candleCalendar(candles: readonly Bar[], timeframe: Timeframe): C
           day = to;
         }
       }
-      return firstOf(day) + (target - passed) * step;
+      return at(day, target - passed);
     },
   };
 }
 
-function dailyCandles() {
-  const at = (date: string) => exchangeTimeToUnix(date, REGULAR_OPEN);
-  return { firstOf: at, lastOf: at };
-}
-
 /**
- * The first and last candle of each day. The data's own first candle of its last full day sets
- * the open (the newest day may still be forming). The last candle is the one holding the session's
- * final minute: after-hours when the data has extended hours, else the regular close, both earlier
- * on early-close days. Data whose sessions end elsewhere keeps its own last candle, moved by the
- * early close.
+ * The candles of each day, from the data's last full day (the newest day may still be forming):
+ * its own candles set the open and where they fall, so bars a vendor placed on the clock hour (or a
+ * 09:30-10:00 first hourly bar) keep their places; gaps wider than a candle are filled at the
+ * timeframe's step, and the steps run on past its last candle so a normal day can follow an early
+ * close. A day ends with the candle holding the session's final minute (after-hours when the data
+ * has extended hours, else the regular close, both earlier on early-close days). After-hours bars
+ * that start at the close (yfinance's hourly 15:30 then 16:00) start at an early close too. Data
+ * whose sessions end elsewhere keeps its own last candle, moved by the early close.
  */
-function sessionCandles(candles: readonly Bar[], timeframe: Timeframe) {
+function sessionCandles(candles: readonly Bar[], timeframe: Timeframe): DayCandles {
+  const stepMin = TIMEFRAME_MINUTES[timeframe];
   const n = candles.length;
+  const minutesOn = (from: number, date: string) => {
+    const out: number[] = [];
+    for (let i = from; i < n && exchangeDate(candles[i].time) === date; i++) out.push(exchangeMinuteOfDay(candles[i].time));
+    return out;
+  };
   let refDay: string | null = null;
-  let openMin = REGULAR_OPEN;
-  let lastMin = REGULAR_OPEN;
+  let mins: number[] = [];
   if (n) {
     const newest = exchangeDate(candles[n - 1].time);
     let j = n - 1;
@@ -128,19 +167,52 @@ function sessionCandles(candles: readonly Bar[], timeframe: Timeframe) {
       refDay = exchangeDate(candles[j].time);
       let f = j;
       while (f > 0 && exchangeDate(candles[f - 1].time) === refDay) f--;
-      openMin = exchangeMinuteOfDay(candles[f].time);
-      lastMin = exchangeMinuteOfDay(candles[j].time);
+      mins = minutesOn(f, refDay);
     }
   }
-  const day0 = refDay ?? (n ? exchangeDate(candles[0].time) : NORMAL_DAY);
-  const extended = n > 0 && (refDay ? openMin < REGULAR_OPEN || lastMin >= regularCloseMinute(refDay) : exchangeMinuteOfDay(candles[0].time) < REGULAR_OPEN || exchangeMinuteOfDay(candles[n - 1].time) >= regularCloseMinute(day0));
-  const bucketAt = (date: string, min: number) => bucketFor(exchangeTimeToUnix(date, min), timeframe).start;
+  const ref = refDay ?? (n ? exchangeDate(candles[0].time) : NORMAL_DAY);
+  if (!refDay && n) mins = minutesOn(0, ref);
+  const openMin = mins.length ? mins[0] : REGULAR_OPEN;
+  const lastMin = mins.length ? mins[mins.length - 1] : REGULAR_OPEN;
+  const refClose = regularCloseMinute(ref);
+  const extended = n > 0 && (openMin < REGULAR_OPEN || lastMin >= refClose);
   const sessionEnd = (date: string) => (extended ? afterHoursCloseMinute(date) : regularCloseMinute(date));
-  if (!refDay) openMin = exchangeMinuteOfDay(bucketAt(day0, extended ? PREMARKET_OPEN : REGULAR_OPEN));
-  const standard = !refDay || exchangeMinuteOfDay(bucketAt(refDay, sessionEnd(refDay) - 1)) === lastMin;
-  const ref = refDay;
-  return {
-    firstOf: (date: string) => exchangeTimeToUnix(date, openMin),
-    lastOf: (date: string) => (standard ? bucketAt(date, sessionEnd(date) - 1) : bucketAt(date, lastMin + regularCloseMinute(date) - regularCloseMinute(ref!))),
+  if (!refDay) {
+    // One (partial) day of data: the standard session, from its open.
+    const open = extended ? PREMARKET_OPEN : REGULAR_OPEN;
+    const onGrid = mins.every((m) => (((m - REGULAR_OPEN) % stepMin) + stepMin) % stepMin === 0);
+    if (!mins.length || onGrid) mins = [exchangeMinuteOfDay(bucketFor(exchangeTimeToUnix(ref, open), timeframe).start)];
+    else while (mins[0] > open) mins.unshift(Math.max(mins[0] - stepMin, open));
+  }
+  /** `from` with gaps wider than a candle filled, run on at the step while below `end`. */
+  const filled = (from: readonly number[], end: number) => {
+    const out: number[] = [];
+    for (const m of from) {
+      while (out.length && out[out.length - 1] + stepMin < m) out.push(out[out.length - 1] + stepMin);
+      if (!out.length || out[out.length - 1] < m) out.push(m);
+    }
+    while (out.length && out[out.length - 1] + stepMin < end) out.push(out[out.length - 1] + stepMin);
+    return out;
+  };
+  // The reference day's last candle holds its session's final minute: every day ends the same way.
+  const standard = !refDay || (lastMin <= sessionEnd(ref) - 1 && sessionEnd(ref) - 1 < lastMin + stepMin);
+  const atClose = mins.indexOf(refClose);
+  // After-hours candles restart at the close (less than a step after the candle before).
+  const fromClose = standard && extended && atClose > 0 && refClose - mins[atClose - 1] < stepMin;
+  const upTo = (list: number[], limit: number) => {
+    let k = list.length;
+    while (k > 1 && list[k - 1] > limit) k--;
+    return list.slice(0, k);
+  };
+  if (!fromClose) {
+    const minutes = filled(mins, DAY_MINUTES);
+    return (date) => upTo(minutes, standard ? sessionEnd(date) - 1 : lastMin + regularCloseMinute(date) - refClose);
+  }
+  // Regular-session candles run to the day's close, the after-hours ones from it.
+  const regular = mins.slice(0, atClose);
+  const after = filled(mins.slice(atClose), DAY_MINUTES).map((m) => m - refClose);
+  return (date) => {
+    const close = regularCloseMinute(date);
+    return upTo([...filled(regular, close).filter((m) => m < close), ...after.map((m) => m + close)], sessionEnd(date) - 1);
   };
 }

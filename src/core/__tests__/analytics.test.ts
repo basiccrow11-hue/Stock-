@@ -933,3 +933,43 @@ describe('challenges', () => {
     expect(done.official).toBe(false);
   });
 });
+
+describe('the review of a sub-dollar stock', () => {
+  const t0 = et('2025-03-04', '10:00');
+  const run = (stopLoss: number, entry: number, script: (b: SimBroker, next: (o: number, h: number, l: number, c: number) => void) => void) => {
+    const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const bars = [bar(t0, entry, entry, entry, entry)];
+    b.onBar('T', bars[0]);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 40_000, stopLoss });
+    script(b, (o, h, l, c) => {
+      bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+      b.onBar('T', bars[bars.length - 1]);
+    });
+    const st = b.state;
+    const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    return { review, text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+  };
+
+  it('judges gaps, moved stops and kept profit by the tick, and writes prices to it', () => {
+    // A gap from 0.4523 through the 0.4410 stop to 0.4300 is about -2R, not a loss capped as planned.
+    const gap = run(0.441, 0.4523, (_, next) => next(0.43, 0.43, 0.429, 0.43));
+    expect(gap.text).toContain('Stop filled well past its price: Your stop at 0.4410 filled at 0.4300, 0.0110 past it, so this exit was -1.97R per share instead of the planned -1.00R.');
+    expect(gap.text).not.toContain('capped where you planned');
+    expect(gap.review.rules.find((r) => r.rule === 'Use a stop loss')?.detail).toBe('Stop at 0.4410');
+    // A stop moved from 0.4410 to 0.4380 is named with both prices.
+    const widened = run(0.441, 0.4523, (b, next) => {
+      b.modify(b.state.orders.find((o) => o.parentId && o.type === 'stop')!.id, { stopPrice: 0.438 });
+      next(0.44, 0.44, 0.437, 0.437);
+    });
+    expect(widened.text).toContain('You widened your stop: You moved your stop from 0.4410 to 0.4380, further from your entry, so this exit was -1.27R per share instead of the planned -1.00R.');
+    // Best open profit of 0.9 cents a share, of which 0.1 cent was kept.
+    const gaveBack = run(0.49, 0.5, (b, next) => {
+      next(0.5, 0.509, 0.5, 0.505);
+      next(0.505, 0.505, 0.501, 0.501);
+      b.closePosition('T');
+    });
+    expect(gaveBack.review.capturePct).toBeCloseTo(11.11, 1);
+    expect(gaveBack.text).toContain('Gave back most of the open profit');
+  });
+});
+

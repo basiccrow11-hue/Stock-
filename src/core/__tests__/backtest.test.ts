@@ -292,3 +292,32 @@ describe('backtester: sizing and brackets that fit the account and the stock', (
     expect(trip.initialTarget).toBe(0.3715);
   });
 });
+
+describe("signals on data at its own bar size", () => {
+  // Price is 99 until the named bar and 101 from it on; the rule buys when the close crosses 100.
+  const run = (times: string[], crossAt: string) => {
+    const days = ['2024-03-04', '2024-03-05', '2024-03-06'];
+    const bars = days.flatMap((d, i) => times.map((t) => {
+      const px = i < 2 || et(d, t) < et(d, crossAt) ? 99 : 101;
+      return bar(et(d, t), px, px + 0.2, px - 0.2, px, 100_000);
+    }));
+    const strategy: StrategyDefinition = {
+      name: 'cross',
+      rules: [{ id: 'r', conditions: [{ left: { kind: 'close' }, op: 'crosses_above', right: { kind: 'value', value: 100 } }], logic: 'all', action: 'buy' }],
+      sizing: { mode: 'shares', shares: 10 },
+      exitAtSessionEnd: false,
+      regularHoursOnly: false,
+    } as StrategyDefinition;
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1h', timeframe: '1h', tradeFrom: bars[0].time, config: ZERO_COST_CONFIG }));
+    return r.signals.map((x) => x.candleTime);
+  };
+
+  it('evaluates every hourly bar, where a vendor places it', () => {
+    // Clock-hour bars after a 09:30-10:00 first bar: the cross on the 09:30 bar fires on it.
+    expect(run(['09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'], '09:30')).toEqual([et('2024-03-06', '09:30')]);
+    // yfinance's hourly bars with extended hours: 15:30 is followed by the 16:00 after-hours bar.
+    const yf = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00'];
+    expect(run(yf, '15:30')).toEqual([et('2024-03-06', '15:30')]);
+  });
+});
+

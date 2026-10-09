@@ -128,4 +128,43 @@ describe('candle calendar past the data', () => {
     // A chart projects every drawing point on every frame; this must stay far below a frame.
     expect((performance.now() - started) / 200).toBeLessThan(1);
   });
+
+  /** Candles at the given times of day on each date. */
+  const at_ = (dates: string[], times: string[]) => dates.flatMap((d) => times.map((t) => bar(at(d, t))));
+  /** A candle-by-candle walk must find `want` (the real candles after `from`) slot by slot. */
+  const walks = (cal: ReturnType<typeof candleCalendar>, from: number, want: number[]) => {
+    want.forEach((t, k) => {
+      expect(cal.after(from, k + 1)).toBe(t);
+      expect(cal.slots(from, t)).toBe(k + 1);
+    });
+  };
+
+  it("follows vendors' own bar times: clock-hour and 4-hour bars, half days included", () => {
+    // Clock-hour hourly bars with a 09:30-10:00 first bar (IB style), through the 11-29 half day.
+    const rth = ['09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'];
+    const clock = candleCalendar(at_(['2024-11-25', '2024-11-26'], rth), '1h');
+    expect(clock.next(at('2024-11-26', '09:30'))).toBe(at('2024-11-26', '10:00'));
+    walks(clock, at('2024-11-26', '15:00'), [
+      ...rth.map((t) => at('2024-11-27', t)),
+      ...['09:30', '10:00', '11:00', '12:00'].map((t) => at('2024-11-29', t)),
+      at('2024-12-02', '09:30'),
+    ]);
+    // A time inside the short first candle is that far through it.
+    expect(clock.slots(at('2024-11-26', '15:00'), at('2024-11-27', '09:45'))).toBe(1.5);
+    // 4-hour bars from 04:00 with extended hours: the half day keeps its 16:00-17:00 bar.
+    const four = candleCalendar(at_(['2024-11-26', '2024-11-27'], ['04:00', '08:00', '12:00', '16:00']), '4h');
+    walks(four, at('2024-11-27', '16:00'), [...['04:00', '08:00', '12:00', '16:00'].map((t) => at('2024-11-29', t)), at('2024-12-02', '04:00')]);
+  });
+
+  it('starts after-hours bars at an early close when the data starts them at the close', () => {
+    // yfinance hourly with pre- and post-market: 04:00-09:00, 09:30-15:30, then 16:00-19:00.
+    const yf = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00'];
+    const cal = candleCalendar(at_(['2024-11-26', '2024-11-27'], yf), '1h');
+    const half = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:00', '14:00', '15:00', '16:00'];
+    walks(cal, at('2024-11-27', '19:00'), [...half.map((t) => at('2024-11-29', t)), ...yf.map((t) => at('2024-12-02', t))]);
+    // And from a half day to a normal one.
+    const fromHalf = candleCalendar(at_(['2024-11-29', '2024-12-02'], half).slice(0, half.length + 1), '1h');
+    walks(fromHalf, at('2024-12-02', '04:00'), yf.slice(1).map((t) => at('2024-12-02', t)));
+  });
 });
+

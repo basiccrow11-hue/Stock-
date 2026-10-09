@@ -2,7 +2,9 @@
  * Aggregates base-resolution bars (normally 1m) into display timeframes.
  *
  * Intraday buckets are anchored to the 09:30 ET open so 30m/1h/4h candles line up with the
- * regular session the way most terminals draw them. Daily candles cover the regular session only
+ * regular session the way most terminals draw them. At the data's own bar size (or finer), each
+ * bar is its own candle where the vendor placed it: hourly bars on the clock hour, a 09:30-10:00
+ * first hourly bar, 4-hour bars from 04:00. Daily candles cover the regular session only
  * (falling back to all bars if a day has no regular-session data, e.g. a pre-market-only feed).
  *
  * Aggregating only the bars that have been revealed produces a correctly *forming* last candle,
@@ -10,7 +12,7 @@
  * callers only pass it revealed data.
  */
 import type { Bar, Timeframe, UnixSeconds } from '../types';
-import { TIMEFRAME_MINUTES } from '../types';
+import { TIMEFRAMES, TIMEFRAME_MINUTES } from '../types';
 import { REGULAR_OPEN, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, marketSession } from '../time';
 
 export interface BucketKey {
@@ -28,10 +30,20 @@ export function bucketFor(time: UnixSeconds, timeframe: Timeframe): BucketKey {
   return { key: `${date}#${idx}`, start: time - (mod - (REGULAR_OPEN + idx * n)) * 60 - (time % 60) };
 }
 
+/** Whether a `timeframe` chart of `baseTimeframe` data shows each bar as its own candle. */
+export function ownCandles(timeframe: Timeframe, baseTimeframe: Timeframe): boolean {
+  return timeframe !== '1D' && TIMEFRAMES.indexOf(timeframe) <= TIMEFRAMES.indexOf(baseTimeframe);
+}
+
+/** The candle that the base bar starting at `time` belongs to on a `timeframe` chart of `baseTimeframe` data. */
+export function candleFor(time: UnixSeconds, timeframe: Timeframe, baseTimeframe: Timeframe): BucketKey {
+  return ownCandles(timeframe, baseTimeframe) ? { key: String(time), start: time } : bucketFor(time, timeframe);
+}
+
 /** Batch aggregation of chronologically sorted base bars. */
 export function aggregateBars(bars: readonly Bar[], timeframe: Timeframe, baseTimeframe: Timeframe = '1m'): Bar[] {
-  if (timeframe === baseTimeframe) return bars.map((b) => ({ ...b }));
-  const agg = new BarAggregator(timeframe);
+  if (ownCandles(timeframe, baseTimeframe)) return bars.map((b) => ({ ...b }));
+  const agg = new BarAggregator(timeframe, baseTimeframe);
   const out: Bar[] = [];
   for (const b of bars) {
     const r = agg.push(b);
@@ -52,10 +64,13 @@ export class BarAggregator {
   /** For daily bars: whether the current day already has regular-session data. */
   private currentHasRegular = false;
 
-  constructor(readonly timeframe: Timeframe) {}
+  constructor(
+    readonly timeframe: Timeframe,
+    readonly baseTimeframe: Timeframe = '1m',
+  ) {}
 
   push(bar: Bar): { bar: Bar; isNew: boolean } | null {
-    const { key, start } = bucketFor(bar.time, this.timeframe);
+    const { key, start } = candleFor(bar.time, this.timeframe, this.baseTimeframe);
     const isDaily = this.timeframe === '1D';
     const regular = !isDaily || marketSession(bar.time) === 'regular';
 

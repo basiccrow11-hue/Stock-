@@ -1,7 +1,7 @@
 /**
  * Performance statistics computed from closed round-trip trades and an equity curve.
  */
-import type { EquityPoint, RoundTrip } from '../types';
+import type { EquityPoint, Fill, RoundTrip } from '../types';
 
 export interface PerformanceStats {
   totalTrades: number;
@@ -184,4 +184,48 @@ export function computeStats(trips: readonly RoundTrip[], curve: readonly Equity
     commissions: closed.reduce((a, t) => a + t.commission, 0),
     maxConsecutiveLosses: maxStreak,
   };
+}
+
+/**
+ * The account's equity just before `trip` opened, as the account knew it then: the equity curve's
+ * last point at or before the entry, plus each other fill that came after that point and before the
+ * entry and was known by the time the entry was (a daily bar beside 1-minute data is known only at
+ * its close, so its fills count for an entry on that daily bar, not for a 1-minute entry made while it
+ * was hidden). Each such fill moves equity by what the position held before it made from the price
+ * it was last marked at to the fill's price, less commission; shares it opens are valued at what was
+ * paid for them, so a position opened at a gap is not a loss. So a stop-out earlier in the entry's own
+ * bar counts, and nothing after the entry does. Another symbol's bar fill at the entry's very moment (a
+ * stop gapped through at the open an entry also filled at) counts, as part of the market the entry met,
+ * so the result does not depend on the order in which the bars of several symbols were processed.
+ * Positions are marked at bar closes, not inside a bar.
+ */
+export function equityBeforeEntry(trip: RoundTrip, fills: readonly Fill[], curve: readonly EquityPoint[], startingBalance: number): number {
+  let i = curve.length - 1;
+  while (i >= 0 && curve[i].time > trip.entryTime) i--;
+  const base = i >= 0 ? curve[i].equity : startingBalance;
+  const at = i >= 0 ? curve[i].time : -Infinity;
+  const entryIndex = fills.findIndex((f) => f.id === trip.fills[0]);
+  const entry = fills[entryIndex];
+  if (!entry || entry.knownAt === undefined) return base; // older fills: the curve alone
+  const known = entry.knownAt;
+  // A curve point is written as each bar ends, so it holds the fills of bars that had ended by then,
+  // but not those of an order that filled at once when placed at that same moment.
+  const inCurve = (f: Fill) => f.knownAt! < at || (f.knownAt === at && f.at !== 'placed');
+  const own = new Set(trip.fills);
+  const mark = new Map<string, number>();
+  let equity = base;
+  // In the fills' order, which for any one symbol is the order in time.
+  for (let k = 0; k < fills.length; k++) {
+    const f = fills[k];
+    if (own.has(f.id) || f.knownAt === undefined || f.knownAt > known || inCurve(f)) continue;
+    if (f.time > entry.time) continue;
+    // At the entry's moment, the fills' order is the real sequence only within one symbol's bar or
+    // between orders that filled as they were placed; across symbols' bars it is processing order.
+    if (f.time === entry.time && k > entryIndex && (f.symbol === entry.symbol || (f.at === 'placed' && entry.at === 'placed'))) continue;
+    const held = f.positionBefore ?? 0;
+    const from = mark.get(f.symbol) ?? f.markBefore ?? f.price;
+    equity += held * (f.price - from) - f.commission;
+    mark.set(f.symbol, f.price);
+  }
+  return equity;
 }
