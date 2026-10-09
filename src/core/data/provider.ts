@@ -39,6 +39,8 @@ export interface HistoricalDataProvider extends MarketDataProvider {
   getBars(req: BarRequest, signal?: AbortSignal): Promise<Bar[]>;
   /** Earliest/latest data available for a symbol, if known. */
   availableRange(symbol: string): Promise<{ from: UnixSeconds; to: UnixSeconds } | null>;
+  /** Trading days (YYYY-MM-DD, exchange time) that have bars, when the data can have gaps between them (imported files). */
+  sessionDates?(symbol: string): Promise<string[] | null>;
 }
 
 export type Unsubscribe = () => void;

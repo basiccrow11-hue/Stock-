@@ -100,6 +100,8 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   conflict?: boolean;
   /** Market orders: the price they were checked against when placed (last price plus or minus half the spread). */
   quotedPrice?: number;
+  /** When the order's current terms took effect (placed, or its price or size last changed): it trades only on prices after this. */
+  activeFrom?: UnixSeconds;
 }
 
 export interface Fill {
@@ -116,6 +118,12 @@ export interface Fill {
   /** Half-spread cost in dollars relative to the mid/trade price. Always >= 0. */
   spreadCost: number;
   time: UnixSeconds;
+  /**
+   * How its price was set: 'open' at the open of a bar that began after the order was placed (a gap
+   * can carry it past the order's price), 'placed' at once at the last price when the order was placed
+   * or changed, 'bar' later in a bar. Absent on older fills.
+   */
+  at?: 'open' | 'placed' | 'bar';
   /** Realized P/L produced by this fill (closing fills only), after commission. */
   realizedPnl: number;
 }
@@ -162,6 +170,9 @@ export interface RoundTrip {
   bracketEntry?: number;
   /** The initial stop came with an add, not with the trade's first entry (which had none). */
   stopFromAdd?: boolean;
+  /** The same for the entry order the initial target came with (which may be a later add). Absent on older trades. */
+  targetPlanned?: number;
+  targetEntry?: number;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

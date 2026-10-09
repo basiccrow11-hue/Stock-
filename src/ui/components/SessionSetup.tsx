@@ -5,7 +5,7 @@ import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { REPLAY_SPEEDS, SIM_SPEEDS, play, startReplay, startSim, useTrading } from '../state/tradingStore';
 import { TIMEFRAMES, type Timeframe } from '../../core/types';
-import type { SymbolInfo } from '../../core/data/provider';
+import type { HistoricalDataProvider, SymbolInfo } from '../../core/data/provider';
 import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
 import { CHALLENGES } from '../../core/challenges/challenges';
 import { SIM_STOCKS, type SimConfig } from '../../core/sim/SimMarket';
@@ -63,9 +63,11 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const [challengeId, setChallengeId] = useState(presetChallenge ?? '');
   const [symbols, setSymbols] = useState<SymbolInfo[]>([]);
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+  // Imported data can be separate days (several files added together): the days that have bars.
+  const [days, setDays] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const provider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
+  const provider: HistoricalDataProvider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
   const unavailable = provider.unavailableReason();
 
   useEffect(() => {
@@ -82,9 +84,14 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   useEffect(() => {
     let alive = true;
     setRange(null);
+    setDays(null);
     provider
       .availableRange(symbol.toUpperCase())
       .then((rg) => alive && setRange(rg ? { from: exchangeDate(rg.from), to: exchangeDate(rg.to) } : null))
+      .catch(() => undefined);
+    provider
+      .sessionDates?.(symbol.toUpperCase())
+      .then((d) => alive && setDays(d))
       .catch(() => undefined);
     return () => {
       alive = false;
@@ -106,6 +113,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return 'Choose a date.';
     if (!isTradingDay(date)) return `${date} is not a trading day (weekend or NYSE holiday).`;
     if (range && (date < range.from || date > range.to)) return `Data for ${symbol.toUpperCase()} covers ${range.from} to ${range.to}.`;
+    if (days && !days.includes(date)) return `There is no ${symbol.toUpperCase()} data on ${date}: the imported data has gaps. Pick another day, or Random date.`;
     const s = parseHHMM(startTime);
     const e = parseHHMM(endTime);
     if (s === null || e === null) return 'Enter start and end times as HH:MM.';
@@ -117,7 +125,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     if (typeof balance !== 'number' || balance < 100) return 'Starting balance must be at least $100.';
     if (timeframe === '1D' && !multiDay) return 'The daily timeframe needs a multi-day replay.';
     return null;
-  }, [unavailable, symbol, date, range, startTime, endTime, multiDay, endDate, balance, timeframe]);
+  }, [unavailable, symbol, date, range, days, startTime, endTime, multiDay, endDate, balance, timeframe]);
 
   const extraSymbols = includeWatchlist ? settings.watchlist.filter((s) => s !== symbol.toUpperCase() && (providerId !== 'demo' && providerId !== 'csv' ? true : symbols.some((x) => x.symbol === s))) : [];
 
@@ -238,6 +246,13 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
           onClick={() => {
             const from = range?.from ?? DEMO_FIRST_DATE;
             const to = range?.to ?? demoProvider.lastDate;
+            if (days?.length) {
+              // A day with bars, and for a multi-day replay the end four days with bars later.
+              const k = Math.floor(Math.random() * days.length);
+              setDate(days[k]);
+              if (multiDay) setEndDate(days[Math.min(k + 4, days.length - 1)]);
+              return;
+            }
             const d = randomTradingDay(from, to);
             setDate(d);
             if (multiDay) {

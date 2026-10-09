@@ -5,6 +5,7 @@
 import type { Bar, Timeframe, UnixSeconds } from '../types';
 import type { BarRequest, HistoricalDataProvider, SymbolInfo } from './provider';
 import { lastIndexAtOrBefore } from '../util/math';
+import { addDays, exchangeDate, exchangeTimeToUnix, isTradingDay } from '../time';
 
 export interface CsvDataset {
   symbol: string;
@@ -54,6 +55,19 @@ export class CsvDataProvider implements HistoricalDataProvider {
     const d = this.datasets.get(symbol.toUpperCase());
     if (!d || !d.bars.length) return null;
     return { from: d.bars[0].time, to: d.bars[d.bars.length - 1].time };
+  }
+
+  async sessionDates(symbol: string): Promise<string[] | null> {
+    const d = this.datasets.get(symbol.toUpperCase());
+    if (!d || !d.bars.length) return null;
+    // One lookup per day: from a day's first bar, jump to the first bar after that day.
+    const out: string[] = [];
+    for (let i = 0; i < d.bars.length; ) {
+      const date = exchangeDate(d.bars[i].time);
+      if (isTradingDay(date)) out.push(date);
+      i = Math.max(i + 1, lastIndexAtOrBefore(d.bars, exchangeTimeToUnix(addDays(date, 1), 0) - 1, (b) => b.time) + 1);
+    }
+    return out;
   }
 
   async getBars(req: BarRequest): Promise<Bar[]> {

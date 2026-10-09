@@ -9,7 +9,7 @@
 import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../types';
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
-import { entryPastStop, entryPastTarget, initialRiskPerShare, plannedRR, rMultiple, riskBasis } from '../analytics/stats';
+import { entryPastStop, entryPastTarget, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
 import { exchangeDate, exchangeMinuteOfDay, REGULAR_OPEN } from '../time';
 
 export interface TradingRules {
@@ -214,10 +214,37 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const basis = riskBasis(trip);
   const addedPastStop = basis?.from === 'first';
   const bracketEntry = trip.bracketEntry ?? trip.avgEntry;
-  // The entry order the stop came with: the first one, or the add that brought it.
-  const entryOrders = trip.fills.map((id) => input.fills.find((f) => f.id === id)).map((f) => f && input.orders.find((o) => o.id === f.orderId));
-  const entryOrder = trip.stopFromAdd ? entryOrders.find((o) => o?.stopLoss !== undefined) : entryOrders[0];
-  const entryName = trip.stopFromAdd ? 'add' : 'entry order';
+  // The entry orders the stop and the target came with: the first one, or the add that brought them.
+  const tripFills = trip.fills.map((id) => input.fills.find((f) => f.id === id));
+  const entryOrders = tripFills.map((f) => f && input.orders.find((o) => o.id === f.orderId)).filter((o) => o?.action === 'buy' || o?.action === 'short');
+  const stopOrder = (trip.stopFromAdd && entryOrders.find((o) => o?.stopLoss !== undefined)) || entryOrders[0];
+  const targetOrder = entryOrders.find((o) => o?.takeProfit !== undefined) ?? entryOrders[0];
+  // How that order came to fill past its own stop or target: a gap at a bar's open (also older trades,
+  // which did not record it), the spread and slippage, a limit through the market, or price moving past
+  // both before the order could fill (an order placed while a daily bar was still hidden).
+  const entryPast = (order: Order | undefined, planned: number | undefined, price: number, what: 'stop' | 'target', level: number): { text: string; gap: boolean } => {
+    const fill = order && tripFills.find((f) => f?.orderId === order.id);
+    const market = order?.type === 'market';
+    const name = order && order !== entryOrders[0] ? (market ? 'market add' : 'add') : market ? 'market order' : 'entry order';
+    const at = planned !== undefined ? ` at ${planned.toFixed(2)}` : '';
+    if (!fill?.at || fill.at === 'open') {
+      return {
+        gap: true,
+        text: market
+          ? `Your ${name} was placed${planned !== undefined ? ` with price at ${planned.toFixed(2)}` : ''} and filled at the next open, ${price.toFixed(2)}, already past your ${what} at ${level.toFixed(2)}.`
+          : `Price gapped through both your ${name}${at} and your ${what} at ${level.toFixed(2)}, so it filled at ${price.toFixed(2)}.`,
+      };
+    }
+    // The market price before this fill's spread and slippage: if that was short of the level, the costs carried it past.
+    const sign = long ? 1 : -1;
+    const before = price - (sign * (fill.slippage + fill.spreadCost)) / fill.quantity;
+    if ((what === 'target' ? (before - level) * sign : (level - before) * sign) < 0) {
+      return { gap: false, text: `Your ${name}${at} filled at ${price.toFixed(2)}, past your ${what} at ${level.toFixed(2)}: the spread and slippage of the fill alone carried it past a ${what} that close.` };
+    }
+    if (fill.at === 'placed') return { gap: false, text: `Your ${name}${at} was already through the market, so it filled at once at ${price.toFixed(2)}, past your ${what} at ${level.toFixed(2)}.` };
+    return { gap: false, text: `Your ${name}${at} filled at ${price.toFixed(2)}, already past your ${what} at ${level.toFixed(2)}: price was past both by the time the order could fill.` };
+  };
+  const gapNote = (what: string) => ` An order waiting for the next bar, or for the market to open, fills at that bar's open wherever price is, even past its own ${what}.`;
   const equityAtEntry = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
@@ -301,7 +328,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       tone: tight ? 'bad' : 'neutral',
       title: tight ? 'Stop was tight relative to normal movement' : 'Stop distance',
       detail: `Your stop was ${riskPerShare.toFixed(2)} away${
-        basis?.from === 'planned' ? (entryOrder?.type === 'market' ? ' from the price when you placed your order' : ' from your order’s price') : basis?.from === 'first' ? ' from your first entry' : ''
+        basis?.from === 'planned' ? (stopOrder?.type === 'market' ? ' from the price when you placed your order' : ' from your order’s price') : basis?.from === 'first' ? ' from your first entry' : ''
       }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry!.toFixed(2)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
@@ -320,14 +347,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const filledPast = past >= 0.02 - 1e-9 && past > 0.25 * riskPerShare;
     const moved = Math.abs(stopAt - trip.initialStop!) > 1e-9;
     if (pastStop) {
+      const how = entryPast(stopOrder, trip.plannedEntry, bracketEntry, 'stop', trip.initialStop!);
       findings.push({
         tone: 'neutral',
         title: 'Entry filled past your stop',
-        detail: `${
-          entryOrder?.type === 'market'
-            ? `Your market ${trip.stopFromAdd ? 'add' : 'order'} was placed${trip.plannedEntry !== undefined ? ` with price at ${trip.plannedEntry.toFixed(2)}` : ''} and filled at the next open, ${bracketEntry.toFixed(2)}, already past your stop at ${trip.initialStop!.toFixed(2)}. The stop then closed the trade`
-            : `Price gapped through both your ${entryName}${trip.plannedEntry !== undefined ? ` at ${trip.plannedEntry.toFixed(2)}` : ''} and your stop at ${trip.initialStop!.toFixed(2)}, so it filled at ${bracketEntry.toFixed(2)} and the stop closed the trade`
-        } at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk. An order left working while the market is closed fills at the next open wherever price is, even past its own stop.`,
+        detail: `${how.text} The stop then closed the trade at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk.${how.gap ? gapNote('stop') : ''}`,
       });
     } else if (inR(exitPx) >= 0) {
       findings.push({
@@ -385,14 +409,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   }
 
   if (pastTarget) {
+    const how = entryPast(targetOrder, trip.targetPlanned ?? trip.plannedEntry, trip.targetEntry ?? bracketEntry, 'target', trip.initialTarget!);
+    // Planned reward:risk falls back to the order's own price when the entry R uses is past the target too.
+    const fromPlan = rr !== null && basis !== null && (trip.initialTarget! - basis.entry) * dir <= 0;
     findings.push({
       tone: 'neutral',
       title: 'Entry filled past your target',
-      detail: `${
-        entryOrder?.type === 'market'
-          ? `Your market ${trip.stopFromAdd ? 'add' : 'order'} was placed${trip.plannedEntry !== undefined ? ` with price at ${trip.plannedEntry.toFixed(2)}` : ''} and filled at the next open, ${bracketEntry.toFixed(2)}, already past your target at ${trip.initialTarget!.toFixed(2)}.`
-          : `Price gapped through both your ${entryName}${trip.plannedEntry !== undefined ? ` at ${trip.plannedEntry.toFixed(2)}` : ''} and your target at ${trip.initialTarget!.toFixed(2)}, so it filled at ${bracketEntry.toFixed(2)}.`
-      } The trade then closed at ${trip.avgExit?.toFixed(2) ?? '—'}: ${signed(trip.pnl)} after costs. Planned reward:risk is measured from the price you placed the order at. An order left working while the market is closed fills at the next open wherever price is, even past its own target.`,
+      detail: `${how.text} The trade then closed at ${trip.avgExit?.toFixed(2) ?? '—'}: ${signed(trip.pnl)} after costs.${fromPlan ? ' Planned reward:risk is measured from the price you placed the order at.' : ''}${how.gap ? gapNote('target') : ''}`,
     });
   } else if (targetDistance !== null) {
     // A limit that took profit short of the original target (or a target moved closer) did not reach it.
@@ -469,6 +492,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   };
 }
 
+const RR_GAP_DETAIL: Record<RRGap, string> = {
+  no_stop_or_target: 'Needs both a stop and a target',
+  stop_past_average: 'Not measurable: the stop sat past your average entry',
+  entry_past_target: 'Not measurable: the entry filled past the target',
+  average_past_target: 'Not measurable: your adds moved your average entry past the target',
+};
+
 export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, rr: number | null): RuleCheck[] {
   const { trip, rules, allTrips } = input;
   const out: RuleCheck[] = [];
@@ -498,14 +528,7 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
     out.push({
       rule: `Planned reward:risk ≥ ${rules.minRewardRisk}:1`,
       passed: rr === null ? false : rr >= rules.minRewardRisk - 1e-9,
-      detail:
-        rr !== null
-          ? `${rr.toFixed(2)}:1`
-          : !hasStop || trip.initialTarget === undefined
-            ? 'Needs both a stop and a target'
-            : riskBasis(trip) === null
-              ? 'Not measurable: the stop sat past your average entry'
-              : 'Not measurable: the entry filled past the target',
+      detail: rr !== null ? `${rr.toFixed(2)}:1` : RR_GAP_DETAIL[plannedRRGap(trip) ?? 'no_stop_or_target'],
     });
   }
   const day = exchangeDate(trip.entryTime);

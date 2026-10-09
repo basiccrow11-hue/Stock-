@@ -75,9 +75,9 @@ export function entryPastStop(t: RoundTrip): boolean {
   return t.initialStop !== undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
 }
 
-/** True when that entry filled at or past the initial target (a gap through both). */
+/** True when the entry the initial target came with filled at or past that target (a gap through both). */
 export function entryPastTarget(t: RoundTrip): boolean {
-  return t.initialTarget !== undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialTarget) * (t.direction === 'long' ? 1 : -1) >= 0;
+  return t.initialTarget !== undefined && ((t.targetEntry ?? t.bracketEntry ?? t.avgEntry) - t.initialTarget) * (t.direction === 'long' ? 1 : -1) >= 0;
 }
 
 /** Realized R multiple: P/L divided by the dollars at risk to the initial stop. */
@@ -89,7 +89,7 @@ export function rMultiple(t: RoundTrip): number | null {
 
 /**
  * Reward to the initial target over risk to the initial stop, from the same entry as R. When the
- * entry filled at or past the target (a gap), the plan is what the order was placed for.
+ * entry the target came with filled at or past it (a gap), the plan is what that order was placed for.
  */
 export function plannedRR(t: RoundTrip): number | null {
   const b = riskBasis(t);
@@ -97,10 +97,21 @@ export function plannedRR(t: RoundTrip): number | null {
   const dir = t.direction === 'long' ? 1 : -1;
   const reward = (t.initialTarget - b.entry) * dir;
   if (reward > 0) return reward / b.risk;
-  if (t.plannedEntry === undefined) return null;
-  const plannedReward = (t.initialTarget - t.plannedEntry) * dir;
-  const plannedRisk = (t.plannedEntry - t.initialStop!) * dir;
+  const planned = t.targetPlanned ?? t.plannedEntry;
+  if (!entryPastTarget(t) || planned === undefined) return null;
+  const plannedReward = (t.initialTarget - planned) * dir;
+  const plannedRisk = (planned - t.initialStop!) * dir;
   return plannedReward > 0 && plannedRisk > 0 ? plannedReward / plannedRisk : null;
+}
+
+/** Why a trade has no planned reward:risk (null when it has one). */
+export type RRGap = 'no_stop_or_target' | 'stop_past_average' | 'entry_past_target' | 'average_past_target';
+
+export function plannedRRGap(t: RoundTrip): RRGap | null {
+  if (plannedRR(t) !== null) return null;
+  if (t.initialStop === undefined || t.initialTarget === undefined) return 'no_stop_or_target';
+  if (riskBasis(t) === null) return 'stop_past_average';
+  return entryPastTarget(t) ? 'entry_past_target' : 'average_past_target';
 }
 
 export function returnPct(t: RoundTrip): number {

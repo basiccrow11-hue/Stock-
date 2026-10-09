@@ -514,6 +514,110 @@ describe('learning review', () => {
     });
   });
 
+  describe('a target that came with an add, and entries that cannot fill past their own brackets', () => {
+    const review = (b: SimBroker, bars: ReturnType<typeof bar>[]) => {
+      const st = b.state;
+      const t = st.roundTrips[0];
+      const r = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      return { t, r, rr, text: r.findings.map((f) => `${f.title}: ${f.detail}`).join('\n'), rule: r.rules.find((x) => x.rule.startsWith('Planned'))! };
+    };
+    // Long 100 at 100 with a stop at 98 and no target; then, averaging down, 100 more at 99 with a target at 99.80.
+    function averagedDown() {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const t0 = et('2025-01-15', '10:00');
+      const bars = [bar(t0, 100, 100, 100, 100)];
+      const next = (o: number, h: number, l: number, c: number) => {
+        bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+        b.onBar('T', bars[bars.length - 1]);
+      };
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 98 });
+      next(99, 99, 99, 99);
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 98, takeProfit: 99.8 }).ok).toBe(true);
+      return { b, bars, next };
+    }
+
+    it('checks that target against the add’s own fill, not the first entry', () => {
+      const { b, bars, next } = averagedDown();
+      next(99, 99.9, 99, 99.9); // the add's target fills at 99.80
+      b.closePosition('T');
+      const { t, r, text, rule } = review(b, bars);
+      expect([t.closed, t.initialTarget, t.targetEntry, t.targetPlanned, t.avgEntry]).toEqual([true, 99.8, 99, 99, 99.5]);
+      expect(plannedRR(t)).toBeCloseTo(0.2, 9);
+      expect(text).not.toContain('Entry filled past your target');
+      expect(text).not.toContain('next open');
+      expect(r.findings.map((f) => f.title)).toContain('Target reached');
+      expect(rule.detail).toBe('0.20:1');
+    });
+
+    it('says adds moved the average past the target when that is why planned R:R cannot be measured', () => {
+      const { b, bars, next } = averagedDown();
+      next(100.4, 100.4, 100.4, 100.4); // gaps over the target, which fills at 100.40
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 300 });
+      b.closePosition('T');
+      const { t, text, rule, rr } = review(b, bars);
+      expect(t.avgEntry).toBeCloseTo(100.04, 9);
+      expect(plannedRR(t)).toBeNull();
+      expect(text).not.toContain('Entry filled past your target');
+      expect(rule).toMatchObject({ passed: false, detail: 'Not measurable: your adds moved your average entry past the target' });
+      expect(rr).toMatchObject({ status: 'failed', detail: 'The planned reward:risk of a trade on T could not be measured: adds moved its average entry past its target.' });
+    });
+
+    it('refuses a price change that puts an entry past its own stop or target, and leaves the order as it was', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      b.onBar('T', bar(et('2025-01-15', '10:00'), 100, 100, 100, 100));
+      const limit = b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.4, quantity: 10, stopLoss: 98.4, takeProfit: 99.8 }).order!;
+      expect(b.modify(limit.id, { limitPrice: 100.05 })).toEqual({ ok: false, error: 'Take profit must be above the entry price for a long: this limit is already through the market, so it would fill at once at about 100.00.' });
+      expect(b.modify(limit.id, { limitPrice: 99.9 })).toEqual({ ok: false, error: 'Take profit must be above the entry price for a long.' });
+      expect(b.state.orders.find((o) => o.id === limit.id)!.limitPrice).toBe(99.4);
+      const stop = b.submit({ symbol: 'T', action: 'buy', type: 'stop', stopPrice: 101, quantity: 10, stopLoss: 100.5 }).order!;
+      expect(b.modify(stop.id, { stopPrice: 100.4 })).toEqual({ ok: false, error: 'Stop loss must be below the entry price for a long.' });
+      expect(b.modify(stop.id, { stopPrice: 101.5 }).ok).toBe(true);
+      // So does a buy stop below the market, and a sell stop above it, which trigger at once.
+      expect(b.modify(stop.id, { stopPrice: 99 })).toEqual({ ok: false, error: 'Stop loss must be below the entry price for a long: this stop is already through the market, so it would fill at once at about 100.00.' });
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'stop', stopPrice: 99, quantity: 10, stopLoss: 98.5, takeProfit: 99.8 })).toMatchObject({
+        ok: false,
+        error: 'Take profit must be above the entry price for a long: this stop is already through the market, so it would fill at once at about 100.00.',
+      });
+      // A buy limit above the market fills at once at the market, so its stop must be below that too.
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 101, quantity: 10, stopLoss: 100.5 })).toMatchObject({
+        ok: false,
+        error: 'Stop loss must be below the entry price for a long: this limit is already through the market, so it would fill at once at about 100.00.',
+      });
+      expect(b.state.fills).toEqual([]);
+    });
+
+    it('blames the spread and slippage, not a gap, for a market entry that fills past a target that close', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, slippage: { bps: 5, impactBpsPerPctOfVolume: 0 } } });
+      const t0 = et('2025-01-15', '10:00');
+      const bars = [bar(t0, 100, 100, 100, 100), bar(t0 + 60, 100.1, 100.1, 100.1, 100.1)];
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 10, stopLoss: 99, takeProfit: 100.02 });
+      b.onBar('T', bars[1]);
+      const { t, text } = review(b, bars);
+      expect([t.closed, t.targetEntry]).toEqual([true, 100.05]);
+      expect(text).toContain('Entry filled past your target: Your market order at 100.00 filled at 100.05, past your target at 100.02: the spread and slippage of the fill alone carried it past a target that close.');
+      expect(text).not.toMatch(/gapped|next open|bar's open/);
+    });
+
+    it('says price was already past both when an order on a hidden daily bar fills past its stop', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const day = (d: string, o: number, h: number, l: number, c: number) => bar(et(d, '09:30'), o, h, l, c);
+      const bars = [day('2025-01-14', 99, 101, 98, 100), day('2025-01-15', 110, 114, 108, 112)];
+      b.onBar('T', bars[0], 23_400);
+      b.syncClock(et('2025-01-15', '12:00'));
+      // Placed at noon, while the day's bar is hidden: by then its path (110 → 108 → 114 → 112) is near 108.92.
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 110, quantity: 10, stopLoss: 109.5, tif: 'gtc' }).order!.status).toBe('pending');
+      b.onBar('T', bars[1], 23_400);
+      const { t, text } = review(b, bars);
+      expect([t.closed, t.bracketEntry]).toEqual([true, 108.93]);
+      expect(b.state.fills[0].time).toBeGreaterThanOrEqual(et('2025-01-15', '12:00'));
+      expect(text).toContain('Entry filled past your stop: Your entry order at 110.00 filled at 108.93, already past your stop at 109.50: price was past both by the time the order could fill.');
+      expect(text).not.toMatch(/gapped|next open|bar's open/);
+    });
+  });
+
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
     // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
     const avgEntry = (100.1 + 100.1 + 100.1) / 3;

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegistry';
-import { combineBars, parseCsv, type CsvParseResult } from '../../core/data/csv';
+import { combineBars, parseCsv, tickerFromFileName, type CsvParseResult } from '../../core/data/csv';
 import type { CsvDataset } from '../../core/data/csvProvider';
 import { deleteEncrypted, hasEncrypted, loadEncrypted, saveEncrypted } from '../services/secureStore';
 import { NumberField, SourceBadge, useFocusRescue } from '../components/common';
@@ -98,13 +98,15 @@ function CsvImportCard() {
   const onFile = async (f: File | undefined) => {
     if (!f) return;
     if (f.size > 200 * 1024 * 1024) {
-      setError('File is larger than 200 MB. Split it by year or symbol.');
+      setFile(null);
+      setParsed(null);
+      setError(`${f.name} is larger than 200 MB. Split it by year or symbol.`);
       return;
     }
     const text = await f.text();
     setFile({ name: f.name, text });
-    const guess = f.name.replace(/\.(csv|txt)$/i, '').split(/[_\-\s.]/)[0].toUpperCase();
-    if (!symbol && /^[A-Z.]{1,8}$/.test(guess)) setSymbol(guess);
+    const guess = tickerFromFileName(f.name);
+    if (!symbol && guess) setSymbol(guess);
   };
 
   const save = async () => {
@@ -141,7 +143,17 @@ function CsvImportCard() {
       <div className="form-grid">
         <label className="field">
           <span>CSV file</span>
-          <input key={fileBox} type="file" accept=".csv,.txt,text/csv" onChange={(e) => void onFile(e.target.files?.[0])} />
+          <input
+            key={fileBox}
+            type="file"
+            accept=".csv,.txt,text/csv"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              // Cleared once read, so choosing the same file again (after fixing it) reads it again.
+              e.target.value = '';
+              void onFile(f);
+            }}
+          />
         </label>
         <label className="field">
           <span>Ticker</span>
@@ -158,9 +170,15 @@ function CsvImportCard() {
           <input type="checkbox" checked={closeStamped} onChange={(e) => setCloseStamped(e.target.checked)} /> Timestamps mark the bar close
         </label>
       </div>
-      {error && <div className="alert error">{error}</div>}
+      {error && (
+        <div className="alert error">
+          {file ? `${file.name}: ` : ''}
+          {error}
+        </div>
+      )}
       {parsed && (
         <div className="alert info">
+          {file ? `${file.name}: ` : ''}
           {parsed.rowsRead.toLocaleString('en-US')} rows read, {parsed.bars.length.toLocaleString('en-US')} valid {parsed.baseTimeframe} bars, {parsed.rowsSkipped} skipped. Range {dateTime(parsed.firstTime)} to {dateTime(parsed.lastTime)} ET.
           {parsed.warnings.map((w, i) => (
             <div key={i} className="warn">

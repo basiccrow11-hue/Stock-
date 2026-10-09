@@ -391,7 +391,8 @@ describe('A new day before its first bar', () => {
     expect(s.broker.state.clock).toBe(et('2025-01-14', '16:00'));
     const m = s.submit({ symbol: 'GAP', action: 'buy', type: 'market', quantity: 10 });
     expect(m.order!.status).toBe('pending');
-    expect(m.warnings).toContain('The regular session has no bar yet: the order works from its first one (market orders fill at its open).');
+    expect(m.warnings).toContain('GAP has not traded yet in this regular session: the order works from its first bar (market orders fill at its open).');
+    expect(m.notes).toBeUndefined();
     // A marketable limit waits too, and so does changing it.
     const l = s.submit({ symbol: 'GAP', action: 'buy', type: 'limit', limitPrice: 120, quantity: 10, tif: 'gtc' });
     expect(l.order!.status).toBe('pending');
@@ -419,6 +420,78 @@ describe('A new day before its first bar', () => {
     s.step();
     expect(s.broker.position('GAP').quantity).toBe(0);
     expect(s.broker.state.fills[1]).toMatchObject({ price: 110, time: et('2025-01-15', '09:30') });
+  });
+});
+
+describe('Sessions are decided per symbol', () => {
+  // ONE trades from 09:30; TWO, thinly traded, first trades at 09:35 (it closed at 100 the day before).
+  const flat = (n: number, px: number) => Array.from({ length: n }, () => [px, px, px, px] as [number, number, number, number]);
+  const one = [...minuteBars('2025-01-14', '15:58', flat(2, 50)), ...minuteBars('2025-01-15', '09:30', flat(10, 51))];
+  const two = [...minuteBars('2025-01-14', '15:58', flat(2, 100)), ...minuteBars('2025-01-15', '09:35', [[110, 111, 109, 110], ...flat(4, 110)])];
+  const setup = { symbol: 'ONE', date: '2025-01-15', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 };
+  const engine = (symbol: string, bars: Bar[], tf: '1m' | '1D' = '1m') => new ReplayEngine({ symbol, start: et('2025-01-15', '09:30'), end: et('2025-01-15', '16:00'), baseTimeframe: tf }, bars);
+
+  it('holds an order on a symbol that has not traded yet today until its own first bar', () => {
+    const s = new ReplaySession([engine('ONE', one), engine('TWO', two)], setup, ZERO_COST_CONFIG, 'p', 'HISTORICAL');
+    s.step();
+    s.step(); // 09:32: ONE has traded today, TWO has not
+    const m = s.submit({ symbol: 'TWO', action: 'buy', type: 'market', quantity: 10 });
+    expect(m.order!.status).toBe('pending');
+    expect(m.warnings).toContain('TWO has not traded yet in this regular session: the order works from its first bar (market orders fill at its open).');
+    // A limit far above yesterday's close waits too, and is never filled at a price TWO did not trade at today.
+    const l = s.submit({ symbol: 'TWO', action: 'buy', type: 'limit', limitPrice: 105, quantity: 10, tif: 'gtc' });
+    expect(l.order!.status).toBe('pending');
+    while (s.now < et('2025-01-15', '09:36')) s.step();
+    expect(s.broker.state.fills.map((f) => [f.price, f.time])).toEqual([[110, et('2025-01-15', '09:35')]]);
+    expect(s.broker.state.orders.find((o) => o.id === l.order!.id)!.status).toBe('working');
+  });
+
+  it('fills an order on a daily symbol beside a 1m one on that day’s bar, from the time it was placed', () => {
+    // SPY daily: Jan 14 closes at 100; Jan 15 is an up day 110 → 108 → 114 → 112 (low first).
+    const spy = [bar(et('2025-01-14', '09:30'), 99, 101, 98, 100), bar(et('2025-01-15', '09:30'), 110, 114, 108, 112)];
+    const s = new ReplaySession([engine('ONE', one), engine('SPY', spy, '1D')], setup, ZERO_COST_CONFIG, 'm', 'HISTORICAL');
+    expect(s.submit({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('pending');
+    s.step();
+    s.step(); // 09:32: Jan 15 for SPY is not shown until its close
+    const later = s.submit({ symbol: 'SPY', action: 'buy', type: 'limit', limitPrice: 109, quantity: 10, tif: 'gtc' });
+    expect(later.order!.status).toBe('pending');
+    expect(s.broker.state.fills).toEqual([]);
+    while (s.now < et('2025-01-15', '13:00')) s.advance(1800);
+    // Placed at 13:00, after the path's low: the rest of the day never comes back down to 108.50.
+    const afterLow = s.submit({ symbol: 'SPY', action: 'buy', type: 'limit', limitPrice: 108.5, quantity: 10, tif: 'gtc' });
+    while (s.now < et('2025-01-15', '16:00')) s.advance(1800);
+    expect(s.broker.state.orders.find((o) => o.id === afterLow.order!.id)!.status).toBe('working');
+    // The market order placed at the open fills at the open; the limit placed at 09:32 only on the path
+    // after 09:32 (the low of 108 came at about 11:40), so at 109, never at Jan 14's close of 100.
+    const fills = s.broker.state.fills.map((f) => [f.price, f.time]);
+    expect(fills[0]).toEqual([110, et('2025-01-15', '09:30')]);
+    expect(fills[1][0]).toBe(109);
+    expect(fills[1][1]).toBeGreaterThanOrEqual(et('2025-01-15', '09:32'));
+  });
+
+  it('says an extended-hours order works from the day’s first bar, pre-market included', () => {
+    const pre = [...minuteBars('2025-01-14', '19:58', flat(2, 100)), ...minuteBars('2025-01-15', '04:00', flat(3, 101))];
+    const e = new ReplayEngine({ symbol: 'EXT', start: et('2025-01-15', '04:00'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, pre);
+    const s = new ReplaySession(e, { ...setup, symbol: 'EXT', startTime: '04:00' }, ZERO_COST_CONFIG, 'x', 'HISTORICAL');
+    const ext = s.submit({ symbol: 'EXT', action: 'buy', type: 'limit', limitPrice: 102, extendedHours: true, quantity: 10 });
+    expect(ext.order!.status).toBe('pending');
+    expect(ext.warnings).toContain('EXT has not traded yet in this session: the order works from its first bar.');
+    const reg = s.submit({ symbol: 'EXT', action: 'buy', type: 'limit', limitPrice: 102, quantity: 10 });
+    expect(reg.warnings).toContain('Market is not in regular hours. The order will work from the next regular session.');
+    s.step();
+    expect(s.broker.state.fills.map((f) => [f.orderId, f.price, f.time])).toEqual([[ext.order!.id, 101, et('2025-01-15', '04:00')]]);
+  });
+
+  it('fills a next-bar-open market order at the open of the next bar that starts after it', () => {
+    const bars = minuteBars('2025-01-15', '09:30', [[100, 100, 100, 100], [101, 101, 101, 101], [102, 102, 102, 102], [103, 103, 103, 103]]);
+    const e = new ReplayEngine({ symbol: 'NB', start: et('2025-01-15', '09:31'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, bars);
+    const s = new ReplaySession(e, { ...setup, symbol: 'NB', startTime: '09:31' }, { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' }, 'n', 'HISTORICAL');
+    s.advance(30); // 09:31:30, inside the 09:31 bar
+    s.submit({ symbol: 'NB', action: 'buy', type: 'market', quantity: 10 });
+    s.advance(30);
+    expect(s.broker.state.fills).toEqual([]);
+    s.advance(60);
+    expect(s.broker.state.fills.map((f) => [f.price, f.time])).toEqual([[102, et('2025-01-15', '09:32')]]);
   });
 });
 

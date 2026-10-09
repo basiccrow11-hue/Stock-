@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { combineBars, parseCsv, parseTimestamp } from '../data/csv';
+import { combineBars, parseCsv, parseTimestamp, tickerFromFileName } from '../data/csv';
 import { CsvDataProvider } from '../data/csvProvider';
 import { AlpacaProvider, PolygonProvider } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
@@ -57,10 +57,19 @@ describe('CSV import', () => {
       [185.5, 186, 184.1, 185.64, 1000],
       [185.64, 186.5, 185.1, 186.2, 2500],
     ]);
-    expect(eu.warnings).toContain('Numbers use a decimal comma: 185,64 was read as 185.64.');
+    expect(eu.warnings).toContain('Numbers were read with a decimal comma and points grouping thousands: 185,50 is 185.5.');
     expect(() => parseCsv('Date;Open;High;Low;Close\n2024-01-02 09:30;185,50;186,00;184,10;185,64\n2024-01-02 09:31;185.64;186.5;185.1;186.2\n')).toThrow(/mix decimal commas and decimal points/);
     // Thousands separators in a decimal-point file still read as before.
     expect(parseCsv('Date,Open,High,Low,Close\n2024-01-02,"1,234.50","1,240.00","1,230.25","1,238.75"\n').bars[0].close).toBe(1238.75);
+    // Prices with three decimals: a leading 0, dotted volumes, a semicolon or dotted dates show the comma is decimal.
+    const close = (csv: string) => parseCsv(csv).bars.map((b) => b.close);
+    expect(close('Date;Open;High;Low;Close;Volume\n17.01.2024;0,812;0,845;0,801;0,833;1234567\n')).toEqual([0.833]);
+    expect(close('Date;Open;High;Low;Close;Volume\n2024-01-17;2,965;2,995;2,859;2,889;785799\n')).toEqual([2.889]);
+    expect(parseCsv('Date\tOpen\tHigh\tLow\tClose\tVolume\n2024-01-17\t180,222\t181,000\t179,500\t180,750\t1.285.508\n').bars.map((b) => [b.close, b.volume])).toEqual([[180.75, 1285508]]);
+    expect(close('Date;Open;High;Low;Close;Volume\n2024-01-17;24.664;25.776;24.414;25.526;4.677.818\n')).toEqual([25526]);
+    const grouped = parseCsv('Date\tOpen\tHigh\tLow\tClose\n2024-01-17\t2,965\t2,995\t2,859\t2,889\n');
+    expect(grouped.bars[0].close).toBe(2889);
+    expect(grouped.warnings).toContain('2,965 was read as 2965, taking the comma to group thousands. If it is a decimal comma, export the file with decimal points.');
     const abbreviated = parseCsv('Date,Price,Open,High,Low,Vol.\n01/02/2024,10.5,10,11,9,82.49M\n01/03/2024,10.6,10.5,11,10,1.2K\n');
     expect(abbreviated.bars.map((b) => b.volume)).toEqual([82_490_000, 1200]);
     const none = parseCsv('Date,Open,High,Low,Close\n2024-01-02,10,11,9,10.5\n');
@@ -69,11 +78,40 @@ describe('CSV import', () => {
     expect(zero.warnings).toContain('Every volume is 0 or unreadable: the volume pane is empty, VWAP is not meaningful, and fills are not limited by bar volume.');
   });
 
+  it('guesses the ticker from common export file names', () => {
+    const cases: Array<[string, string | null]> = [
+      ['AAPL_1m.csv', 'AAPL'],
+      ['msft-2024.csv', 'MSFT'],
+      ['spy daily.txt', 'SPY'],
+      ['BRK.B_daily.csv', 'BRK.B'],
+      ['BRK-B.csv', 'BRK-B'],
+      ['NASDAQ_AAPL, 1D.csv', 'AAPL'],
+      ['BATS_SPY, 5_3f2a1.csv', 'SPY'],
+      ['2024_AAPL.csv', null],
+    ];
+    for (const [name, ticker] of cases) expect([name, tickerFromFileName(name)]).toEqual([name, ticker]);
+  });
+
+  it('detects the bar size from the gaps between bars, and refuses sizes it cannot replay', () => {
+    const at = (d: string, hhmm: string[]) => hhmm.map((t) => `${d} ${t},10,11,9,10.5,100`);
+    const csv = (rows: string[]) => `Date,Open,High,Low,Close,Volume\n${rows.join('\n')}\n`;
+    // A thinly traded stock: a 1-minute bar only in minutes that traded (2 or 3 minutes apart more often than 1).
+    const sparse = ['09:30', '09:32', '09:35', '09:36', '09:38', '09:41', '09:43', '09:46', '09:47', '09:50'];
+    expect(parseCsv(csv([...at('2024-01-16', sparse), ...at('2024-01-17', sparse)])).baseTimeframe).toBe('1m');
+    // Hourly bars from vendors that stamp the first one 09:30 and the next 10:00.
+    const hourly = ['09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'];
+    expect(parseCsv(csv([...at('2024-01-16', hourly), ...at('2024-01-17', hourly)])).baseTimeframe).toBe('1h');
+    expect(parseCsv(csv([...at('2024-01-16', ['09:30', '13:30']), ...at('2024-01-17', ['09:30', '13:30'])])).baseTimeframe).toBe('4h');
+    expect(() => parseCsv(csv(at('2024-01-16', ['09:30', '09:33', '09:36', '09:39'])))).toThrow('The bars in this file are 3 minutes apart, a bar size the replay does not support.');
+    expect(() => parseCsv(csv(at('2024-01-16', ['09:30', '11:30', '13:30', '15:30'])))).toThrow('The bars in this file are 2 hours apart');
+  });
+
   it('keeps daily rows on days the NYSE traded in their year, and lists the days it skips', () => {
     // MLK Day closed the market only from 1998; Juneteenth from 2022; Memorial Day was May 30 before 1971.
-    const days = ['1995-01-16', '1996-01-15', '1997-01-20', '1998-01-19', '2021-06-18', '2023-06-19', '1969-05-26', '1969-05-30'];
+    // May 30, 1970 was a Saturday, and the NYSE traded on Friday the 29th, the month's last business day.
+    const days = ['1995-01-16', '1996-01-15', '1997-01-20', '1998-01-19', '2021-06-18', '2023-06-19', '1969-05-26', '1969-05-30', '1970-05-29'];
     const r = parseCsv(`Date,Open,High,Low,Close,Volume\n${days.map((d) => `${d},10,11,9,10.5,100`).join('\n')}\n`);
-    expect(r.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['1969-05-26', '1995-01-16', '1996-01-15', '1997-01-20', '2021-06-18']);
+    expect(r.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['1969-05-26', '1970-05-29', '1995-01-16', '1996-01-15', '1997-01-20', '2021-06-18']);
     expect(r.warnings).toContain('3 daily bar(s) dated on a weekend or market holiday were skipped: 1969-05-30, 1998-01-19, 2023-06-19.');
   });
 

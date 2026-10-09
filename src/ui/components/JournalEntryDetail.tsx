@@ -165,7 +165,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
             }}
           />
         </label>
-        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
+        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' }}>
           {NOTE_FIELDS.map((f) => (
             <label key={f.key} className="field">
               <span>{f.label}</span>

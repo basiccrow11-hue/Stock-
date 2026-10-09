@@ -4,7 +4,7 @@
  * marked unofficial: you have seen the future, so the result cannot count as a blind result.
  */
 import type { EquityPoint, RoundTrip } from '../types';
-import { plannedRR, initialRiskPerShare, riskBasis } from '../analytics/stats';
+import { plannedRR, plannedRRGap, initialRiskPerShare, riskBasis } from '../analytics/stats';
 import { equityAt, followedAllRules, checkRules, type TradingRules } from '../learning/review';
 
 export interface ChallengeContext {
@@ -95,13 +95,12 @@ export const CHALLENGES: ChallengeDefinition[] = [
       const rrs = closed.map(plannedRR);
       const bad = closed.find((_, i) => rrs[i] === null);
       if (bad) {
+        const gap = plannedRRGap(bad);
+        const why = { stop_past_average: 'its stop sat past its average entry', entry_past_target: 'its entry filled past its target', average_past_target: 'adds moved its average entry past its target' };
         return {
           status: 'failed',
           progress: 0,
-          detail:
-            bad.initialStop === undefined || bad.initialTarget === undefined
-              ? 'A trade was missing a stop or a target.'
-              : `The planned reward:risk of a trade on ${bad.symbol} could not be measured: ${riskBasis(bad) === null ? 'its stop sat past its average entry' : 'its entry filled past its target'}.`,
+          detail: gap === null || gap === 'no_stop_or_target' ? 'A trade was missing a stop or a target.' : `The planned reward:risk of a trade on ${bad.symbol} could not be measured: ${why[gap]}.`,
         };
       }
       const avg = rrs.length ? (rrs as number[]).reduce((a, b) => a + b, 0) / rrs.length : 0;

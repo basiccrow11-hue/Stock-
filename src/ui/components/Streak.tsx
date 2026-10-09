@@ -148,7 +148,18 @@ function Heatmap({ weeks }: { weeks: CalendarCell[][] }) {
         </div>
       </div>
       <div className="heatmap-legend small muted">
-        <span className="cell done" /> goal met <span className="cell frozen" /> freeze <span className="cell partial" /> some practice <span className="cell none" /> none
+        {(
+          [
+            ['done', 'goal met'],
+            ['frozen', 'freeze'],
+            ['partial', 'some practice'],
+            ['none', 'none'],
+          ] as const
+        ).map(([cls, label]) => (
+          <span key={cls} className="legend-item">
+            <span className={`cell ${cls}`} /> {label}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -266,25 +277,48 @@ export function StreakModal() {
   );
 }
 
+// When a key was last pressed anywhere in the app.
+let lastKeyAt = 0;
+if (typeof document !== 'undefined') document.addEventListener('keydown', () => (lastKeyAt = Date.now()), true);
+
+/** True while a text field has focus and a key was pressed in the last few seconds. */
+function typingInField(): boolean {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || Date.now() - lastKeyAt > 3000) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file'].includes((el as HTMLInputElement).type);
+}
+
 /**
  * Milestone celebration. It waits while a replay is playing on the trade screen (so it never covers
- * live orders) and while another dialog is open, such as the trade review, then stays until dismissed.
- * The pending milestone is stored with the streak, so closing the tab before a pause does not lose it.
+ * live orders), while another dialog is open or a trade review is about to open, and while you are
+ * typing in a field, then stays until dismissed. The pending milestone is stored with the streak, so
+ * closing the tab before a pause does not lose it.
  */
 export function StreakCelebration({ view }: { view: View }) {
   // A milestone whose streak has since ended is never shown (it is also cleared on the next settle).
   const c = useStreak((s) => pendingCelebration(s.data, s.today));
   const playing = useTrading((s) => s.playing);
+  const reviewsPending = useTrading((s) => s.reviewsPending > 0);
   const dialogs = useModalCount();
   const [showing, setShowing] = useState(false);
-  const held = view === 'trade' && playing;
+  const [recheck, setRecheck] = useState(0);
+  const held = (view === 'trade' && playing) || reviewsPending;
   useEffect(() => {
-    if (!c) setShowing(false);
-    // modalOpen() is read here, not during render: a trade review that opens in this same update
-    // (a trade closing pauses playback and opens its review at once) has registered by now.
-    else if (!held && !modalOpen()) setShowing(true);
-  }, [c, held, dialogs]);
-  // Held back by playback: say so at once, so reaching the goal mid-session is not silent.
+    if (!c) {
+      setShowing(false);
+      return;
+    }
+    // modalOpen() is read here, not during render: a dialog that opens in this same update has registered by now.
+    if (held || modalOpen()) return;
+    // Mid-sentence in a note or a ticket field: wait for a pause in typing, so no keystroke lands on the dialog.
+    if (typingInField()) {
+      const id = window.setTimeout(() => setRecheck((n) => n + 1), 1000);
+      return () => window.clearTimeout(id);
+    }
+    setShowing(true);
+  }, [c, held, dialogs, recheck]);
+  // Held back by playback or a trade review: say so at once, so reaching the goal mid-session is not silent.
   const toldRef = useRef<string | null>(null);
   useEffect(() => {
     if (!c) {
@@ -295,16 +329,17 @@ export function StreakCelebration({ view }: { view: View }) {
     if (held && !showing && toldRef.current !== key) {
       toldRef.current = key;
       const what = c.streak === c.milestone ? 'a milestone' : `past the ${c.milestone}-day milestone`;
-      toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration waits until you pause.`, 6000);
+      const when = reviewsPending ? 'shows after your trade review' : 'waits until you pause';
+      toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration ${when}.`, 6000);
     }
-  }, [c, held, showing]);
+  }, [c, held, showing, reviewsPending]);
   if (!c || !showing) return null;
   return (
     <Modal
       title="Milestone reached"
       onClose={dismissCelebration}
       footer={
-        <button className="btn primary" onClick={dismissCelebration} data-autofocus>
+        <button className="btn primary" onClick={dismissCelebration}>
           Keep going
         </button>
       }

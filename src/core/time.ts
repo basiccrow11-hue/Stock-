@@ -215,6 +215,9 @@ const SPECIAL_CLOSURES = new Set([
   '2025-01-09',
 ]);
 
+/** Days the rules below would close that the NYSE traded: Friday 29 May 1970 (Memorial Day fell on the Saturday, at the end of the month). */
+const TRADED_DESPITE_RULES = new Set(['1970-05-29']);
+
 /** Thanksgiving: the fourth Thursday of November since 1942, the third in 1940-41, the last Thursday before. */
 function thanksgiving(y: number): string {
   if (y >= 1942 || y === 1939) return nthWeekday(y, 11, 4, 4);
@@ -246,7 +249,7 @@ export function nyseHolidays(y: number): Set<string> {
   days.push(nthWeekday(y, 9, 1, 1)); // Labor Day
   days.push(thanksgiving(y));
   days.push(observed(formatDate(y, 12, 25)));
-  const set = new Set(days.filter((d): d is string => d !== null));
+  const set = new Set(days.filter((d): d is string => d !== null && !TRADED_DESPITE_RULES.has(d)));
   for (const d of SPECIAL_CLOSURES) if (d.startsWith(String(y))) set.add(d);
   holidayCache.set(y, set);
   return set;

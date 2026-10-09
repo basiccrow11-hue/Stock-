@@ -3,7 +3,7 @@
  * Accepts common column names and time formats, validates every row, and reports what it skipped.
  */
 import type { Bar, Timeframe } from '../types';
-import { REGULAR_OPEN, exchangeTimeToUnix, isTradingDay } from '../time';
+import { REGULAR_OPEN, exchangeDate, exchangeTimeToUnix, isTradingDay } from '../time';
 
 export interface CsvParseOptions {
   /** How to read timestamps without an explicit offset. Default: exchange time (America/New_York). */
@@ -55,6 +55,18 @@ function splitLine(line: string, delim: string): string[] {
   return out;
 }
 
+/**
+ * A ticker guessed from an export's file name: AAPL_1m.csv, msft-2024.csv, BRK.B_daily.csv, BRK-B.csv
+ * (a one-letter class suffix stays) and TradingView's NASDAQ_AAPL, 1D.csv (the exchange prefix goes).
+ */
+export function tickerFromFileName(name: string): string | null {
+  let base = name.replace(/\.(csv|txt)$/i, '').trim().toUpperCase();
+  const tv = base.match(/^(?:NASDAQ|NYSE|NYSEARCA|NYSEAMERICAN|AMEX|ARCA|BATS|CBOE|OTC|OTCMKTS)[_:]([A-Z0-9.]+)/);
+  if (tv) base = tv[1];
+  const m = base.match(/^([A-Z]{1,6})(?:([.-])([A-Z]))?(?![A-Z0-9])/);
+  return m ? m[1] + (m[3] ? m[2] + m[3] : '') : null;
+}
+
 function detectDelimiter(header: string): string {
   const counts = [',', ';', '\t', '|'].map((d) => [d, header.split(d).length] as const);
   counts.sort((a, b) => b[1] - a[1]);
@@ -65,16 +77,18 @@ function detectDelimiter(header: string): string {
  * Which decimal mark a number shows, if it settles it: a comma (185,64 or 1.234,56, as in files from
  * many European locales) or a point. The decimal mark is the later of ',' and '.' in a number that
  * has both; one that has only one of them is a decimal mark unless exactly three digits follow it
- * (then it may group thousands, as in 1,000).
+ * after a group other than 0 (then it may group thousands, as in 1,000; 0,812 cannot).
  */
 function decimalMarkOf(raw: string | undefined): ',' | '.' | null {
-  const s = (raw ?? '').replace(/[$\s"]/g, '');
+  const s = (raw ?? '').replace(/[$\s"]/g, '').replace(/^[-+]/, '');
   const c = s.lastIndexOf(',');
   const p = s.lastIndexOf('.');
   if (c >= 0 && p >= 0) return c > p ? ',' : '.';
-  if (c >= 0) return s.indexOf(',') !== c ? '.' : s.length - c - 1 !== 3 ? ',' : null; // 1,234,567: commas group thousands
-  if (p >= 0) return s.indexOf('.') !== p ? ',' : s.length - p - 1 !== 3 ? '.' : null; // 1.234.567: points group thousands
-  return null;
+  if (c < 0 && p < 0) return null;
+  const [mark, other, at] = c >= 0 ? ([',', '.', c] as const) : (['.', ',', p] as const);
+  // 1,234,567 or 1.234.567: the mark groups thousands, so the decimal mark is the other one.
+  if (s.indexOf(mark) !== at) return other;
+  return s.length - at - 1 !== 3 || /^0*$/.test(s.slice(0, at)) ? mark : null;
 }
 
 function parseNumber(s: string | undefined, decimalComma = false): number {
@@ -176,26 +190,43 @@ export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, stri
   return { bars: deduped, offDays, merged: out.length - deduped.length };
 }
 
+/**
+ * The bar size: the largest supported size that (nearly) every gap between bars within a day is a
+ * whole number of. Gaps, not their median, so a thinly traded stock's 1-minute bars (a bar only in
+ * minutes that traded) stay 1-minute bars. A day's first gap is left out when there are others, since
+ * vendors often stamp the first hourly bar 09:30 and the next 10:00. A size the replay does not
+ * support (3-minute or 2-hour bars) is an error rather than being rounded to a nearby one.
+ */
 function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
   if (dateOnly) return '1D';
-  const diffs: number[] = [];
-  for (let i = 1; i < bars.length && diffs.length < 5000; i++) {
+  const all: number[] = [];
+  const later: number[] = [];
+  for (let i = 1; i < bars.length && all.length < 20_000; i++) {
     const d = bars[i].time - bars[i - 1].time;
-    if (d > 0 && d < 6 * 3600) diffs.push(d);
+    if (!(d > 0 && d < 6 * 3600)) continue;
+    all.push(d);
+    if (i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) later.push(d);
   }
-  if (!diffs.length) return '1D';
-  diffs.sort((a, b) => a - b);
-  const median = diffs[Math.floor(diffs.length / 2)];
+  if (!all.length) return '1D';
+  const gaps = later.length >= Math.max(3, all.length / 4) ? later : all;
   const table: [number, Timeframe][] = [
-    [60, '1m'],
-    [300, '5m'],
-    [900, '15m'],
-    [1800, '30m'],
-    [3600, '1h'],
     [14400, '4h'],
+    [3600, '1h'],
+    [1800, '30m'],
+    [900, '15m'],
+    [300, '5m'],
+    [60, '1m'],
   ];
-  for (const [secs, tf] of table) if (median <= secs) return tf;
-  return '1D';
+  const counts = new Map<number, number>();
+  for (const d of gaps) counts.set(d, (counts.get(d) ?? 0) + 1);
+  const [typical, most] = [...counts].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
+  // The size itself must be a common gap (the commonest for sparse bars), or 3-minute bars would pass as 1-minute ones.
+  for (const [secs, tf] of table) {
+    const n = counts.get(secs) ?? 0;
+    if ((n >= Math.max(2, 0.03 * gaps.length) || n === most) && gaps.filter((d) => d % secs === 0).length >= 0.99 * gaps.length) return tf;
+  }
+  const spacing = typical % 3600 === 0 ? `${typical / 3600} hours` : typical % 60 === 0 ? `${typical / 60} minutes` : `${typical} seconds`;
+  throw new Error(`The bars in this file are ${spacing} apart, a bar size the replay does not support. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars.`);
 }
 
 const TF_SECONDS: Record<Timeframe, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1D': 86400 };
@@ -242,11 +273,21 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
   let ambiguous = '';
   let dotted = false;
   const marks = new Set<string>();
+  const volumeMarks = new Set<string>();
+  // The first price that shows a decimal comma, and the first whose mark could also group thousands (2,965 or 24.664).
+  let commaExample = '';
+  let undecided = '';
   for (let li = 1; li < lines.length; li++) {
     const cols = splitLine(lines[li], delim);
     for (const i of [iOpen, iHigh, iLow, iClose]) {
       const mark = decimalMarkOf(cols[i]);
       if (mark) marks.add(mark);
+      if (mark === ',' && !commaExample) commaExample = (cols[i] ?? '').replace(/[$\s"]/g, '');
+      else if (!mark && !undecided && /[,.]/.test(cols[i] ?? '')) undecided = cols[i].replace(/[$\s"]/g, '');
+    }
+    if (iVol >= 0) {
+      const mark = decimalMarkOf((cols[iVol] ?? '').replace(/[\s"]/g, '').replace(/[KkMmBb]$/, ''));
+      if (mark) volumeMarks.add(mark);
     }
     const m = stampOf(cols).trim().replace(/^"|"$/g, '').match(YEAR_LAST);
     if (!m) continue;
@@ -262,8 +303,18 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     warnings.push(`Dates such as ${ambiguous} can be read either way; they were read as ${dayFirst ? 'day/month' : 'month/day (US)'}. Check the date range.`);
   } else if (dayFirst) warnings.push('Dates were read as day/month/year (13/01/2024 is 13 January).');
   if (marks.size > 1) throw new Error('The prices mix decimal commas and decimal points (185,64 and 185.64). Export them in one format.');
-  const decimalComma = marks.has(',');
-  if (decimalComma) warnings.push('Numbers use a decimal comma: 185,64 was read as 185.64.');
+  let decimalComma = marks.has(',');
+  if (!marks.size && undecided) {
+    // Every price with a mark has three digits after it (2,965 or 24.664): the volumes (1.285.508), or
+    // a delimiter other than a comma with a semicolon or dotted dates, say the comma is decimal and
+    // points group thousands; without any of them a point is decimal and a comma groups thousands.
+    decimalComma = volumeMarks.size === 1 ? volumeMarks.has(',') : delim === ';' || (dotted && delim !== ',');
+    if (!decimalComma && undecided.includes(',')) warnings.push(`${undecided} was read as ${parseNumber(undecided)}, taking the comma to group thousands. If it is a decimal comma, export the file with decimal points.`);
+  }
+  if (decimalComma) {
+    const example = commaExample || undecided;
+    warnings.push(`Numbers were read with a decimal comma and points grouping thousands: ${example} is ${parseNumber(example, true)}.`);
+  }
 
   const bars: Bar[] = [];
   const dates = new Map<Bar, string>();

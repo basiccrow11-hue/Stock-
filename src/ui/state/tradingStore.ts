@@ -72,6 +72,8 @@ export interface TradingSnapshot {
   reviewId: string | null;
   /** Reviews of other trades that closed in the same step, shown after it in turn. */
   reviewQueue: string[];
+  /** Learning Mode reviews of trades that have closed but are still being written to the journal. */
+  reviewsPending: number;
   /** Order-ticket field waiting for a price click on the chart. */
   pickTarget: 'limit' | 'stop' | 'stopLoss' | 'takeProfit' | null;
   pickedPrice: { field: string; price: number; seq: number } | null;
@@ -161,6 +163,7 @@ const EMPTY: TradingSnapshot = {
   warnings: [],
   reviewId: null,
   reviewQueue: [],
+  reviewsPending: 0,
   pickTarget: null,
   pickedPrice: null,
 };
@@ -357,30 +360,41 @@ function processClosedTrips(): Promise<void> {
     }
     return { trip, entry, snap };
   });
-  if (settings.learningMode) pause();
+  if (settings.learningMode) {
+    pause();
+    // Other dialogs (a streak celebration) wait for these reviews rather than open just before them.
+    useTrading.setState((s) => ({ reviewsPending: s.reviewsPending + batch.length }));
+  }
   journaling = journaling
     .then(async () => {
       for (const { trip, entry, snap } of batch) {
         try {
-          const img = snap && (await snap);
-          if (img) {
-            entry.snapshotKey = `snap:${entry.id}`;
-            await saveSnapshot(entry.snapshotKey, img);
+          try {
+            const img = snap && (await snap);
+            if (img) {
+              entry.snapshotKey = `snap:${entry.id}`;
+              await saveSnapshot(entry.snapshotKey, img);
+            }
+          } catch {
+            /* snapshot is best effort */
           }
-        } catch {
-          /* snapshot is best effort */
-        }
-        await useJournal.getState().add(entry);
-        // Only once the entry is in the journal: settling looks it up there.
-        if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
-        recordTradeClosed();
-        const tone = trip.pnl >= 0 ? 'success' : 'error';
-        toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
-        if (settings.learningMode) {
-          // A jump or a gap can close several trades at once: each gets its review, one after another.
-          const { reviewId, reviewQueue } = useTrading.getState();
-          if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
-          else useTrading.setState({ reviewId: entry.id });
+          await useJournal.getState().add(entry);
+          // Only once the entry is in the journal: settling looks it up there.
+          if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
+          recordTradeClosed();
+          const tone = trip.pnl >= 0 ? 'success' : 'error';
+          toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
+          if (settings.learningMode) {
+            // A jump or a gap can close several trades at once: each gets its review, one after another.
+            const { reviewId, reviewQueue } = useTrading.getState();
+            if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
+            else useTrading.setState({ reviewId: entry.id });
+          }
+        } catch (e) {
+          // One entry that cannot be saved does not hold up the others.
+          console.error('Journal update failed', e);
+        } finally {
+          if (settings.learningMode) useTrading.setState((s) => ({ reviewsPending: Math.max(0, s.reviewsPending - 1) }));
         }
       }
       settleWatchedReviews();

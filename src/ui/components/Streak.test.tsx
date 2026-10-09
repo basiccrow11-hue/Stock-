@@ -12,8 +12,8 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-async function mount() {
-  vi.resetModules();
+async function mount({ keepModules = false } = {}) {
+  if (!keepModules) vi.resetModules();
   const { StreakCelebration } = await import('./Streak');
   const streak = await import('../state/streakStore');
   const { useTrading } = await import('../state/tradingStore');
@@ -29,9 +29,11 @@ async function mount() {
   const root = createRoot(host);
   act(() => root.render(createElement(StreakCelebration, { view: 'trade' })));
   const toasts: string[] = [];
-  useToasts.subscribe((s) => {
+  const seen = (s: ReturnType<typeof useToasts.getState>) => {
     for (const t of s.toasts) if (!toasts.includes(`${t.id}|${t.text}`)) toasts.push(`${t.id}|${t.text}`);
-  });
+  };
+  seen(useToasts.getState());
+  useToasts.subscribe(seen);
   return { streak, useTrading, toasts, home, unmount: () => act(() => root.unmount()) };
 }
 
@@ -92,12 +94,46 @@ describe('milestone celebration', () => {
     vi.setSystemTime(new Date(2026, 9, 8, 18, 0, 0));
     const { home, unmount } = await mount();
     expect(dialog()?.textContent).toMatch(/Milestone reached/);
-    expect(document.activeElement?.textContent).toBe('Keep going');
+    // Focus sits on the dialog itself, so a stray Enter or Space does not dismiss it unseen.
+    expect(document.activeElement).toBe(dialog());
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
     expect(dialog()).toBeNull();
     expect(document.activeElement).toBe(home);
+    unmount();
+  });
+
+  it('waits while you type in a field and while a trade review is about to open', async () => {
+    let d: StreakData = emptyStreak();
+    for (const k of ['2026-10-06', '2026-10-07', '2026-10-08']) d = recordActivity(d, k, { activeSeconds: 600 }).data;
+    localStorage.setItem('stock-replay-streak', JSON.stringify(d));
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(new Date(2026, 9, 8, 18, 0, 0));
+    vi.resetModules();
+    const { useTrading } = await import('../state/tradingStore');
+    useTrading.setState({ reviewsPending: 1 });
+    const note = document.createElement('textarea');
+    document.body.appendChild(note);
+    note.focus();
+    const { toasts, unmount } = await mount({ keepModules: true });
+    expect(dialog()).toBeNull();
+    expect(toasts.some((t) => /shows after your trade review/.test(t))).toBe(true);
+    // The review closes while a note is being typed: still held until the typing pauses.
+    act(() => {
+      note.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+      useTrading.setState({ reviewsPending: 0 });
+    });
+    expect(dialog()).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(2000);
+      note.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
+    });
+    act(() => vi.advanceTimersByTime(2000));
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(note);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(dialog()?.textContent).toMatch(/Milestone reached/);
     unmount();
   });
 });
