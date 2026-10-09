@@ -27,9 +27,9 @@ import type {
 import { actionSide } from '../types';
 import type { ExecutionConfig } from './config';
 import { DEFAULT_EXECUTION_CONFIG, commissionFor, halfSpread } from './config';
-import { assessRisk, over, strictRiskViolation, type Exposure } from '../risk/risk';
+import { assessRisk, over } from '../risk/risk';
 import { formatTick, roundToTick } from '../util/math';
-import { equityBeforeEntry, riskBasis } from '../analytics/stats';
+import { equityBeforeEntry } from '../analytics/stats';
 import {
   exchangeDate,
   exchangeMinuteOfDay,
@@ -101,6 +101,26 @@ export interface SubmitResult {
   notes?: string[];
 }
 
+/**
+ * The risk of the trade an opening order would join, counted from its first stop (SimBroker.tradeRiskOf):
+ * what Strict Mode limits and Size by risk sizes to.
+ */
+export interface TradeRisk {
+  /** The trade's first stop: the open trade's, or the stop loss its entries share. */
+  stop: number;
+  /** As a % of `equity`, the equity the trade started with (today's, while it has not). */
+  pct: number;
+  dollars: number;
+  equity: number;
+  /** Which number it is: the trade review's measure, or what the trade would lose at its first stop. */
+  by: 'review' | 'loss';
+  /** Shares held in the trade, and in its other working entries. */
+  held: number;
+  working: number;
+  /** The trade's average entry is already at or past its first stop, so its risk can't be measured. */
+  unmeasurable: boolean;
+}
+
 const TICK = 0.01;
 /** Market impact is charged on at most one bar's whole volume (see execute). */
 const MAX_IMPACT_PCT = 100;
@@ -114,6 +134,10 @@ function ceilTick(p: number): number {
 }
 function floorTick(p: number): number {
   return p >= 1 ? Math.floor(p * 100 + 1e-7) / 100 : Math.floor(p * 10_000 + 1e-7) / 10_000;
+}
+/** "1 TEST share", "300 TEST shares". */
+function shares(n: number, symbol?: string): string {
+  return `${n} ${symbol ? `${symbol} ` : ''}share${n === 1 ? '' : 's'}`;
 }
 function money(v: number): number {
   return Math.round(v * 1e6) / 1e6;
@@ -139,6 +163,14 @@ export class SimBroker {
     const list = this.s.orders;
     while (this.openFrom < list.length && !isOpen(list[this.openFrom])) this.openFrom++;
     return this.openFrom === 0 ? list : list.slice(this.openFrom);
+  }
+
+  /** A working order by id. Open orders all sit from openFrom on, and the one asked for is usually among the newest. */
+  private openOrderById(id: string): Order | undefined {
+    this.liveOrders();
+    const list = this.s.orders;
+    for (let i = list.length - 1; i >= this.openFrom; i--) if (list[i].id === id) return isOpen(list[i]) ? list[i] : undefined;
+    return undefined;
   }
 
   private tripById(id: string): RoundTrip | undefined {
@@ -349,19 +381,18 @@ export class SimBroker {
   /**
    * The stop loss and target a working entry's unfilled shares will get once it fills at `px` (by
    * default its own price): once it has started filling, those of its live bracket, which take its
-   * later shares wherever they have been moved (`stopAt` prices one stop as if moved there), else its
-   * own. A bracket stop that has fired, or sits at or past `px` (moved to breakeven), closes the held
-   * shares before price can reach the entry again, and the later shares then get the entry's own.
+   * later shares wherever they have been moved, else its own. A bracket stop that has fired, or sits at
+   * or past `px` (moved to breakeven), closes the held shares before price can reach the entry again,
+   * and the later shares then get the entry's own.
    */
-  private bracketLevels(o: Order, stopAt?: { id: string; price: number }, px = this.entryPrice(o)): { stopLoss?: number; takeProfit?: number } {
+  private bracketLevels(o: Order, px = this.entryPrice(o)): { stopLoss?: number; takeProfit?: number } {
     let { stopLoss, takeProfit } = o;
     if (o.filledQty > 0) {
       const dir = o.action === 'buy' ? 1 : -1;
       for (const c of this.workingOrders(o.symbol)) {
         if (c.parentId !== o.id) continue;
         if (c.type === 'stop' || c.type === 'stop_limit') {
-          const stop = stopAt?.id === c.id ? stopAt.price : c.stopPrice!;
-          if (!c.triggered && (px - stop) * dir > 0) stopLoss = stop;
+          if (!c.triggered && (px - c.stopPrice!) * dir > 0) stopLoss = c.stopPrice;
         } else if (c.type === 'limit' && (c.limitPrice! - px) * dir > 0) takeProfit = c.limitPrice;
       }
     }
@@ -374,105 +405,187 @@ export class SimBroker {
   }
 
   /**
-   * The equity a trade in `symbol` on `action`'s side is measured against: while one is open, the
-   * equity it started with (as the trade review and the challenges measure it), else the account's.
+   * Where a working entry's unfilled shares are expected to fill (estimateFill; a stop that has fired
+   * waits as a market order), and of that and where it would fill if it were through the market now,
+   * the price nearer the trade's stop (`dir` 1 for a long).
    */
-  private tradeEquity(symbol: string, action: 'buy' | 'short'): number {
-    const dir = action === 'buy' ? 1 : -1;
-    if (this.position(symbol).quantity * dir > 0) {
-      const trip = this.s.roundTrips.find((t) => t.symbol === symbol && !t.closed);
-      if (trip) return equityBeforeEntry(trip, this.s.fills, this.s.equityCurve, this.s.startingBalance);
-    }
-    return this.account().equity;
+  private workingFill(o: Order, dir: number): { px: number; near: number } {
+    const req = { ...o, quantity: o.quantity - o.filledQty, ...(o.type === 'stop' && o.triggered ? { type: 'market' as const } : {}) };
+    const px = this.estimateFill(req) ?? this.entryPrice(o);
+    return { px, near: Math.min(px * dir, this.expectedEntry(req).price * dir) * dir };
   }
 
   /**
-   * The shares a new `action` order in `symbol` would join (see Exposure): those held in its direction
-   * and those in its other working entries (all but `excludeId`). `stopAt` prices one exit stop as if
-   * it were moved there.
+   * The trade an opening order on `action`'s side of `symbol` would join: the shares held that way and
+   * their open trade, the other working entries on that side (all but `excludeId`, in the order they
+   * were placed) with where each is expected to fill, and the trade's first stop (see tradeRisk).
    */
-  exposure(symbol: string, action: 'buy' | 'short', excludeId?: string, stopAt?: { id: string; price: number }): Exposure {
-    symbol = symbol.toUpperCase();
+  private tradeOf(symbol: string, action: OrderAction, excludeId?: string, ownStop?: number) {
     const dir = action === 'buy' ? 1 : -1;
-    const last = this.s.lastPrice[symbol] ?? 0;
     const pos = this.position(symbol);
     const held = pos.quantity * dir > 0 ? Math.abs(pos.quantity) : 0;
-    let shares = held;
-    let value = held * last;
-    let risk = 0;
-    let unprotected = 0;
-    if (held) {
-      const exit = action === 'buy' ? 'sell' : 'cover';
-      let covered = 0;
-      for (const o of this.workingOrders(symbol)) {
-        if (o.action !== exit || (o.type !== 'stop' && o.type !== 'stop_limit')) continue;
-        const n = Math.min(o.quantity - o.filledQty, held - covered);
-        if (n <= 0) continue;
-        covered += n;
-        const stop = stopAt?.id === o.id ? stopAt.price : o.stopPrice!;
-        risk += n * Math.max(0, (pos.avgPrice - stop) * dir);
-      }
-      unprotected += held - covered;
-    }
-    for (const o of this.workingOrders(symbol)) {
-      if (o.action !== action || o.id === excludeId) continue;
-      const n = o.quantity - o.filledQty;
-      const px = this.entryPrice(o);
-      shares += n;
-      value += n * px;
-      const { stopLoss } = this.bracketLevels(o, stopAt, px);
-      if (stopLoss !== undefined) risk += n * Math.max(0, (px - stopLoss) * dir);
-      else unprotected += n;
-    }
-    const equity = this.account().equity;
-    const riskEquity = this.tradeEquity(symbol, action);
-    return {
-      symbol,
-      shares,
-      valuePct: equity > 0 ? (value / equity) * 100 : 0,
-      riskPct: riskEquity > 0 ? (risk / riskEquity) * 100 : 0,
-      riskEquity,
-      unprotected,
-    };
+    const trip = held > 0 ? this.s.roundTrips.find((t) => t.symbol === symbol && !t.closed) : undefined;
+    const entries = this.workingOrders(symbol)
+      .filter((o) => o.action === action && o.id !== excludeId)
+      .map((order) => ({ order, n: order.quantity - order.filledQty, ...this.workingFill(order, dir) }));
+    // Until the trade has a first stop, the one its entries share; the furthest, if they differ.
+    const stops = [...entries.map((e) => e.order.stopLoss), ownStop].filter((x): x is number => x !== undefined);
+    const stop = trip?.initialStop ?? (stops.length ? stops.reduce((a, b) => ((b - a) * dir < 0 ? b : a)) : undefined);
+    return { dir, pos, held, trip, entries, stops, stop, fromTrip: trip?.initialStop !== undefined };
   }
 
   /**
-   * The open trade's risk in `symbol` on `action`'s side once `add` and its other working entries (all
-   * but `excludeId`) have filled, measured as the trade review, the risk rule and the challenges
-   * measure it: from the trade's first stop, over its largest size, against the equity it started
-   * with. Null with no open trade there or no first stop to measure from.
+   * The risk of the trade an opening order joins, as Strict Mode and Size by risk count it: from the
+   * trade's first stop (the open trade's, or until it has one, the stop loss its entries share), the
+   * larger of
+   * - the trade review's measure, which its risk rule and the challenges use: every share from the first
+   *   stop over the trade's largest size, at its worst over which of the working entries fill, in part
+   *   or in full (one cheap entry that fills can make room that it takes back if it does not); and
+   * - what the trade would lose if its stops fired at the first stop: what it has made or lost so far,
+   *   the held shares from their cost, the working entries from where they are expected to fill;
+   * plus commissions in and out on the order itself, as a share of the equity the trade started with
+   * (today's, while it has not). `o.quantity` is the order's unfilled shares, expected to fill at
+   * `o.fillAt`; `own` is the working order it changes. Null when nothing in the trade has a stop.
    */
-  plannedRisk(symbol: string, action: 'buy' | 'short', add: { quantity: number; price: number }, excludeId?: string): { pct: number; stop: number } | null {
-    symbol = symbol.toUpperCase();
-    const dir = action === 'buy' ? 1 : -1;
-    const held = this.position(symbol).quantity * dir;
-    const trip = held > 0 ? this.s.roundTrips.find((t) => t.symbol === symbol && !t.closed) : undefined;
-    if (!trip || trip.initialStop === undefined) return null;
-    let n = add.quantity;
-    let value = add.quantity * add.price;
-    for (const o of this.workingOrders(symbol)) {
-      if (o.action !== action || o.id === excludeId) continue;
-      n += o.quantity - o.filledQty;
-      value += (o.quantity - o.filledQty) * this.entryPrice(o);
+  tradeRiskOf(o: { symbol: string; action: OrderAction; quantity: number; fillAt: number; stopLoss?: number }, own?: Order): TradeRisk | null {
+    const t = this.tradeOf(o.symbol, o.action, own?.id, o.stopLoss);
+    if (t.stop === undefined) return null;
+    const S = t.stop;
+    const d = (px: number) => (px - S) * t.dir;
+    const adds = [...t.entries.map((e) => ({ n: e.n, d: d(e.px) })), ...(o.quantity > 0 ? [{ n: o.quantity, d: d(o.fillAt) }] : [])];
+    const Q0 = t.trip?.entryQtyTotal ?? 0;
+    const D0 = t.trip ? Q0 * d(t.trip.avgEntry) : 0;
+    const M0 = t.trip?.maxQuantity ?? 0;
+    const N = adds.reduce((a, x) => a + x.n, 0);
+    const equity = t.trip ? equityBeforeEntry(t.trip, this.s.fills, this.s.equityCurve, this.s.startingBalance) : this.account().equity;
+    const base = { stop: S, equity, held: t.held, working: N - Math.max(0, o.quantity) };
+    if (Q0 > 0 && D0 <= EPS) return { ...base, pct: Infinity, dollars: Infinity, by: 'review', unmeasurable: true };
+    // Every fill set's average is at most the best greedy one, and with everything filled the size
+    // and the total distance are both largest.
+    let gD = D0;
+    let gQ = Q0;
+    for (const x of [...adds].sort((a, b) => b.d - a.d)) {
+      if (gQ > 0 && x.d <= gD / gQ) break;
+      gD += x.n * x.d;
+      gQ += x.n;
     }
-    const entryQtyTotal = trip.entryQtyTotal + n;
-    const after = { ...trip, entryQtyTotal, avgEntry: (trip.avgEntry * trip.entryQtyTotal + value) / entryQtyTotal, maxQuantity: Math.max(trip.maxQuantity, held + n) };
-    const basis = riskBasis(after);
-    const equity = equityBeforeEntry(trip, this.s.fills, this.s.equityCurve, this.s.startingBalance);
-    return basis && equity > 0 ? { pct: ((basis.risk * after.maxQuantity) / equity) * 100, stop: trip.initialStop } : null;
+    const review = Math.max(gQ > 0 ? (M0 * gD) / gQ : 0, Q0 + N > 0 ? ((t.held + N) * (D0 + adds.reduce((a, x) => a + x.n * x.d, 0))) / (Q0 + N) : 0);
+    const loss = -(t.trip?.pnl ?? 0) + t.held * d(t.pos.avgPrice) + adds.reduce((a, x) => a + x.n * x.d, 0);
+    const commission = o.quantity > 0 ? 2 * commissionFor(this.cfg, o.quantity, o.fillAt) : 0;
+    const dollars = Math.max(review, loss) + commission;
+    return { ...base, pct: equity > 0 ? (dollars / equity) * 100 : Infinity, dollars, by: loss > review + EPS ? 'loss' : 'review', unmeasurable: false };
+  }
+
+  /** Whether today's loss has reached Strict Mode's daily limit. */
+  private dailyLimitReached(): boolean {
+    const acct = this.account();
+    return this.s.dayStartEquity > 0 && (-acct.dayPnl / this.s.dayStartEquity) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
+  }
+
+  /**
+   * Why Strict Mode refuses an opening order, placed or changed (`own` is the working order changed;
+   * `o.quantity` its unfilled shares), or null. In order: the daily loss limit; stops (this order's,
+   * and every share already in the trade); entries that share one stop until the trade has a first
+   * stop; nothing at or past the first stop; the trade's risk from it (tradeRiskOf); the position size.
+   */
+  private strictViolation(
+    o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'stopLoss' | 'extendedHours'> & { quantity: number },
+    own: Order | undefined,
+    fillAt: number,
+    nearAt: number,
+    positionValue: number,
+  ): string | null {
+    const cfg = this.cfg.strictRisk;
+    const L = cfg.maxRiskPctPerTrade;
+    if (this.dailyLimitReached()) {
+      return own
+        ? `Strict risk: daily loss limit of ${cfg.maxDailyLossPct}% reached, so working entries can't be changed until the next session. You can still cancel this one.`
+        : `Strict risk: daily loss limit of ${cfg.maxDailyLossPct}% reached. No new entries or adds until the next session.`;
+    }
+    const t = this.tradeOf(o.symbol, o.action, own?.id, o.stopLoss);
+    const long = t.dir === 1;
+    const below = long ? 'below' : 'above';
+    const exitWord = long ? 'Sell' : 'Cover';
+    const sym = o.symbol;
+    if (cfg.requireStopLoss) {
+      if (o.stopLoss === undefined) return 'Strict risk: a valid stop loss is required.';
+      // A stop-limit protects only if its limit lets it fill once price passes its stop.
+      let covered = 0;
+      for (const x of this.workingOrders(sym)) {
+        if (x.action !== (long ? 'sell' : 'cover') || (x.type !== 'stop' && x.type !== 'stop_limit')) continue;
+        if (x.type === 'stop_limit' && (x.triggered || (x.stopPrice! - x.limitPrice!) * t.dir < 0)) continue;
+        covered += x.quantity - x.filledQty;
+      }
+      if (covered < t.held) {
+        const at = t.stop !== undefined && t.fromTrip ? ` (at ${formatTick(t.stop)} or ${long ? 'higher' : 'lower'})` : '';
+        const n = t.held - covered;
+        const which = n === t.held ? `your ${shares(n, sym)}` : `${n} of your ${shares(t.held, sym)}`;
+        return `Strict risk: ${which} ${n === 1 ? 'has' : 'have'} no stop. Place a ${exitWord} stop for ${n === 1 ? 'it' : 'them'}${at} before adding.`;
+      }
+      const bare = t.entries.find((e) => e.order.stopLoss === undefined);
+      if (bare) return `Strict risk: your working ${describe(bare.order)} has no stop loss. Cancel it and place it again with one first.`;
+    }
+    if (!t.fromTrip && new Set(t.stops).size > 1) {
+      const lead = `Strict risk: with no ${sym} position yet, ${long ? 'Buy' : 'Short'} entries working together must share one stop loss, so the trade's risk is measured from it whichever fills first.`;
+      const stopped = t.entries.filter((e) => e.order.stopLoss !== undefined);
+      const a = stopped[0];
+      const b = stopped.find((e) => e.order.stopLoss !== a.order.stopLoss);
+      if (b) {
+        return `${lead} Your working ${describe(a.order)} and ${describe(b.order)} have different stops (${formatTick(a.order.stopLoss!)} and ${formatTick(b.order.stopLoss!)}): cancel one of them first.`;
+      }
+      return `${lead} Your working ${describe(a.order)} has its stop at ${formatTick(a.order.stopLoss!)}: use ${formatTick(a.order.stopLoss!)} here too, or cancel that order.`;
+    }
+    if (t.stop !== undefined) {
+      const S = t.stop;
+      const past = (px: number) => (px - S) * t.dir <= EPS;
+      const wider = (stop: number | undefined) => stop !== undefined && (S - stop) * t.dir > EPS;
+      if (past(nearAt)) {
+        return `Strict risk: this order would fill at about ${formatTick(nearAt)}, at or ${below} the trade's first stop at ${formatTick(S)}, which would add past that stop. To re-enter after a stop-out, place the order once the trade has closed.`;
+      }
+      if (wider(o.stopLoss)) {
+        return `Strict risk: this order's stop at ${formatTick(o.stopLoss!)} is ${below} the trade's first stop at ${formatTick(S)}. Every share is measured from ${formatTick(S)}, so use a stop at ${formatTick(S)} or ${long ? 'higher' : 'lower'}.`;
+      }
+      const stale = t.entries.find((e) => past(e.near) || wider(e.order.stopLoss));
+      if (stale) {
+        const what = past(stale.near) ? `would fill at or ${below} the trade's first stop at ${formatTick(S)}` : `has its stop ${below} the trade's first stop at ${formatTick(S)}`;
+        return `Strict risk: your working ${describe(stale.order)} ${what}, and Strict Mode measures every share from that stop. Cancel it first.`;
+      }
+      const risk = this.tradeRiskOf({ symbol: sym, action: o.action, quantity: o.quantity, fillAt, stopLoss: o.stopLoss }, own)!;
+      if (risk.unmeasurable) {
+        return `Strict risk: the trade's average entry is at or ${below} its first stop at ${formatTick(S)}, so its risk can't be measured. No adds to this trade.`;
+      }
+      if (risk.pct > L + EPS) {
+        if (!risk.held && !risk.working) return `Strict risk: this trade risks ${over(risk.pct, L, 2)}% (limit ${L}%).`;
+        const parts = [risk.held ? `the ${shares(risk.held)} you hold` : '', risk.working ? `${shares(risk.working)} in working entries` : ''].filter(Boolean).join(' and ');
+        if (risk.by === 'loss') {
+          return `Strict risk: with this order the ${sym} trade would lose ${over(risk.pct, L, 2)}% if its stops fired at its first stop at ${formatTick(S)}, counting ${parts} and what the trade has already made or lost (limit ${L}%).`;
+        }
+        const raised = this.workingOrders(sym).some((x) => x.action === (long ? 'sell' : 'cover') && (x.type === 'stop' || x.type === 'stop_limit') && (x.stopPrice! - S) * t.dir > EPS);
+        const tighter = o.stopLoss !== undefined && (o.stopLoss - S) * t.dir > EPS;
+        const why = tighter ? `This order's tighter stop at ${formatTick(o.stopLoss!)}` : raised ? 'Raising your stop' : '';
+        return `Strict risk: with this order the ${sym} trade would risk ${over(risk.pct, L, 2)}% (limit ${L}%), counting ${parts}, every share from the trade's first stop at ${formatTick(S)}, as the trade review counts it.${why ? ` ${why} does not change this: the review counts every share from the first stop.` : ''}`;
+      }
+    }
+    // The position: the shares held that way at the last price, the working entries at their prices.
+    const value = t.held * (this.s.lastPrice[sym] ?? 0) + t.entries.reduce((a, e) => a + e.n * this.entryPrice(e.order), 0) + positionValue;
+    const equity = this.account().equity;
+    const valuePct = equity > 0 ? (value / equity) * 100 : Infinity;
+    if (valuePct > cfg.maxPositionPctOfEquity + EPS) {
+      const n = t.held + t.entries.reduce((a, e) => a + e.n, 0);
+      return `Strict risk: position is ${over(valuePct, cfg.maxPositionPctOfEquity, 0)}% of equity${n ? ` with the ${shares(n, sym)} you already hold or have working` : ''} (limit ${cfg.maxPositionPctOfEquity}%).`;
+    }
+    return null;
   }
 
   /**
    * The checks an opening order must pass when it is placed or changed: its stop loss and target on the
-   * right side of where it is expected to fill, Strict Mode's limits for the whole trade it joins, and
-   * buying power. `own` is the working order being changed: it is left out of what the trade already
-   * holds, and the buying power it holds back is available to it. `o.quantity` is its unfilled shares.
-   * `strictChecks` narrows Strict Mode to its position limit, or leaves it out.
+   * right side of where it is expected to fill, Strict Mode (strictViolation), and buying power. `own`
+   * is the working order being changed: it is left out of the trade it joins, and the buying power it
+   * holds back is available to it. `o.quantity` is its unfilled shares.
    */
   private openingCheck(
     o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'stopLoss' | 'takeProfit' | 'extendedHours'> & { quantity: number },
     own?: Order,
-    strictChecks: 'all' | 'position' | 'none' = 'all',
   ): { error?: string; warnings: string[]; quote: number } {
     // Orders are checked against the price they would actually get: buys pay the ask, sells hit the bid.
     const expected = this.expectedEntry(o);
@@ -487,20 +600,10 @@ export class SimBroker {
     // the ticket sizes it and the review judges it.
     const fillAt = this.estimateFill(o) ?? refPrice;
     const costed = fillAt === refPrice ? risk : assess(fillAt);
-    const strict = this.cfg.strictRisk;
-    if (strict.enabled && strictChecks !== 'none') {
-      const side = o.action === 'short' ? 'short' : 'buy';
-      const existing = this.exposure(o.symbol, side, own?.id);
-      const violation = strictRiskViolation(strict, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity, existing }, strictChecks);
+    if (this.cfg.strictRisk.enabled) {
+      const dir = o.action === 'buy' ? 1 : -1;
+      const violation = this.strictViolation(o, own, fillAt, Math.min(fillAt * dir, refPrice * dir) * dir, risk.positionValue);
       if (violation) return fail(violation);
-      // An add is also judged as the review and the challenges will judge the trade: from its first
-      // stop, so a first stop moved up to breakeven does not make room for more than they allow.
-      const planned = strictChecks === 'all' ? this.plannedRisk(o.symbol, side, { quantity: o.quantity, price: fillAt }, own?.id) : null;
-      if (planned && planned.pct > strict.maxRiskPctPerTrade + 1e-9) {
-        return fail(
-          `Strict risk: measured from its first stop at ${formatTick(planned.stop)}, as the trade review and the challenges measure it, this trade risks ${over(planned.pct, strict.maxRiskPctPerTrade, 2)}% with the ${existing.shares} ${existing.symbol} shares you already hold or have working (limit ${strict.maxRiskPctPerTrade}%).`,
-        );
-      }
     }
     // A limit may still fill anywhere up to its price.
     const needed = o.quantity * (o.type === 'limit' ? o.limitPrice! : refPrice);
@@ -509,59 +612,193 @@ export class SimBroker {
     return { warnings: costed.warnings, quote: expected.quote };
   }
 
+  /**
+   * Runs `fn` on this broker, or when `now` (the replay's or simulated market's time) is ahead of its
+   * clock, on a copy brought up to it as submit brings the clock up first (yesterday's DAY orders
+   * expire, the day's loss starts again), so a dry run sees what placing the order would.
+   */
+  private at<T>(now: UnixSeconds | undefined, fn: (b: SimBroker) => T): T {
+    if (now === undefined || !(now > this.s.clock)) return fn(this);
+    const f = this.fork(this.checkpoint());
+    f.syncClock(now);
+    return fn(f);
+  }
+
+  /**
+   * The risk of the trade a new opening order would join with `input.quantity` shares (tradeRiskOf),
+   * for the ticket. Null without a price, a stop anywhere in the trade, or a valid order.
+   */
+  tradeRisk(input: OrderRequest, now?: UnixSeconds): TradeRisk | null {
+    return this.at(now, (b) => {
+      const p = b.prepare(input);
+      if ('error' in p || !isOpeningAction(p.req.action)) return null;
+      const fillAt = b.estimateFill(p.req);
+      return fillAt === null ? null : b.tradeRiskOf({ ...p.req, fillAt });
+    });
+  }
+
+  /**
+   * Size by risk: the most shares of a new opening order whose trade risks at most `riskPct`% as
+   * tradeRiskOf counts it, cut to what submit would accept (Strict Mode's other limits, buying power)
+   * and, for an order that does not fill at its own limit, to the buying power left with room for the
+   * price to move before it fills. `reason` says what cut it below the asked risk, as a sentence.
+   */
+  sizeByRisk(
+    input: Omit<OrderRequest, 'quantity'>,
+    riskPct: number,
+    now?: UnixSeconds,
+  ): { ok: false; error: string } | { ok: true; quantity: number; risk: TradeRisk; needed: number; reason?: string } {
+    return this.at(now, (b) => {
+      const p = b.prepare({ ...input, quantity: 1 });
+      if ('error' in p) return { ok: false as const, error: p.error };
+      const req = { ...p.req, extendedHours: !!p.req.extendedHours };
+      if (!isOpeningAction(req.action)) return { ok: false as const, error: 'Size by risk sizes Buy and Short orders.' };
+      const sized = (n: number) => ({ ...req, quantity: n });
+      const riskAt = (n: number) => {
+        const fillAt = b.estimateFill(sized(n));
+        return fillAt === null ? null : b.tradeRiskOf({ ...sized(n), fillAt });
+      };
+      const one = riskAt(1);
+      if (!one) return { ok: false as const, error: 'Set a stop loss first. Position size = risk ÷ stop distance.' };
+      const joined = one.held + one.working > 0;
+      const S = formatTick(one.stop);
+      const dir = req.action === 'buy' ? 1 : -1;
+      const fill1 = b.estimateFill(sized(1))!;
+      if ((fill1 - one.stop) * dir <= EPS) {
+        return { ok: false as const, error: joined ? `This order is at or past the trade's first stop at ${S}, so it has no risk budget to size from.` : 'The stop loss is on the wrong side of the entry.' };
+      }
+      if (one.unmeasurable) return { ok: false as const, error: `The trade's average entry is at or past its first stop at ${S}, so its risk can't be measured.` };
+      if (one.pct > riskPct + EPS) {
+        return {
+          ok: false as const,
+          error: joined
+            ? `With even one more share the ${req.symbol} trade would risk ${one.pct.toFixed(2)}% from its first stop at ${S}, more than the ${riskPct}% asked.`
+            : `Even one share would risk more than ${riskPct}% of the account at this stop${2 * commissionFor(b.cfg, 1, fill1) > 0 ? ', with commissions in and out' : ''}.`,
+        };
+      }
+      // Both searches keep the smaller end passing, so the size found always passes.
+      const largest = (ok: (n: number) => boolean, cap = 1e9): number => {
+        let lo = 1;
+        let hi = 2;
+        while (hi <= cap && ok(hi)) {
+          lo = hi;
+          hi *= 2;
+        }
+        hi = Math.min(hi, cap + 1);
+        while (hi - lo > 1) {
+          const mid = Math.floor((lo + hi) / 2);
+          if (ok(mid)) lo = mid;
+          else hi = mid;
+        }
+        return lo;
+      };
+      const needed = largest((n) => (riskAt(n)?.pct ?? Infinity) <= riskPct + EPS);
+      const refusal = (n: number) => b.openingCheck(sized(n)).error;
+      const first = refusal(1);
+      if (first) return { ok: false as const, error: first };
+      const accepted = largest((n) => !refusal(n), needed);
+      let quantity = accepted;
+      let reason: string | undefined;
+      if (accepted < needed) {
+        const why = refusal(accepted + 1)!;
+        reason = why.startsWith('Strict risk: ') ? `Strict Mode refuses ${accepted + 1}: ${why.slice('Strict risk: '.length)}` : `${accepted + 1} would be refused: ${why}`;
+      }
+      if (req.type !== 'limit') {
+        const covered = Math.floor(b.affordableQuantity(req) * 0.995);
+        if (covered < 1) return { ok: false as const, error: 'No buying power is left for this order.' };
+        if (covered < quantity) {
+          quantity = covered;
+          reason = `Your available buying power covers ${covered}, with room for the price to move before it fills.`;
+        }
+      }
+      return { ok: true as const, quantity, risk: riskAt(quantity)!, needed, reason };
+    });
+  }
+
   // ---------------------------------------------------------------- orders
 
-  submit(input: OrderRequest): SubmitResult {
-    const warnings: string[] = [];
-    // Prices are normalised to the exchange tick so fills land on real price levels. A price the order
-    // type does not use (a limit price on a stop order) is dropped, so it cannot pass for its entry.
+  /**
+   * Submit's checks of the request itself, before any account limit: prices to the tick (a price the
+   * order type does not use, such as a limit price on a stop order, is dropped, so it cannot pass for
+   * its entry), a whole number of shares, the prices its type needs, extended hours, a price to trade
+   * at, and the action against the position (Buy/Sell for a long, Short/Cover for a short).
+   */
+  private prepare(input: OrderRequest): { req: OrderRequest } | { error: string } {
     const tick = (v: number | undefined) => (v === undefined || !Number.isFinite(v) || v <= 0 ? undefined : roundToTick(v));
+    const symbol = input.symbol.toUpperCase();
     const req: OrderRequest = {
       ...input,
+      symbol,
       limitPrice: input.type === 'limit' || input.type === 'stop_limit' ? tick(input.limitPrice) : undefined,
       stopPrice: input.type === 'stop' || input.type === 'stop_limit' ? tick(input.stopPrice) : undefined,
       stopLoss: tick(input.stopLoss),
       takeProfit: tick(input.takeProfit),
     };
-    const reject = (error: string): SubmitResult => {
-      this.log('rejected', `${req.action.toUpperCase()} ${req.quantity} ${req.symbol}: ${error}`);
-      this.touch();
-      return { ok: false, error, warnings };
-    };
-    const symbol = req.symbol.toUpperCase();
+    const error = (e: string) => ({ error: e });
     const qty = req.quantity;
-    if (!Number.isFinite(qty) || qty <= 0 || Math.floor(qty) !== qty) return reject('Quantity must be a whole number of shares greater than 0.');
-    if ((req.type === 'limit' || req.type === 'stop_limit') && !(req.limitPrice && req.limitPrice > 0)) return reject('Limit price is required.');
-    if ((req.type === 'stop' || req.type === 'stop_limit') && !(req.stopPrice && req.stopPrice > 0)) return reject('Stop price is required.');
-    if (req.extendedHours && req.type !== 'limit') return reject('Only limit orders can be routed to extended hours.');
-    if (req.extendedHours && !this.cfg.allowExtendedHours) return reject('Extended-hours trading is disabled in Settings.');
-
-    const pos = this.position(symbol);
-    const last = this.s.lastPrice[symbol];
-    if (last === undefined) return reject('No price yet for this symbol. Start the replay first.');
+    if (!Number.isFinite(qty) || qty <= 0 || Math.floor(qty) !== qty) return error('Quantity must be a whole number of shares greater than 0.');
+    if ((req.type === 'limit' || req.type === 'stop_limit') && !(req.limitPrice && req.limitPrice > 0)) return error('Limit price is required.');
+    if ((req.type === 'stop' || req.type === 'stop_limit') && !(req.stopPrice && req.stopPrice > 0)) return error('Stop price is required.');
+    if (req.extendedHours && req.type !== 'limit') return error('Only limit orders can be routed to extended hours.');
+    if (req.extendedHours && !this.cfg.allowExtendedHours) return error('Extended-hours trading is disabled in Settings.');
+    if (this.s.lastPrice[symbol] === undefined) return error('No price yet for this symbol. Start the replay first.');
 
     // Action legality mirrors a real broker's buy/sell vs short/cover distinction.
+    const pos = this.position(symbol);
     switch (req.action) {
       case 'buy':
-        if (pos.quantity < 0) return reject(`You are short ${-pos.quantity} ${symbol}. Use Cover to buy back a short.`);
+        if (pos.quantity < 0) return error(`You are short ${-pos.quantity} ${symbol}. Use Cover to buy back a short.`);
         break;
       case 'short':
-        if (!this.cfg.allowShortSelling) return reject('Short selling is disabled in Settings.');
-        if (this.cfg.marginMultiplier < 1.5) return reject('Short selling requires a margin account (set margin to 2x or more in Settings).');
-        if (pos.quantity > 0) return reject(`You are long ${pos.quantity} ${symbol}. Sell the long before shorting.`);
+        if (!this.cfg.allowShortSelling) return error('Short selling is disabled in Settings.');
+        if (this.cfg.marginMultiplier < 1.5) return error('Short selling requires a margin account (set margin to 2x or more in Settings).');
+        if (pos.quantity > 0) return error(`You are long ${pos.quantity} ${symbol}. Sell the long before shorting.`);
         break;
       case 'sell': {
-        if (pos.quantity <= 0) return reject(`No long position in ${symbol} to sell. Use Short to open a short.`);
+        if (pos.quantity <= 0) return error(`No long position in ${symbol} to sell. Use Short to open a short.`);
         const avail = pos.quantity - this.committedExitQty(symbol, 'sell');
-        if (qty > avail + EPS) return reject(`Only ${Math.max(0, avail)} shares available to sell (others are committed to open orders).`);
+        if (qty > avail + EPS) return error(`Only ${Math.max(0, avail)} shares available to sell (others are committed to open orders).`);
         break;
       }
       case 'cover': {
-        if (pos.quantity >= 0) return reject(`No short position in ${symbol} to cover.`);
+        if (pos.quantity >= 0) return error(`No short position in ${symbol} to cover.`);
         const avail = -pos.quantity - this.committedExitQty(symbol, 'cover');
-        if (qty > avail + EPS) return reject(`Only ${Math.max(0, avail)} shares available to cover (others are committed to open orders).`);
+        if (qty > avail + EPS) return error(`Only ${Math.max(0, avail)} shares available to cover (others are committed to open orders).`);
         break;
       }
+    }
+    return { req };
+  }
+
+  /**
+   * Under Strict Mode, why a protective stop at `stopPrice` (a Sell stop for a long, a Cover stop for a
+   * short) can't be placed, or moved from `from`: past the open trade's first stop, and further from
+   * the trade than it was. Tightening, and moving back toward the first stop, are always allowed.
+   */
+  private exitStopViolation(symbol: string, action: OrderAction, stopPrice: number, from?: number): string | null {
+    if (!this.cfg.strictRisk.enabled) return null;
+    const dir = action === 'sell' ? 1 : -1;
+    if (this.position(symbol).quantity * dir <= 0) return null;
+    const S = this.s.roundTrips.find((t) => t.symbol === symbol && !t.closed)?.initialStop;
+    if (S === undefined || (S - stopPrice) * dir <= EPS || (from !== undefined && (from - stopPrice) * dir <= EPS)) return null;
+    return `Strict risk: a stop on this trade can't go ${dir === 1 ? 'below' : 'above'} its first stop at ${formatTick(S)} (anything from ${formatTick(S)} ${dir === 1 ? 'up' : 'down'} is fine).`;
+  }
+
+  submit(input: OrderRequest): SubmitResult {
+    const warnings: string[] = [];
+    const reject = (error: string): SubmitResult => {
+      this.log('rejected', `${input.action.toUpperCase()} ${input.quantity} ${input.symbol}: ${error}`);
+      this.touch();
+      return { ok: false, error, warnings };
+    };
+    const prepared = this.prepare(input);
+    if ('error' in prepared) return reject(prepared.error);
+    const req = prepared.req;
+    const symbol = req.symbol;
+    const qty = req.quantity;
+    if ((req.action === 'sell' || req.action === 'cover') && (req.type === 'stop' || req.type === 'stop_limit')) {
+      const violation = this.exitStopViolation(symbol, req.action, req.stopPrice!);
+      if (violation) return reject(violation);
     }
 
     const opening = isOpeningAction(req.action);
@@ -624,8 +861,8 @@ export class SimBroker {
   }
 
   cancel(orderId: string, reason = 'Cancelled by user'): boolean {
-    const o = this.s.orders.find((x) => x.id === orderId);
-    if (!o || !isOpen(o)) return false;
+    const o = this.openOrderById(orderId);
+    if (!o) return false;
     o.status = 'cancelled';
     o.rejectReason = reason;
     o.updatedAt = this.s.clock;
@@ -642,8 +879,8 @@ export class SimBroker {
 
   /** Modify price/qty of a working order (like dragging an order line). */
   modify(orderId: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }): { ok: boolean; error?: string } {
-    const o = this.s.orders.find((x) => x.id === orderId);
-    if (!o || !isOpen(o)) return { ok: false, error: 'Order is not open.' };
+    const o = this.openOrderById(orderId);
+    if (!o) return { ok: false, error: 'Order is not open.' };
     if (changes.quantity !== undefined && (changes.quantity < o.filledQty + 1 || Math.floor(changes.quantity) !== changes.quantity)) {
       return { ok: false, error: 'Quantity must be a whole number above the filled quantity.' };
     }
@@ -653,30 +890,21 @@ export class SimBroker {
     const limitPrice = changes.limitPrice !== undefined ? roundToTick(changes.limitPrice) : o.limitPrice;
     const stopPrice = changes.stopPrice !== undefined ? roundToTick(changes.stopPrice) : o.stopPrice;
     // A changed entry is checked as if it were placed now: its stop loss and target against where it
-    // now fills, Strict Mode and buying power. Fewer shares at the same prices put nothing new at risk,
-    // so an entry can always be cut back, even once price has moved past its stop loss.
+    // now fills, Strict Mode and buying power. Fewer shares at the same prices put nothing new at risk
+    // (Strict Mode counts the trade at its worst over which entries fill), so an entry can always be
+    // cut back, even once price has moved past its stop loss.
     const cutOnly = limitPrice === o.limitPrice && stopPrice === o.stopPrice && (changes.quantity ?? o.quantity) <= o.quantity;
     if (isOpeningAction(o.action)) {
       if (!cutOnly) {
         // Its unfilled shares take the live bracket's stop and target once it has started filling.
         const px = this.entryPrice({ symbol: o.symbol, limitPrice, stopPrice });
-        const next = { ...o, ...this.bracketLevels(o, undefined, px), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
-        // Strict Mode never refuses a change that takes risk off the order (fewer shares, a price nearer
-        // its stop) while the riskier order would stay working; its position limit still holds a change
-        // that raises the order's value (a short entry moved up toward its stop).
-        const less = this.lessRisk(o, next);
-        const { error } = this.openingCheck(next, o, !less.risk ? 'all' : less.valueGrew ? 'position' : 'none');
+        const next = { ...o, ...this.bracketLevels(o, px), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
+        const { error } = this.openingCheck(next, o);
         if (error) return { ok: false, error };
       }
-    } else if (stopPrice !== undefined && stopPrice !== o.stopPrice && this.cfg.strictRisk.enabled) {
-      // Under Strict Mode an exit stop cannot be moved away to put more than the limit at risk.
-      const entry = o.action === 'sell' ? 'buy' : 'short';
-      const before = this.exposure(o.symbol, entry).riskPct;
-      const after = this.exposure(o.symbol, entry, undefined, { id: o.id, price: stopPrice }).riskPct;
-      const limit = this.cfg.strictRisk.maxRiskPctPerTrade;
-      if (after > before + 1e-9 && after > limit + 1e-9) {
-        return { ok: false, error: `Strict risk: with this stop at ${formatTick(stopPrice)}, the trade risks ${over(after, limit, 2)}% (limit ${limit}%).` };
-      }
+    } else if (stopPrice !== undefined && stopPrice !== o.stopPrice) {
+      const violation = this.exitStopViolation(o.symbol, o.action, stopPrice, o.stopPrice);
+      if (violation) return { ok: false, error: violation };
     }
     o.limitPrice = limitPrice;
     o.stopPrice = stopPrice;
@@ -687,19 +915,6 @@ export class SimBroker {
     if (this.cfg.marketOrderFill === 'last_price' && o.status === 'working') this.tryImmediate(o);
     this.touch();
     return { ok: true };
-  }
-
-  /**
-   * Whether `next` (unfilled shares, prices) puts no more shares and no more risk to their stop on the
-   * line than `o`'s unfilled shares (risk: true), and whether it raises their value.
-   */
-  private lessRisk(o: Order, next: Pick<Order, 'symbol' | 'limitPrice' | 'stopPrice' | 'stopLoss'> & { quantity: number }): { risk: boolean; valueGrew: boolean } {
-    const dir = o.action === 'buy' ? 1 : -1;
-    const was = { n: o.quantity - o.filledQty, px: this.entryPrice(o), stop: this.bracketLevels(o).stopLoss };
-    const now = { n: next.quantity, px: this.entryPrice(next), stop: next.stopLoss };
-    // Shares with no stop have no limit to their risk: fewer of them is still less.
-    const risk = (x: typeof was) => (x.stop === undefined ? Infinity : x.n * Math.max(0, (x.px - x.stop) * dir));
-    return { risk: now.n <= was.n && risk(now) <= risk(was) + 1e-9, valueGrew: now.n * now.px > was.n * was.px + 1e-9 };
   }
 
   /**
@@ -993,22 +1208,22 @@ export class SimBroker {
 
   /**
    * Finds the working order that fires first as price moves from `from` toward `to`. Orders at the
-   * same level fire in the order they were placed, except that a Buy or Short meeting a position the
-   * other way goes last: an exit at that level (a stop at the other side's entry, a gap through both)
-   * flattens the position first, so the entry then opens the new trade instead of being cancelled.
+   * same level fire in the order they were placed, except that exits go before entries: an exit at
+   * that level (a stop that price gaps through along with a resting add, a stop at the other side's
+   * entry) closes the shares first, so the entry then opens a new trade instead of adding past the stop
+   * or being cancelled.
    */
   private nextTrigger(symbol: string, from: number, to: number, session: MarketSession, skip: Set<string>): Trigger | null {
     let best: Trigger | null = null;
     let bestLate = false;
     const ext = session !== 'regular';
-    const q = this.position(symbol).quantity;
     for (const o of this.liveOrders()) {
       if (o.symbol !== symbol || o.status === 'pending' || !isOpen(o) || skip.has(o.id)) continue;
       if (!this.eligible(o, session)) continue;
       const level = this.triggerLevel(o, from, to, ext);
       if (level === null) continue;
       const distance = Math.abs(level - from);
-      const late = (o.action === 'buy' && q < 0) || (o.action === 'short' && q > 0);
+      const late = isOpeningAction(o.action);
       if (!best || distance < best.distance - EPS || (bestLate && !late && distance <= best.distance + EPS)) {
         best = { order: o, level, distance };
         bestLate = late;
@@ -1099,11 +1314,14 @@ export class SimBroker {
     // the other way since (two-sided entries around a range); it is cancelled, not turned into an exit.
     if ((o.action === 'buy' && pos.quantity < 0) || (o.action === 'short' && pos.quantity > 0)) {
       const held = `${pos.quantity > 0 ? 'long' : 'short'} ${Math.abs(pos.quantity)} ${o.symbol}`;
-      o.status = 'cancelled';
-      o.rejectReason = `You were ${held} when it would have filled. ${o.action === 'buy' ? 'Cover the short before buying.' : 'Sell the long before shorting.'}`;
-      o.conflict = true;
-      o.updatedAt = time;
-      this.log('cancelled', `${describe(o)} cancelled: you were ${held} when it would have filled`, o.id);
+      this.autoCancel(o, time, `You were ${held} when it would have filled. ${o.action === 'buy' ? 'Cover the short before buying.' : 'Sell the long before shorting.'}`, `you were ${held} when it would have filled`);
+      skip.add(o.id);
+      return 0;
+    }
+
+    // Under Strict Mode, once the day's loss reaches its limit an entry is cancelled rather than filled.
+    if (isOpeningAction(o.action) && this.cfg.strictRisk.enabled && this.dailyLimitReached()) {
+      this.autoCancel(o, time, `Strict Mode: the ${this.cfg.strictRisk.maxDailyLossPct}% daily loss limit was reached.`, "Strict Mode's daily loss limit was reached");
       skip.add(o.id);
       return 0;
     }
@@ -1111,7 +1329,7 @@ export class SimBroker {
     if (o.type === 'stop_limit' && !o.triggered) {
       o.triggered = true;
       o.updatedAt = time;
-      this.log('triggered', `${describe(o)} triggered at ${x.toFixed(2)}; now a limit at ${o.limitPrice!.toFixed(2)}`, o.id);
+      this.log('triggered', `${describe(o)} triggered at ${formatTick(x)}; now a limit at ${formatTick(o.limitPrice!)}`, o.id);
       return 0; // the limit leg is re-evaluated from this point on the path
     }
     if (o.type === 'stop') o.triggered = true;
@@ -1240,6 +1458,15 @@ export class SimBroker {
     this.s.lastPrice[symbol] = this.s.lastPrice[symbol] ?? price;
   }
 
+  /** Cancels a working order the user did not cancel (`why` for them, `logged` for the event log), so the UI announces it. */
+  private autoCancel(o: Order, time: UnixSeconds, why: string, logged: string): void {
+    o.status = 'cancelled';
+    o.rejectReason = why;
+    o.conflict = true;
+    o.updatedAt = time;
+    this.log('cancelled', `${describe(o)} cancelled: ${logged}`, o.id);
+  }
+
   private updateRoundTrip(o: Order, fill: Fill, opening: boolean): void {
     const symbol = o.symbol;
     let tripId = this.s.openTripBySymbol[symbol];
@@ -1319,13 +1546,19 @@ export class SimBroker {
       trip.closed = true;
       trip.exitTime = fill.time;
       delete this.s.openTripBySymbol[symbol];
-      // Flat: any remaining exit orders for this symbol are orphans.
+      // Flat: any remaining exit orders for this symbol are orphans. Under Strict Mode, so are the entries
+      // still working on the trade's side: they were measured as part of it (from its first stop, against
+      // the equity it started with), and filling now they would start a new trade that was never checked.
+      const entry = trip.direction === 'long' ? 'buy' : 'short';
       for (const x of this.liveOrders()) {
-        if (x.symbol === symbol && isOpen(x) && !isOpeningAction(x.action)) {
+        if (x.symbol !== symbol || !isOpen(x)) continue;
+        if (!isOpeningAction(x.action)) {
           x.status = 'cancelled';
           x.rejectReason = 'Position closed';
           x.updatedAt = fill.time;
           this.log('cancelled', `${describe(x)} cancelled: position closed`, x.id);
+        } else if (x.action === entry && this.cfg.strictRisk.enabled) {
+          this.autoCancel(x, fill.time, `Strict Mode: it was measured as part of the ${symbol} trade that closed. Place it again to check it as a new trade.`, `Strict Mode measured it as part of the ${symbol} trade that closed`);
         }
       }
     }
@@ -1406,9 +1639,9 @@ export function describe(o: Order): string {
     o.type === 'market'
       ? 'MKT'
       : o.type === 'limit'
-        ? `LMT ${o.limitPrice?.toFixed(2)}`
+        ? `LMT ${formatTick(o.limitPrice!)}`
         : o.type === 'stop'
-          ? `STP ${o.stopPrice?.toFixed(2)}`
-          : `STP ${o.stopPrice?.toFixed(2)} LMT ${o.limitPrice?.toFixed(2)}`;
+          ? `STP ${formatTick(o.stopPrice!)}`
+          : `STP ${formatTick(o.stopPrice!)} LMT ${formatTick(o.limitPrice!)}`;
   return `${o.action.toUpperCase()} ${o.quantity} ${o.symbol} ${px}`;
 }

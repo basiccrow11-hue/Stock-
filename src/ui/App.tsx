@@ -42,6 +42,10 @@ export function App() {
   const [journalFocus, setJournalFocus] = useState<string | null>(null);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const [backtestOpened, setBacktestOpened] = useState(false);
+  useEffect(() => {
+    if (view === "backtest") setBacktestOpened(true);
+  }, [view]);
 
   useEffect(() => {
     void useJournal.getState().load();
@@ -102,7 +106,10 @@ export function App() {
             view === "trade" ? null : <div className="page muted">Loading…</div>
           }
         >
-          {view === "backtest" && <BacktestPage />}
+          {/* The backtester stays mounted once opened, so its strategy, results and a run in progress survive a page switch. */}
+          {(view === "backtest" || backtestOpened) && (
+            <BacktestPage active={view === "backtest"} />
+          )}
           {view === "journal" && <JournalPage focusId={journalFocus} />}
           {view === "analytics" && <AnalyticsPage />}
           {view === "challenges" && (

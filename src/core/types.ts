@@ -96,7 +96,11 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   rejectReason?: string;
   /** Commission charged on this order's fills so far (the per-order fee and minimum apply once). */
   commission?: number;
-  /** Cancelled at fill time because a position the other way had opened since it was placed. */
+  /**
+   * Cancelled by the broker rather than the user, so the UI announces it: at fill time because a position
+   * the other way had opened since it was placed or Strict Mode's daily loss limit was reached, or under
+   * Strict Mode because the trade it was measured with closed.
+   */
   conflict?: boolean;
   /** Market orders: the price they were checked against when placed (last price plus or minus half the spread). */
   quotedPrice?: number;

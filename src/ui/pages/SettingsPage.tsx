@@ -500,7 +500,12 @@ function RiskCard() {
       <div className="two-col">
         <div className="stack">
           <h3>Strict mode</h3>
-          <p className="muted small">Off by default: the ticket warns but lets you place any trade. When on, orders that break these limits are rejected.</p>
+          <p className="muted small">
+            Off by default: the ticket warns but lets you place any trade. When on, orders that would break these limits are refused. A trade&apos;s risk is measured the way the trade review and the
+            challenges measure it: every share from the trade&apos;s first stop loss, against the equity the trade started with, so raising your stop does not make room for bigger adds. Keep this
+            limit at or below your rule&apos;s. Entries waiting on a stock you don&apos;t hold yet must share one stop loss, and a stop can be tightened but never moved past
+            the trade&apos;s first stop. Once the day&apos;s loss reaches its limit, no new entries or adds until the next session. Cancelling orders and closing positions are always allowed.
+          </p>
           <label className="check">
             <input type="checkbox" checked={sr.enabled} onChange={(e) => setStrict({ enabled: e.target.checked })} /> Block orders that break these limits
           </label>

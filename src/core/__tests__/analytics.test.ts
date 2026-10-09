@@ -238,6 +238,37 @@ describe('learning review', () => {
     };
     const flat = (next: (o: number, h: number, l: number, c: number) => void, px: number) => next(px, px, px, px);
 
+    it("does not call a sub-dollar short's stop at $1 filled past its price when only the cent rounding took it there", () => {
+      const verdict = (entry: number, stop: number) => {
+        const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+        const t0 = et('2025-01-15', '10:00');
+        const bars: Bar[] = [];
+        const next = (o: number, h: number, l: number, c: number) => {
+          const nb = bar(t0 + 60 * bars.length, o, h, l, c, 5_000_000);
+          bars.push(nb);
+          b.onBar('T', nb);
+        };
+        for (let i = 0; i < 20; i++) next(entry, entry + 0.002, entry - 0.002, entry);
+        expect(b.submit({ symbol: 'T', action: 'short', type: 'market', quantity: 20000, stopLoss: stop }).ok).toBe(true);
+        // Price creeps up through the stop, 0.002 a bar: no gap.
+        let p = entry;
+        for (let i = 0; i < 12 && b.position('T').quantity !== 0; i++) {
+          const n = +(p + 0.002).toFixed(4);
+          next(p, n, p - 0.001, n);
+          p = n;
+        }
+        for (let i = 0; i < 30; i++) next(p, p + 0.001, p - 0.001, p);
+        const st = b.state;
+        expect(st.fills.at(-1)!.price).toBe(stop + 0.01);
+        return reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES }).findings.map((f) => f.title);
+      };
+      // The cover stop fills at the next cent up from its stop, its half spread and slippage, as the same
+      // short at $1.50 does.
+      for (const [entry, stop] of [[0.99, 1], [0.998, 1.01], [1.5, 1.52]] as const) {
+        expect(verdict(entry, stop)).not.toContain('Stop filled well past its price');
+      }
+    });
+
     it('says the loss was capped as planned only when the stop filled at its price', () => {
       const planned = run((_, next) => {
         next(100, 100.2, 98.9, 99);
@@ -720,25 +751,61 @@ describe('learning review', () => {
 
   it('treats one entry order filled in parts by the volume cap as one entry, not as adds past the stop', () => {
     const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
-    const t0 = et('2025-01-15', '10:00');
+    // Pre-market, where an extended-hours limit can fill but stops are not active yet.
+    const t0 = et('2025-01-15', '08:00');
     const bars = [
       bar(t0, 100, 100, 100, 100, 4000),
       bar(t0 + 60, 100.1, 100.1, 99.4, 99.45, 4000), // 1000 of the 2000 fill at the limit (25% of the volume)
       bar(t0 + 120, 99, 99.1, 98.9, 99, 4000), // the rest of the same order fills at an open past the stop
-      bar(t0 + 180, 99, 99.1, 98.9, 99, 40000),
+      bar(et('2025-01-15', '09:30'), 99, 99.1, 98.9, 99, 40000), // the stop closes the trade at the open
     ];
     b.onBar('T', bars[0]);
-    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day' }).ok).toBe(true);
+    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day', extendedHours: true }).ok).toBe(true);
     for (const x of bars.slice(1)) b.onBar('T', x);
     const st = b.state;
+    expect(st.roundTrips).toHaveLength(1);
     const t = st.roundTrips[0];
     expect(t.closed).toBe(true);
+    expect(t.maxQuantity).toBe(2000);
     expect(t.bracketEntry).toBeCloseTo(t.avgEntry, 9);
     const r = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
     const titles = r.findings.map((f) => f.title);
     expect(titles).not.toContain('Added past your stop');
     expect(r.findings.find((f) => f.title === 'Entry filled past your stop')!.detail).toMatch(/^Your entry order at 99\.90 filled in 2 parts, each capped at a share of a bar's volume/);
     expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
+  });
+
+  it("closes the trade with its stop before the rest of a part-filled entry fills at a gap, and the rest starts a new trade", () => {
+    const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const t0 = et('2025-01-15', '10:00');
+    const bars = [
+      bar(t0, 100, 100, 100, 100, 4000),
+      bar(t0 + 60, 100.1, 100.1, 99.4, 99.45, 4000), // 1000 of the 2000 fill at the limit
+      bar(t0 + 120, 99, 99.1, 98.9, 99, 4000), // gap past the stop: the stop sells first and takes the bar's volume cap
+      bar(t0 + 180, 99, 99.1, 98.9, 99, 40000), // the rest of the entry, still working, fills and its stop fires
+    ];
+    b.onBar('T', bars[0]);
+    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day' }).ok).toBe(true);
+    for (const x of bars.slice(1)) b.onBar('T', x);
+    const st = b.state;
+    expect(st.fills.map((f) => [f.time - t0, f.side, f.quantity])).toEqual([
+      [85, 'buy', 1000],
+      [120, 'sell', 1000],
+      [180, 'buy', 1000],
+      [180, 'sell', 1000],
+    ]);
+    expect(st.roundTrips.map((t) => [t.maxQuantity, t.closed])).toEqual([
+      [1000, true],
+      [1000, true],
+    ]);
+    const reviews = st.roundTrips.map((t) =>
+      reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES }),
+    );
+    for (const r of reviews) {
+      expect(r.findings.map((f) => f.title)).not.toContain('Added past your stop');
+      expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
+    }
+    expect(reviews[1].findings.find((f) => f.title === 'Entry filled past your stop')!.detail).toMatch(/^Price gapped through both your entry order at 99\.90 and your stop at 99\.50/);
   });
 
   it('counts a loss on a position carried from an earlier day toward the daily loss rule', () => {

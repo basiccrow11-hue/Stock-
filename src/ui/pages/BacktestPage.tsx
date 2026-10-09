@@ -16,6 +16,7 @@ import type { BacktestResult } from '../../core/backtest/Backtester';
 import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
+import { toast } from '../state/toasts';
 import { TIMEFRAMES, type Bar, type DataSourceKind, type OrderAction, type Timeframe } from '../../core/types';
 import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
 import { AFTERHOURS_CLOSE, exchangeTimeToUnix, isTradingDay, nextTradingDay, prevTradingDay, tradingDayOnOrBefore } from '../../core/time';
@@ -233,7 +234,11 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
   return <div ref={ref} style={{ height: 380, position: 'relative' }} />;
 }
 
-export function BacktestPage() {
+/**
+ * Stays mounted once opened (App hides it while another page is showing), so the strategy, the
+ * settings, the results and a run in progress all survive a look at another page.
+ */
+export function BacktestPage({ active = true }: { active?: boolean }) {
   const settings = useSettings();
   const panel = useTheme().panel;
   useCredentials((s) => s.creds);
@@ -260,6 +265,10 @@ export function BacktestPage() {
   const [announce, setAnnounce] = useState('');
   const [result, setResult] = useState<{ r: BacktestResult; tf: Timeframe; label: string; source: DataSourceKind } | null>(null);
   const [tab, setTab] = useState<'trades' | 'signals'>('trades');
+  /** The run in progress: Cancel aborts its bar download, or stops the worker once it is running. */
+  const runRef = useRef<{ controller: AbortController; started: number } | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   const provider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
 
@@ -278,7 +287,10 @@ export function BacktestPage() {
   }, [provider, symbol, from, to, strategy, balance]);
 
   const run = async () => {
-    if (validation) return;
+    if (validation || runRef.current) return;
+    const controller = new AbortController();
+    runRef.current = { controller, started: performance.now() };
+    const cancelled = () => controller.signal.aborted;
     setError(null);
     setAnnounce('');
     setRunning('Loading bars…');
@@ -290,11 +302,12 @@ export function BacktestPage() {
       for (let i = 0; i < lookback; i++) warm = prevTradingDay(warm);
       const end = tradingDayOnOrBefore(to);
       const sym = symbol.trim().toUpperCase();
-      const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(warm, 0), to: exchangeTimeToUnix(end, AFTERHOURS_CLOSE) });
+      const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(warm, 0), to: exchangeTimeToUnix(end, AFTERHOURS_CLOSE) }, controller.signal);
+      if (cancelled()) throw new Error('Cancelled');
       if (!bars.length) throw new Error(`No data for ${sym} in that range.`);
       setRunning(`Running on ${bars.length.toLocaleString('en-US')} bars…`);
       const ex = settings.execution;
-      const r = await runBacktestAsync({
+      const job = runBacktestAsync({
         symbol: sym,
         bars,
         baseTimeframe: provider.baseTimeframe(sym),
@@ -311,14 +324,39 @@ export function BacktestPage() {
         strategy,
         source: provider.source,
       });
+      // Making demo bars and handing them to the worker happen on this thread, which can keep it busy
+      // for a second or two: a second press queued meanwhile is handled only now, so it still counts
+      // as part of the Run press.
+      runRef.current!.started = performance.now();
+      const r = await job;
+      if (cancelled()) throw new Error('Cancelled');
       setResult({ r, tf: timeframe, label: `${strategy.name} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, source: provider.source });
-      setAnnounce(`Backtest done: ${r.stats.totalTrades} ${r.stats.totalTrades === 1 ? 'trade' : 'trades'}, strategy return ${r.stats.totalReturnPct.toFixed(2)}%.`);
+      const done = `Backtest done: ${r.stats.totalTrades} ${r.stats.totalTrades === 1 ? 'trade' : 'trades'}, strategy return ${r.stats.totalReturnPct.toFixed(2)}%.`;
+      setAnnounce(done);
+      // Finished while another page is showing: say so there.
+      if (!activeRef.current) toast('success', done, 6000);
     } catch (e) {
-      if ((e as Error).message !== 'Cancelled') setError((e as Error).message);
-      else setAnnounce('Backtest cancelled.');
+      if (cancelled() || (e as Error).message === 'Cancelled') setAnnounce('Backtest cancelled.');
+      else {
+        setError((e as Error).message);
+        if (!activeRef.current) toast('error', `Backtest failed: ${(e as Error).message}`, 8000);
+      }
     } finally {
+      runRef.current = null;
       setRunning(null);
     }
+  };
+
+  /**
+   * Cancel, from the same button as Run. A second click of a double-click, a held Enter's repeats, and
+   * any press in the first half second (or the first half second after the bars have loaded) are taken
+   * as the Run press carrying on, not as Cancel.
+   */
+  const cancel = (e: React.MouseEvent) => {
+    const r = runRef.current;
+    if (!r || e.detail > 1 || performance.now() - r.started < 500) return;
+    r.controller.abort();
+    cancelBacktests();
   };
 
   const equityLines = useMemo<LineSpec[]>(() => {
@@ -332,7 +370,7 @@ export function BacktestPage() {
   const setSizing = (s: Sizing) => setStrategy({ ...strategy, sizing: s });
 
   return (
-    <div className="page">
+    <div className="page" hidden={!active}>
       <div className="page-inner stack" style={{ gap: 16 }}>
         <div className="row wrap">
           <h1>Backtester</h1>
@@ -473,7 +511,14 @@ export function BacktestPage() {
             {validation && <span className="small warn">{validation}</span>}
             {running && <span className="small muted">{running}</span>}
             {/* One button that turns into Cancel while running, so keyboard focus stays on it. */}
-            <button className={running ? 'btn' : 'btn primary'} disabled={!running && !!validation} onClick={running ? cancelBacktests : () => void run()}>
+            <button
+              className={running ? 'btn' : 'btn primary'}
+              disabled={!running && !!validation}
+              onClick={running ? cancel : () => void run()}
+              onKeyDown={(e) => {
+                if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault();
+              }}
+            >
               {running ? 'Cancel' : 'Run backtest'}
             </button>
           </div>

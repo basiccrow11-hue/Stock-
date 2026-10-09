@@ -1,6 +1,7 @@
 /**
- * Pre-trade risk math. Pure functions, used by the order ticket (live preview), the broker's
- * optional strict-risk gate, and the backtester's position sizing.
+ * Pre-trade risk math. Pure functions, used by the order ticket (live preview), the broker (bracket
+ * checks; Strict Mode's own rules live in SimBroker, which knows the whole trade), and the backtester's
+ * position sizing.
  */
 import type { OrderAction } from '../types';
 
@@ -116,68 +117,11 @@ export function positionSizeForRisk(equity: number, riskPct: number, entry: numb
   return Math.floor((equity * riskPct) / 100 / perShare);
 }
 
-/**
- * What a new opening order joins: the shares of the same symbol already held in its direction and
- * those in its other working entries, as % of equity, with their risk to their stops. A held share's
- * risk runs from the position's average price to the stop protecting it, an entry's from its price to
- * its stop loss; a stop past that price counts as no risk. Shares with no stop have no measurable risk.
- * Risk is a % of `riskEquity`: while a position is open, the equity its trade started with, which is
- * what the trade review, the risk rule and the challenges measure the whole trade's risk against.
- */
-export interface Exposure {
-  symbol: string;
-  shares: number;
-  /** % of the account's equity now. */
-  valuePct: number;
-  /** % of riskEquity. */
-  riskPct: number;
-  riskEquity: number;
-  unprotected: number;
-}
-
 /** `v` (over `limit`) written with `digits` decimals, or more where fewer would not show it is over. */
 export function over(v: number, limit: number, digits: number): string {
   let d = digits;
   while (d < 4 && Number(v.toFixed(d)) <= limit) d++;
   return v.toFixed(d);
-}
-
-/**
- * Returns a reason the order must be blocked under strict risk controls, or null. With `existing`, the
- * risk and position limits apply to the whole trade the order would join, not to the order alone, so
- * adds and several working entries cannot build past them. `checks: 'position'` applies the position
- * limit alone.
- */
-export function strictRiskViolation(
-  cfg: StrictRiskConfig,
-  assessment: RiskAssessment,
-  ctx: { dayPnl: number; dayStartEquity: number; existing?: Exposure },
-  checks: 'all' | 'position' = 'all',
-): string | null {
-  if (!cfg.enabled || !assessment.opening) return null;
-  const ex = ctx.existing && ctx.existing.shares > 0 ? ctx.existing : undefined;
-  const already = ex ? ` with the ${ex.shares} ${ex.symbol} shares you already hold or have working` : '';
-  const position = () => {
-    const positionPct = assessment.positionPctOfEquity + (ex?.valuePct ?? 0);
-    return positionPct > cfg.maxPositionPctOfEquity + 1e-9
-      ? `Strict risk: position is ${over(positionPct, cfg.maxPositionPctOfEquity, 0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`
-      : null;
-  };
-  if (checks === 'position') return position();
-  if (ctx.dayStartEquity > 0 && (-ctx.dayPnl / ctx.dayStartEquity) * 100 >= cfg.maxDailyLossPct) {
-    return `Strict risk: daily loss limit of ${cfg.maxDailyLossPct}% reached. New positions are blocked for today.`;
-  }
-  if (cfg.requireStopLoss && assessment.dollarRisk === null) return 'Strict risk: a valid stop loss is required.';
-  if (ex && cfg.requireStopLoss && ex.unprotected > 0) {
-    return `Strict risk: ${ex.unprotected} of the ${ex.shares} ${ex.symbol} shares you already hold or have working have no stop, so this trade's risk has no limit. Give them a stop first.`;
-  }
-  // Joined to a trade, the order's risk is measured against the same equity as the trade's.
-  const pctRisk =
-    assessment.pctRisk === null ? null : ex && ex.riskEquity > 0 && assessment.dollarRisk !== null ? (assessment.dollarRisk / ex.riskEquity) * 100 + ex.riskPct : assessment.pctRisk + (ex?.riskPct ?? 0);
-  if (pctRisk !== null && pctRisk > cfg.maxRiskPctPerTrade + 1e-9) {
-    return `Strict risk: this trade risks ${over(pctRisk, cfg.maxRiskPctPerTrade, 2)}%${already} (limit ${cfg.maxRiskPctPerTrade}%).`;
-  }
-  return position();
 }
 
 /** `v` as a percentage with `digits` decimals; past `limit`, with enough decimals to show it is over. */

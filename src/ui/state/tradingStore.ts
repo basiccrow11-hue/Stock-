@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { bucketFor, ownCandles } from '../../core/data/aggregate';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
 import { ReplaySession, type ReplaySetup } from '../../core/replay/ReplaySession';
-import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult } from '../../core/broker/SimBroker';
+import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
@@ -24,7 +24,6 @@ import { toast } from './toasts';
 import { recordTradeClosed } from './streakStore';
 import { setLiveBlind } from './liveBlind';
 import { newId } from '../../core/util/ids';
-import type { Exposure } from '../../core/risk/risk';
 
 export type SessionMode = 'replay' | 'sim';
 
@@ -848,17 +847,20 @@ export function estimateFill(req: Pick<OrderRequest, 'symbol' | 'action' | 'type
   return broker()?.estimateFill(req, now) ?? null;
 }
 
-/** What a new opening order in `symbol` would join, as Strict Mode measures it (SimBroker.exposure). */
-export function exposure(symbol: string, action: 'buy' | 'short'): Exposure | null {
-  return broker()?.exposure(symbol, action) ?? null;
+/**
+ * The risk of the trade a new Buy or Short order would join, from the trade's first stop, as Strict
+ * Mode, the trade review and the challenges measure it (SimBroker.tradeRisk), at the time submit would
+ * place it.
+ */
+export function tradeRisk(req: OrderRequest): TradeRisk | null {
+  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  return broker()?.tradeRisk(req, now) ?? null;
 }
 
-/**
- * The risk of the open trade in `symbol` once `quantity` more shares fill at `price`, as the trade
- * review and the challenges measure it, from its first stop (SimBroker.plannedRisk).
- */
-export function plannedRisk(symbol: string, action: 'buy' | 'short', quantity: number, price: number): { pct: number; stop: number } | null {
-  return broker()?.plannedRisk(symbol, action, { quantity, price }) ?? null;
+/** Size by risk: the most shares whose trade risks at most `riskPct`% and that submit would accept (SimBroker.sizeByRisk). */
+export function sizeByRisk(input: Omit<OrderRequest, 'quantity'>, riskPct: number): ReturnType<SimBroker['sizeByRisk']> {
+  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  return broker()?.sizeByRisk(input, riskPct, now) ?? { ok: false, error: 'Start a session first.' };
 }
 
 /** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */

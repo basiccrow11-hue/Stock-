@@ -4,7 +4,7 @@ import { assessRisk, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
 import { formatTick, roundToTick } from '../../core/util/math';
-import { affordableQuantity, closePosition, estimateFill, exposure, plannedRisk, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
+import { closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
@@ -40,6 +40,7 @@ export function OrderTicket() {
   const picked = useTrading((s) => s.pickedPrice);
   const pickTarget = useTrading((s) => s.pickTarget);
   const now = useTrading((s) => s.now);
+  const brokerVersion = useTrading((s) => s.version);
   const exec = useSettings((s) => s.execution);
   const rules = useSettings((s) => s.rules);
   // Close position removes its own box once the position is flat: focus goes to the chosen order side.
@@ -125,115 +126,48 @@ export function OrderTicket() {
     return assessRisk({ action, quantity: q, entryPrice: entry, stopLoss: opening ? parse(sl) : undefined, takeProfit: opening ? parse(tp) : undefined, equity: account.equity, commissionEstimate: commissionFor(exec, q, entry) });
   }, [entry, account, q, action, opening, sl, tp, exec]);
 
+  /** The order on the ticket as submit would get it, without its size. */
+  const request = () => ({
+    symbol,
+    action,
+    type,
+    limitPrice: type === 'limit' || type === 'stop_limit' ? parse(limit) : undefined,
+    stopPrice: type === 'stop' || type === 'stop_limit' ? parse(stop) : undefined,
+    stopLoss: opening ? parse(sl) : undefined,
+    takeProfit: opening ? parse(tp) : undefined,
+    tif,
+    extendedHours: ext && type === 'limit',
+  });
+
+  // With shares already held or working on this side, the risk of the whole trade with this order, from
+  // its first stop: what Strict Mode limits and the trade review reports.
+  const trade = useMemo(() => {
+    if (!opening || q <= 0 || !session) return null;
+    const r = tradeRisk({ ...request(), quantity: q });
+    return r && r.held + r.working > 0 ? r : null;
+  }, [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, brokerVersion]);
+
   if (!session) return null;
 
-  const sizeByRisk = () => {
-    const stopPx = parse(sl);
+  // Size by risk sizes the whole trade, as Strict Mode and the trade review measure it: for a new trade,
+  // this order to its stop; for an add, what is left of the asked % once the shares already held or
+  // working are counted from the trade's first stop. The broker then cuts it to what submit accepts.
+  const sizeToRisk = () => {
     const asked = Number(riskPct);
-    if (!entry || !stopPx || !account || !(asked > 0)) {
-      toast('warning', 'Set a stop loss (and entry price for non-market orders) first. Position size = risk ÷ stop distance.');
+    if (!(asked > 0)) {
+      toast('warning', 'Enter the % of the account to risk.');
       return;
     }
-    const sign = direction === 'long' ? 1 : -1;
-    // Strict Mode judges the whole trade an order joins, so the shares already held or working in it
-    // use up part of its risk and position limits. Its risk limit caps the asked % only where it binds.
-    const strictLimits = exec.strictRisk.enabled ? exec.strictRisk : null;
-    const ex = strictLimits ? exposure(symbol, action === 'short' ? 'short' : 'buy') : null;
-    const joined = ex && ex.shares > 0 ? ex : null;
-    const held = joined ? `the ${joined.shares} ${symbol} shares you already hold or have working` : '';
-    if (joined && strictLimits!.requireStopLoss && joined.unprotected > 0) {
-      toast('warning', `${joined.unprotected} of ${held} have no stop, so Strict Mode refuses adding to the trade. Give them a stop first.`);
+    const r = sizeByRisk(request(), asked);
+    if (!r.ok) {
+      toast('warning', r.error);
       return;
     }
-    const limitPct = strictLimits?.maxRiskPctPerTrade ?? Infinity;
-    // What Strict Mode leaves, of the equity it measures the trade against (while a position is open,
-    // the equity the trade started with, as the trade review does).
-    const strictPct = limitPct - (joined?.riskPct ?? 0);
-    const strictBudget = strictLimits ? ((ex?.riskEquity ?? account.equity) * strictPct) / 100 : Infinity;
-    const askedBudget = (account.equity * asked) / 100;
-    const strictBinds = strictBudget < askedBudget;
-    const budget = Math.min(askedBudget, strictBudget);
-    const budgetPct = strictBinds ? strictPct : asked;
-    const show = (v: number) => String(+v.toFixed(2));
-    // Risk at the size's own estimated fill (a bigger order pays more market impact), with commissions
-    // in and out: what the ticket shows and Strict Mode checks. It only grows with the size.
-    const riskOf = (n: number): number => {
-      const e = estimate(n);
-      const perShare = e === undefined ? 0 : (e - stopPx) * sign;
-      return perShare > 0 ? perShare * n + 2 * commissionFor(exec, n, e!) : Infinity;
-    };
-    const one = riskOf(1);
-    if (one === Infinity) {
-      toast('warning', 'The stop loss is on the wrong side of the entry.');
-      return;
-    }
-    if (one > budget + 1e-9) {
-      toast(
-        'warning',
-        strictBinds && joined && joined.riskPct > 0
-          ? `${held[0].toUpperCase()}${held.slice(1)} already risk ${show(joined.riskPct)}% of Strict Mode's ${limitPct}% limit, which leaves no room for another share at this stop.`
-          : `Even one share would risk more than ${show(budgetPct)}% of the account at this stop${2 * commissionFor(exec, 1, estimate(1)!) > 0 ? ', with commissions in and out' : ''}.`,
-      );
-      return;
-    }
-    // The largest size whose test passes, given that 1 share passes and `hi` is enough.
-    const largest = (hi: number, ok: (n: number) => boolean): number => {
-      if (ok(hi)) return hi;
-      let lo = 1;
-      while (hi - lo > 1) {
-        const mid = Math.floor((lo + hi) / 2);
-        if (ok(mid)) lo = mid;
-        else hi = mid;
-      }
-      return lo;
-    };
-    const n = largest(Math.max(1, Math.floor(budget / (one - 2 * commissionFor(exec, 1, estimate(1)!)))), (m) => riskOf(m) <= budget + 1e-9);
-    // A tight stop can imply more shares than the buying power left covers (with a small buffer for a
-    // market or stop order's price moving before it fills), or than Strict Mode lets the position be.
-    const req = { symbol, action, type, limitPrice: parse(limit), stopPrice: parse(stop), extendedHours: ext && type === 'limit' };
-    const affordable = affordableQuantity(req);
-    const covered = type === 'limit' ? affordable : Math.floor(affordable * 0.995);
-    const caps: { n: number; why: string; none: string }[] = [{ n: covered, why: `your available buying power covers ${covered}`, none: 'No buying power is left for this order.' }];
-    if (strictLimits) {
-      const limit = `Strict Mode's ${strictLimits.maxPositionPctOfEquity}% position limit`;
-      const room = (account.equity * (strictLimits.maxPositionPctOfEquity - (joined?.valuePct ?? 0))) / 100;
-      const fits = (m: number) => m * (estimate(m) ?? entry) <= room + 1e-9;
-      const m = fits(1) ? largest(Math.max(1, Math.floor(room / (estimate(1) ?? entry))), fits) : 0;
-      caps.push({
-        n: m,
-        why: joined ? `${limit} leaves room for ${m} beside ${held}` : `${limit} allows ${m}`,
-        none: joined ? `${held[0].toUpperCase()}${held.slice(1)} are ${show(joined.valuePct)}% of equity, so ${limit} leaves no room for more.` : `${limit} allows less than one share.`,
-      });
-    }
-    if (joined) {
-      // An add is also measured as the review and the challenges measure the trade: from its first
-      // stop, so a first stop moved up does not make room for more than they allow.
-      const planned = (m: number) => plannedRisk(symbol, action === 'short' ? 'short' : 'buy', m, estimate(m) ?? entry);
-      const first = planned(1);
-      if (first) {
-        const fits = (m: number) => (planned(m)?.pct ?? 0) <= limitPct + 1e-9;
-        const m = fits(1) ? largest(n, fits) : 0;
-        const from = `measured from the trade's first stop at ${formatTick(first.stop)}, as the review and the challenges measure it`;
-        caps.push({
-          n: m,
-          why: `${from}, Strict Mode's ${limitPct}% limit leaves room for ${m}`,
-          none: `${from[0].toUpperCase()}${from.slice(1)}, even one more share would take this trade past Strict Mode's ${limitPct}% limit.`,
-        });
-      }
-    }
-    const cap = caps.reduce((a, c) => (c.n < a.n ? c : a));
-    if (cap.n <= 0) {
-      toast('warning', cap.none);
-      return;
-    }
-    const note = !strictBinds
-      ? ''
-      : joined && joined.riskPct > 0
-        ? `${held[0].toUpperCase()}${held.slice(1)} risk ${show(joined.riskPct)}% of Strict Mode's ${limitPct}% limit, so this order is sized to the other ${show(strictPct)}%. `
-        : `Sized at Strict Mode's ${limitPct}% risk limit. `;
-    if (cap.n < n) toast('info', `${note}${show(budgetPct)}% risk would need ${n} shares, but ${cap.why}. Sized to ${cap.n}; actual risk is lower.`, 6000);
-    else if (note) toast('info', note.trim(), 6000);
-    setQuantity(String(Math.min(n, cap.n)));
+    const joined = r.risk.held + r.risk.working > 0;
+    const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}.` : '';
+    if (r.reason) toast('info', `Sized to ${r.quantity}, below the ${r.needed} that ${String(+asked.toFixed(2))}% risk would need. ${r.reason}${trade}`, 8000);
+    else if (joined) toast('info', `Sized to ${r.quantity}.${trade}`, 6000);
+    setQuantity(String(r.quantity));
   };
 
   const targetFromR = (mult: number) => {
@@ -246,19 +180,7 @@ export function OrderTicket() {
   };
 
   const submit = () => {
-    const r = submitOrder({
-      symbol,
-      action,
-      type,
-      quantity: q,
-      limitPrice: type === 'limit' || type === 'stop_limit' ? parse(limit) : undefined,
-      stopPrice: type === 'stop' || type === 'stop_limit' ? parse(stop) : undefined,
-      stopLoss: opening ? parse(sl) : undefined,
-      takeProfit: opening ? parse(tp) : undefined,
-      tif,
-      extendedHours: ext && type === 'limit',
-      tag: tag.trim() || undefined,
-    });
+    const r = submitOrder({ ...request(), quantity: q, tag: tag.trim() || undefined });
     if (!r.ok) {
       setResult({ tone: 'error', text: r.error ?? 'Rejected' });
       return;
@@ -387,7 +309,7 @@ export function OrderTicket() {
           <span className="muted small">Size for</span>
           <input type="number" step={0.05} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} aria-label="Risk per trade, percent of account" />
           <span className="muted small">% risk</span>
-          <button className="btn sm" onClick={sizeByRisk}>
+          <button className="btn sm" onClick={sizeToRisk}>
             Size
           </button>
           <span className="spacer" />
@@ -422,6 +344,16 @@ export function OrderTicket() {
             <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
               {risk?.pctRisk == null ? '—' : `${pctAgainst(risk.pctRisk, rules.maxRiskPctPerTrade)}%`}
             </span>
+            {trade && (
+              <>
+                <span className="muted" title="The whole trade with this order: every share, held, working or in this order, counted from the trade's first stop, as Strict Mode and the trade review measure it">
+                  Trade risk
+                </span>
+                <span className={`num ${trade.unmeasurable || trade.pct > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
+                  {trade.unmeasurable ? "can't be measured" : `${pctAgainst(trade.pct, rules.maxRiskPctPerTrade)}% from ${formatTick(trade.stop)}`}
+                </span>
+              </>
+            )}
             <span className="muted">Potential reward</span>
             <span className="num">{money(risk?.reward)}</span>
             <span className="muted">Reward : risk</span>
@@ -443,7 +375,7 @@ export function OrderTicket() {
       ))}
       {strict && opening && (
         <div className="alert info">
-          Strict risk controls are ON: max {exec.strictRisk.maxRiskPctPerTrade}% risk per trade and positions up to {exec.strictRisk.maxPositionPctOfEquity}% of equity, counting the shares you already hold or have working{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
+          Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
       <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || !!risk?.errors.length}>

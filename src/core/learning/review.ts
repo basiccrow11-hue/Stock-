@@ -367,8 +367,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const past = (stopAt - exitPx) * dir;
     const mainFills = input.fills.filter((f) => f.orderId === main!.order.id && trip.fills.includes(f.id));
     const halfSpread = mainFills.reduce((a, f) => a + f.spreadCost, 0) / Math.max(1, mainFills.reduce((a, f) => a + f.quantity, 0));
-    const beyond = past - halfSpread;
-    const filledPast = beyond >= 2 * tick - 1e-9 && beyond > 0.25 * riskPerShare;
+    // A fill at $1 or more is rounded to the cent, which on a sub-dollar trade is many of its ticks: that
+    // rounding is not the fill going past the stop either.
+    const fillTick = exitPx >= 1 ? 0.01 : 0.0001;
+    const beyond = past - halfSpread - (fillTick > tick ? fillTick : 0);
+    const filledPast = beyond >= 2 * Math.max(tick, fillTick) - 1e-9 && beyond > 0.25 * riskPerShare;
     // The closing stop is judged by its own history: the stop an add brought with it (its own bracket)
     // starts at that add's stop loss, any other at the first stop; a price other than its start is the
     // user's move.
