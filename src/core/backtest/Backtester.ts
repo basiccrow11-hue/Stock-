@@ -95,6 +95,11 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   let pendingEntry: { action: OrderAction; candleTime: UnixSeconds; ref: number } | null = null;
   let currentKey = '';
   let firstTradePrice: number | null = null;
+  // For the flatten before the close: the last regular session a bar was seen in, the last one
+  // flattened, and the days whose data had no bar at the close.
+  let regularDate = '';
+  let flattenedDate = '';
+  const lateFlattens: string[] = [];
   const benchmarkCurve: EquityPoint[] = [];
 
   const submitEntry = (action: OrderAction, ref: number, time: UnixSeconds, candleTime: UnixSeconds) => {
@@ -115,9 +120,32 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     signals.push({ time, candleTime, action, price: ref, executed: r.ok, note: r.ok ? `${qty} sh` : r.error });
   };
 
+  const flatten = (date: string): boolean => {
+    flattenedDate = date;
+    pendingEntry = null;
+    const q = broker.position(symbol).quantity;
+    const working = broker.workingOrders(symbol);
+    for (const o of working) broker.cancel(o.id, 'Session end');
+    if (q !== 0) broker.submit({ symbol, action: q > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(q), tif: 'day' });
+    return q !== 0 || working.length > 0;
+  };
+
   for (let j = 0; j < base.length; j++) {
     const b = base[j];
     const { key } = bucketFor(b.time, p.timeframe);
+
+    // A session whose data has no bar at the close (a thin stock with no trade in its last minute) is
+    // flattened at the first bar after it: the market order fills at the next regular session's open,
+    // as one placed after the close would. Decided by the clock reaching this bar, never by looking
+    // ahead, and before this bar's signals, which then act on a flat book.
+    let flattening = false;
+    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && regularDate && regularDate !== flattenedDate && (marketSession(b.time) !== 'regular' || exchangeDate(b.time) !== regularDate)) {
+      const day = regularDate;
+      // The order is placed now, as this bar opens, so it belongs to the session it can fill in.
+      broker.syncClock(b.time);
+      flattening = flatten(day);
+      if (flattening) lateFlattens.push(day);
+    }
 
     // A new candle opening means the previous one has closed: evaluate signals on it.
     if (currentKey && key !== currentKey && b.time >= p.tradeFrom) {
@@ -134,7 +162,7 @@ export function runBacktest(p: BacktestParams): BacktestResult {
         const q = broker.position(symbol).quantity;
         const hasWorkingEntry = broker.workingOrders(symbol).some((o) => o.action === 'buy' || o.action === 'short');
         if (action === 'sell' || action === 'cover') {
-          const applies = action === 'sell' ? q > 0 : q < 0;
+          const applies = !flattening && (action === 'sell' ? q > 0 : q < 0);
           if (!applies) continue;
           for (const o of broker.workingOrders(symbol)) broker.cancel(o.id, 'Strategy exit');
           const r = broker.submit({ symbol, action, type: 'market', quantity: Math.abs(q), tif: 'day' });
@@ -143,6 +171,9 @@ export function runBacktest(p: BacktestParams): BacktestResult {
           continue;
         } else if (q === 0 && !pendingEntry) {
           submitEntry(action, ref, b.time, candles[i].time);
+        } else if (flattening && !pendingEntry) {
+          // The book is being flattened at this bar's open: enter once that has filled.
+          pendingEntry = { action, candleTime: candles[i].time, ref };
         } else if ((action === 'buy' && q < 0 && fired.has('cover')) || (action === 'short' && q > 0 && fired.has('sell'))) {
           // Reversal: enter after the exit fills at this bar's open.
           pendingEntry = { action, candleTime: candles[i].time, ref };
@@ -154,14 +185,10 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     // Day-trading flatten in the regular session's last bar: the one that ends at the close (the final
     // minute on 1-minute data, 15:55 on 5-minute data). Decided by the clock alone, never by whether the
     // data has more bars, so it cannot peek ahead. Daily bars are whole sessions and are left out.
-    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && marketSession(b.time) === 'regular') {
+    if (marketSession(b.time) === 'regular') {
       const date = exchangeDate(b.time);
-      if (barEndTime(b, p.baseTimeframe) >= exchangeTimeToUnix(date, regularCloseMinute(date))) {
-        pendingEntry = null;
-        const q = broker.position(symbol).quantity;
-        for (const o of broker.workingOrders(symbol)) broker.cancel(o.id, 'Session end');
-        if (q !== 0) broker.submit({ symbol, action: q > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(q), tif: 'day' });
-      }
+      regularDate = date;
+      if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && barEndTime(b, p.baseTimeframe) >= exchangeTimeToUnix(date, regularCloseMinute(date))) flatten(date);
     }
 
     broker.onBar(symbol, b, barEndTime(b, p.baseTimeframe) - b.time);
@@ -181,6 +208,10 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   const st = broker.state;
   const equityCurve = st.equityCurve.filter((pt) => pt.time > p.tradeFrom);
   const trades = st.roundTrips.map((t) => ({ ...t }));
+  if (lateFlattens.length) {
+    const n = lateFlattens.length;
+    warnings.push(`On ${n === 1 ? `1 day (${lateFlattens[0]})` : `${n} days (first ${lateFlattens[0]})`} the data has no bar at the close, so the flatten filled at the next session's open, after the overnight gap.`);
+  }
   if (trades.some((t) => !t.closed)) warnings.push('A position was still open at the end of the test; it is excluded from closed-trade statistics but included in equity.');
   const last = base[base.length - 1];
   return {

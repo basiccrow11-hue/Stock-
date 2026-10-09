@@ -111,6 +111,11 @@ describe('CSV import', () => {
     // Hourly with extended hours on the clock hour around a session that starts at 09:30 (yfinance prepost).
     const prepost = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00'];
     expect(parseCsv(csv([...at('2024-01-16', prepost), ...at('2024-01-17', prepost)])).baseTimeframe).toBe('1h');
+    // A thin stock's version: no trades from 16:00 to 17:00 one day, none from 09:30 to 10:30 another.
+    // Read as 30-minute bars, each hour would be shown half an hour before it had finished.
+    const noSixteen = prepost.filter((t) => t !== '16:00');
+    const noOpen = prepost.filter((t) => t !== '09:30');
+    expect(parseCsv(csv([...at('2024-01-16', prepost), ...at('2024-01-17', noSixteen), ...at('2024-01-18', noOpen)])).baseTimeframe).toBe('1h');
     // 4-hour bars split where the sessions meet.
     const segmented = ['04:00', '08:00', '09:30', '13:30', '16:00'];
     expect(parseCsv(csv([...at('2024-01-16', segmented), ...at('2024-01-17', segmented)])).baseTimeframe).toBe('4h');

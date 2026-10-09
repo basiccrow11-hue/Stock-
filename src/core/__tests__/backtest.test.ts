@@ -106,6 +106,35 @@ describe('backtester: mechanics', () => {
     expect(d.warnings).toContain('Flatten before the close does not apply to daily bars: each bar is a whole session, so positions are held overnight.');
   });
 
+  it('flattens a session whose data has no bar at the close at the next session’s open, and says so', () => {
+    const strategy: StrategyDefinition = {
+      name: 'always long',
+      rules: [{ id: 'x', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'value', value: 0 } }] }],
+      sizing: { mode: 'shares', shares: 10 },
+      exitAtSessionEnd: true,
+      regularHoursOnly: false,
+    };
+    // A thin stock: no trade in the last minutes of the 14th and 16th; the 16th has after-hours bars.
+    const thin = (b: Bar) => !(['2025-01-14', '2025-01-16'].includes(exchangeDate(b.time)) && b.time >= et(exchangeDate(b.time), '15:55') && b.time < et(exchangeDate(b.time), '16:00'));
+    const all = demoBars('AAPL', '2025-01-13', '2025-01-17').filter(thin);
+    const keepPost = (b: Bar) => marketSession(b.time) === 'regular' || (exchangeDate(b.time) === '2025-01-16' && marketSession(b.time) === 'post');
+    for (const [label, bars] of [['1m', all.filter(keepPost)], ['5m', aggregateBars(all.filter(keepPost), '5m')]] as const) {
+      const tf = label;
+      const r = runBacktest(params(bars as Bar[], strategy, { baseTimeframe: tf, timeframe: tf, config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-13', '09:30') }));
+      const closed = r.trades.filter((t) => t.closed);
+      const late = closed.filter((t) => exchangeDate(t.exitTime!) !== exchangeDate(t.entryTime));
+      // Closed at the next session's first bar (not in the 16th's after-hours, where a market order cannot trade).
+      expect(late.map((t) => [exchangeDate(t.entryTime), t.exitTime]), tf).toEqual([
+        ['2025-01-14', et('2025-01-15', '09:30')],
+        ['2025-01-16', et('2025-01-17', '09:30')],
+      ]);
+      expect(r.warnings, tf).toContain("On 2 days (first 2025-01-14) the data has no bar at the close, so the flatten filled at the next session's open, after the overnight gap.");
+      // The rest are flattened the same day, and the strategy is long again after each late flatten.
+      expect(closed.length - late.length, tf).toBeGreaterThanOrEqual(2);
+      expect(r.trades.some((t) => t.entryTime > et('2025-01-17', '09:30') && t.entryTime < et('2025-01-17', '10:00')), tf).toBe(true);
+    }
+  });
+
   it('risk-percent sizing risks about the requested amount at the stop', () => {
     const bars = demoBars('AAPL', '2025-01-13', '2025-01-17');
     const r = runBacktest(params(bars, STRATEGY_PRESETS[0], { config: ZERO_COST_CONFIG }));

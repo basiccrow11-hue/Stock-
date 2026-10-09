@@ -176,6 +176,13 @@ export interface RoundTrip {
   /** Bookkeeping for bracketEntry and targetEntry: those orders' ids and how many of their shares have filled in this trade. */
   stopOrder?: { id: string; qty: number };
   targetOrder?: { id: string; qty: number };
+  /**
+   * The account's equity just before the trade's first fill, and the equity its trading day started
+   * with: the day's P/L at entry as Strict Mode sees it, including anything realized earlier in the
+   * same bar. Absent on older trades.
+   */
+  entryEquity?: number;
+  entryDayStartEquity?: number;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

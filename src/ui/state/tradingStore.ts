@@ -12,7 +12,7 @@ import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResu
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
-import { reviewTrade, type TradeReview } from '../../core/learning/review';
+import { reviewTrade, type TradeReview, type TradingRules } from '../../core/learning/review';
 import { CHALLENGES, evaluateChallenge } from '../../core/challenges/challenges';
 import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
 import { getProvider } from './dataRegistry';
@@ -109,8 +109,8 @@ interface Engines {
   sim: SimulationDataProvider | null;
   simBroker: SimBroker | null;
   processedTrips: Set<string>;
-  /** Journal entries whose review waits for price after the exit, with the timeframe it was made on. */
-  watching: Map<string, Timeframe>;
+  /** Journal entries whose review waits for price after the exit, with the timeframe and trading rules it was made with. */
+  watching: Map<string, { timeframe: Timeframe; rules: TradingRules }>;
   /** Orders whose cancellation (a position the other way opened before they filled) was announced. */
   noticedConflicts: Set<string>;
   timer: ReturnType<typeof setInterval> | null;
@@ -345,7 +345,7 @@ function processClosedTrips(): Promise<void> {
     eng.processedTrips.add(trip.id);
     const entry: JournalEntry = journalEntryFromTrip(trip, { sessionId: session.id, mode: session.mode, rewound: (eng.replay?.rewinds ?? 0) > 0, blind: session.blind });
     try {
-      entry.review = reviewOf(trip, timeframe, false);
+      entry.review = reviewOf(trip, timeframe, false, settings.rules);
     } catch (e) {
       console.error('Review failed', e);
     }
@@ -380,7 +380,7 @@ function processClosedTrips(): Promise<void> {
           }
           await useJournal.getState().add(entry);
           // Only once the entry is in the journal: settling looks it up there.
-          if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
+          if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, { timeframe, rules: settings.rules });
           recordTradeClosed();
           const tone = trip.pnl >= 0 ? 'success' : 'error';
           toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
@@ -403,8 +403,8 @@ function processClosedTrips(): Promise<void> {
   return journaling;
 }
 
-/** The learning review of `trip` with what the replay has shown so far. */
-function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean): TradeReview {
+/** The learning review of `trip` with what the replay has shown so far, against `rules`. */
+function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean, rules: TradingRules): TradeReview {
   const st = broker()!.state;
   // Data coarser than the chart (a daily file on a 1m chart): its own bars are the finest candles there are.
   const base = eng.replay?.engineFor(trip.symbol)?.baseTimeframe;
@@ -417,7 +417,7 @@ function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean): TradeR
     equityCurve: st.equityCurve,
     startingBalance: st.startingBalance,
     allTrips: st.roundTrips,
-    rules: getSettings().rules,
+    rules,
     now: st.clock,
     ended: ended || (eng.replay?.finished ?? false),
   });
@@ -431,7 +431,7 @@ function settleWatchedReviews(ended = false): void {
   const b = broker();
   if (!b || !eng.watching.size) return;
   const journal = useJournal.getState();
-  for (const [id, timeframe] of eng.watching) {
+  for (const [id, { timeframe, rules }] of eng.watching) {
     const entry = journal.entries.find((e) => e.id === id);
     const until = entry?.review?.afterExitUntil;
     if (!entry || until === undefined) {
@@ -441,8 +441,9 @@ function settleWatchedReviews(ended = false): void {
     if (!ended && !(eng.replay?.finished ?? false) && b.state.clock < until) continue;
     eng.watching.delete(id);
     try {
-      // Rule checks stay as they were when the trade closed, even if the rules changed since.
-      void journal.updateReview(id, { ...reviewOf(entry.trip, timeframe, ended), rules: entry.review!.rules });
+      // Judged by the rules in force when the trade closed, even if they changed since; its rule checks
+      // stay as they were then.
+      void journal.updateReview(id, { ...reviewOf(entry.trip, timeframe, ended, rules), rules: entry.review!.rules });
     } catch (e) {
       console.error('Review failed', e);
     }

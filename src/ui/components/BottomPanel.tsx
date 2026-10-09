@@ -5,7 +5,7 @@ import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
 import { EVENT_LABELS } from '../../core/sim/SimMarket';
 import { useJournal } from '../state/journalStore';
-import { EmptyState, modalOpen, rowAction } from './common';
+import { EmptyState, modalOpen, rowAction, useFocusRescue } from './common';
 import { dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { formatDuration, formatExchangeTime } from '../../core/time';
 import { toast } from '../state/toasts';
@@ -19,18 +19,11 @@ function useTimeLabel(): (t: number) => string {
 
 export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string) => void }) {
   const [tab, setTab] = useState<Tab>('positions');
-  const panelRef = useRef<HTMLDivElement>(null);
-  const lastFocus = useRef<Element | null>(null);
-  // A focused control that disappears (its order filled or was cancelled, its position closed)
-  // hands focus to the open tab rather than dropping it on the page body. Children run their effects
-  // first, so a control that takes focus back itself (the order price) wins.
-  useEffect(() => {
-    const el = lastFocus.current;
-    if (el && !el.isConnected && (document.activeElement === document.body || !document.activeElement)) {
-      lastFocus.current = null;
-      panelRef.current?.querySelector<HTMLButtonElement>('.tabs button.on')?.focus();
-    }
-  });
+  // A keyboard-focused control that disappears (its order filled or was cancelled, its position
+  // closed) hands focus to the open tab rather than dropping it on the page body, without scrolling:
+  // on a phone the chart the user is watching stays in view. A control that takes focus back itself
+  // (the order price) wins.
+  const panelRef = useFocusRescue<HTMLDivElement>((root) => root.querySelector<HTMLElement>('.tabs button.on'));
   const positions = useTrading((s) => s.positions);
   const orders = useTrading((s) => s.orders);
   const fills = useTrading((s) => s.fills);
@@ -52,7 +45,7 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
   const shown: Tab = tabs.some((t) => t.id === tab && !t.hide) ? tab : 'positions';
 
   return (
-    <div className="panel area-bottom" ref={panelRef} onFocus={(e) => (lastFocus.current = e.target)}>
+    <div className="panel area-bottom" ref={panelRef}>
       <div className="tabs">
         {tabs
           .filter((t) => !t.hide)

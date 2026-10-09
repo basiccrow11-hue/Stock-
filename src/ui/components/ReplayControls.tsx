@@ -141,7 +141,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           <button className={`btn ${playing ? '' : 'primary'}`} data-home="play" style={{ minWidth: 76 }} onClick={() => (playing ? pause() : play())} disabled={finished}>
             <span aria-hidden="true">{playing ? '❚❚' : '▶'}</span> {playing ? 'Pause' : 'Play'}
           </button>
-          <button className="btn icon" title="Step forward one 1-minute bar (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
+          <button className="btn icon" title="Step forward one bar (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
             <span aria-hidden="true">▶|</span>
           </button>
           <button className="btn sm" title={`Step one ${timeframe} candle (Shift+→)`} onClick={stepCandle} disabled={finished}>

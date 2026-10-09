@@ -41,7 +41,7 @@ export interface ChallengeDefinition {
 function riskPct(t: RoundTrip, ctx: ChallengeContext): number | null {
   const rps = initialRiskPerShare(t);
   if (rps === null) return null;
-  const eq = equityAt(ctx.equityCurve, t.entryTime, ctx.startingBalance);
+  const eq = t.entryEquity ?? equityAt(ctx.equityCurve, t.entryTime, ctx.startingBalance);
   return eq > 0 ? ((rps * t.maxQuantity) / eq) * 100 : null;
 }
 

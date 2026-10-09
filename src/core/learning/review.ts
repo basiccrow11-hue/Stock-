@@ -253,7 +253,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     return { gap: false, text: `Your ${name}${at} filled at ${price.toFixed(2)}, already past your ${what} at ${level.toFixed(2)}: price was past both by the time the order could fill.` };
   };
   const gapNote = (what: string) => ` An order waiting for the next bar, or for the market to open, fills at that bar's open wherever price is, even past its own ${what}.`;
-  const equityAtEntry = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
+  const equityAtEntry = trip.entryEquity ?? equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
 
@@ -549,9 +549,11 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   }
   if (rules.maxDailyLossPct > 0) {
     // The day's P/L at entry as the account's Day P/L and Strict Mode count it: from the equity the day
-    // started with, so a loss on a position carried from an earlier day counts too.
-    const dayStart = equityAt(input.equityCurve, exchangeTimeToUnix(day, 0), input.startingBalance);
-    const dayPnl = equityAt(input.equityCurve, trip.entryTime, input.startingBalance) - dayStart;
+    // started with, so a loss on a position carried from an earlier day counts too, and as the broker
+    // saw it at the fill, so a stop-out earlier in the entry's own bar counts. Older trades fall back to
+    // the equity curve, which has a point only at each bar's end.
+    const dayStart = trip.entryDayStartEquity ?? equityAt(input.equityCurve, exchangeTimeToUnix(day, 0), input.startingBalance);
+    const dayPnl = (trip.entryEquity ?? equityAt(input.equityCurve, trip.entryTime, input.startingBalance)) - dayStart;
     const pct = dayStart > 0 ? (-dayPnl / dayStart) * 100 : 0;
     out.push({ rule: `Stop trading after −${rules.maxDailyLossPct}% on the day`, passed: pct < rules.maxDailyLossPct, detail: dayPnl < 0 ? `Down ${pct.toFixed(2)}% on the day at entry` : 'Not down on the day at entry' });
   }

@@ -572,6 +572,27 @@ describe('liquidity, partial fills and time in force', () => {
     identity(b.broker);
   });
 
+  it('with no volume cap, charges impact on at most one bar’s volume and never sells below the minimum tick', () => {
+    const { broker, next } = setup({ maxParticipation: 0, slippage: { bps: 0, impactBpsPerPctOfVolume: 5 } }, 100_000, 5);
+    next(5, 5, 5, 5, 500);
+    // Half the bar's volume: 50% x 5 bps = 250 bps.
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 250 });
+    // 24 bars' volume fills at once, charged as one full bar (500 bps), not 12,000 bps.
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 12_000 });
+    broker.closePosition(S);
+    expect(broker.state.fills.map((f) => [f.action, f.quantity, f.price])).toEqual([
+      ['buy', 250, 5.13],
+      ['buy', 12_000, 5.25],
+      ['sell', 12_250, 4.75],
+    ]);
+    identity(broker);
+    // Costs the user set beyond the price itself still leave a sale at a positive price.
+    const steep = setup({ slippage: { bps: 15_000, impactBpsPerPctOfVolume: 0 } }, 100_000, 5);
+    steep.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
+    steep.broker.closePosition(S);
+    expect(steep.broker.state.fills.map((f) => f.price)).toEqual([12.5, 0.0001]);
+  });
+
   it('DAY orders expire at the regular close; GTC orders survive', () => {
     const broker = new SimBroker({ startingBalance: 10_000, config: ZERO_COST_CONFIG });
     broker.onBar(S, bar(et(D, '15:58'), 100, 100, 100, 100));

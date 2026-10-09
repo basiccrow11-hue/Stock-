@@ -217,4 +217,33 @@ describe('Learning Mode', () => {
     store.registerSnapshotProvider(null);
     await store.endSession();
   });
+
+  it('settles a review waiting on price after the exit by the rules in force when the trade closed', async () => {
+    const store = await import('./tradingStore');
+    const { useJournal } = await import('./journalStore');
+    const { getSettings, useSettings } = await import('./settingsStore');
+    const rule = getSettings().rules.maxRiskPctPerTrade;
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const px = store.lastPrice('SPY')!;
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10, stopLoss: Math.round((px - 0.3) * 100) / 100, takeProfit: Math.round((px + 0.3) * 100) / 100 }).ok).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    const mine = () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId);
+    // Learning Mode counts a closed trade's review as pending the moment the trade is claimed.
+    for (let i = 0; i < 300 && store.useTrading.getState().reviewsPending === 0; i++) store.stepForward();
+    await vi.waitFor(() => expect(mine().length).toBe(1));
+    const risked = () => mine()[0].review!.findings.find((f) => f.title.startsWith('Risked'))!;
+    expect(mine()[0].review!.afterExitUntil).toBeDefined();
+    const atClose = risked();
+    expect(atClose.detail).toContain(`Your rule is ${rule}% or less.`);
+    // Tightened right after reading the review, before the after-exit window has passed.
+    useSettings.getState().updateRules({ maxRiskPctPerTrade: 0.001 });
+    for (let i = 0; i < 40 && mine()[0].review!.afterExitUntil !== undefined; i++) {
+      store.stepForward();
+      await Promise.resolve();
+    }
+    await vi.waitFor(() => expect(mine()[0].review!.afterExitUntil).toBeUndefined());
+    expect(risked()).toEqual(atClose);
+    useSettings.getState().updateRules({ maxRiskPctPerTrade: rule });
+    await store.endSession();
+  });
 });

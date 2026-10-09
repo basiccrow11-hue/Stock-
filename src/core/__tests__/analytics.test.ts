@@ -659,6 +659,36 @@ describe('learning review', () => {
     expect(r.rules.find((c) => c.rule.startsWith('Stop trading after'))).toEqual({ rule: 'Stop trading after −3% on the day', passed: false, detail: 'Down 4.00% on the day at entry' });
   });
 
+  it('counts a stop-out earlier in the entry’s own bar toward the daily loss rule, on minute and daily bars', () => {
+    const lossRule = (b: SimBroker, bars: ReturnType<typeof bar>[], timeframe: '1m' | '1D') => {
+      const st = b.state;
+      const t = st.roundTrips.find((x) => x.maxQuantity === 100)!;
+      return reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe, equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES }).rules.find((c) => c.rule.startsWith('Stop trading after'));
+    };
+    const failed = { rule: 'Stop trading after −3% on the day', passed: false, detail: 'Down 3.50% on the day at entry' };
+    // 1m: long 1000 with a stop at 96.5 and a buy limit at 96 below it; the 10:00 bar falls through both.
+    const m = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const t0 = et('2025-01-15', '09:58');
+    const minute = [bar(t0, 100, 100, 100, 100), bar(t0 + 60, 100, 100, 99.5, 99.5), bar(t0 + 120, 99.5, 99.6, 95.9, 96.1), bar(t0 + 180, 96.1, 96.2, 96, 96.1)];
+    m.onBar('T', minute[0]);
+    m.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 1000, stopLoss: 96.5, takeProfit: 106, tif: 'day' });
+    m.onBar('T', minute[1]);
+    m.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 96, quantity: 100, stopLoss: 95, takeProfit: 99, tif: 'day' });
+    for (const x of minute.slice(2)) m.onBar('T', x);
+    expect(m.state.roundTrips.map((t) => t.pnl)).toEqual([-3500, 0]);
+    expect(lossRule(m, minute, '1m')).toEqual(failed);
+    // 1D: a buy stop fills and is stopped out during the 15th, then a buy limit fills later that day.
+    const d = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const day = (date: string, o: number, h: number, l: number, c: number) => bar(et(date, '09:30'), o, h, l, c);
+    const daily = [day('2025-01-14', 100, 101, 99, 100), day('2025-01-15', 100, 100.5, 95, 95.5)];
+    d.onBar('T', daily[0], 390 * 60);
+    d.submit({ symbol: 'T', action: 'buy', type: 'stop', stopPrice: 100.2, quantity: 1000, stopLoss: 96.7, takeProfit: 110, tif: 'gtc' });
+    d.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 95.5, quantity: 100, stopLoss: 94, takeProfit: 99, tif: 'gtc' });
+    d.onBar('T', daily[1], 390 * 60);
+    expect(d.state.roundTrips.map((t) => t.pnl)).toEqual([-3500, 0]);
+    expect(lossRule(d, daily, '1D')).toEqual(failed);
+  });
+
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
     // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
     const avgEntry = (100.1 + 100.1 + 100.1) / 3;

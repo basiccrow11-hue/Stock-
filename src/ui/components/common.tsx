@@ -88,10 +88,15 @@ export function Modal({
   onCloseRef.current = onClose;
   // Read during the first render, before anything inside the dialog takes focus. A dialog that opened
   // on its own (the milestone celebration at page load) has no opener: focus was on the page body.
+  // Whether it had keyboard focus decides how it gets focus back: a tapped control (often just the
+  // last thing tapped before a dialog opened by itself, like the trade review) gets it without the
+  // page scrolling to it, so a phone stays on the chart the user was watching.
   const openerRef = useRef<HTMLElement | null | undefined>(undefined);
+  const openerKeyboard = useRef(false);
   if (openerRef.current === undefined) {
     const active = document.activeElement as HTMLElement | null;
     openerRef.current = active && active !== document.body && active !== document.documentElement ? active : null;
+    openerKeyboard.current = !!openerRef.current && keyboardFocused(openerRef.current);
   }
 
   useEffect(() => {
@@ -101,6 +106,7 @@ export function Modal({
     backdropRef.current!.style.zIndex = String(50 + modalStack.length);
     modalsChanged();
     const opener = openerRef.current;
+    const scrollToOpener = openerKeyboard.current;
     const isTop = () => modalStack[modalStack.length - 1]?.id === id;
     const items = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(isShown);
     // Focus moves into the dialog, to the control marked data-autofocus if there is one, so Tab
@@ -147,7 +153,7 @@ export function Modal({
       // Give focus back to whatever opened the dialog if it is still on the page and not hidden
       // behind another open dialog. Otherwise to the dialog that is now on top, or the terminal.
       const top = modalStack[modalStack.length - 1]?.el;
-      if (opener && opener.isConnected && typeof opener.focus === 'function' && isShown(opener) && (!top || top.contains(opener))) opener.focus();
+      if (opener && opener.isConnected && typeof opener.focus === 'function' && isShown(opener) && (!top || top.contains(opener))) opener.focus({ preventScroll: !scrollToOpener });
       else if (top) top.focus();
       else focusHome();
     };

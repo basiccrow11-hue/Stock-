@@ -190,20 +190,14 @@ export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, stri
   return { bars: deduped, offDays, merged: out.length - deduped.length };
 }
 
-/**
- * The bar size: the largest supported size that (nearly) every gap between bars within a day is a
- * whole number of. Gaps, not their median, so a thinly traded stock's 1-minute bars (a bar only in
- * minutes that traded) stay 1-minute bars. A day's first gap is left out when there are others, since
- * vendors often stamp the first hourly bar 09:30 and the next 10:00. A size the replay does not
- * support (3-minute or 2-hour bars) is an error rather than being rounded to a nearby one.
- */
 const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars.';
 
 /**
  * The bar size of a file, from the spacing of its bars. Intraday sizes come from the gaps within a
  * session, leaving out the gap into each day's second bar (vendors whose first hourly bar is the
- * half hour from 09:30) and gaps into a bar that starts a part of the session, at the 09:30 open or at
- * the close (hourly bars on the hour before and after a session that starts at 09:30). The size is
+ * half hour from 09:30) and any gap that spans the 09:30 open or the close (hourly bars on the hour
+ * before and after a session that starts at 09:30, even when a thin stock skips the bar at the
+ * boundary, as in 15:30 -> 17:00). The size is
  * the largest whole-minute step that nearly every such gap is a multiple of: minutes with no trades
  * leave a thinly traded 1-minute file at 1 minute, and 3 or 10-minute bars are refused rather than
  * read as 1 or 5-minute bars, which would show each bar before it had finished.
@@ -217,8 +211,9 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
     all.push(d);
     const date = exchangeDate(bars[i].time);
     const m = exchangeMinuteOfDay(bars[i].time);
-    const startsPart = m === REGULAR_OPEN || m === regularCloseMinute(date);
-    if (!startsPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
+    const pm = exchangeMinuteOfDay(bars[i - 1].time);
+    const spansPart = exchangeDate(bars[i - 1].time) === date && [REGULAR_OPEN, regularCloseMinute(date)].some((edge) => pm < edge && m >= edge);
+    if (!spansPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
   if (!all.length) return dailySpacing(bars);
   const gaps = inner.length ? inner : all;

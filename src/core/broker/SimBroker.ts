@@ -101,6 +101,10 @@ export interface SubmitResult {
 }
 
 const TICK = 0.01;
+/** Market impact is charged on at most one bar's whole volume (see execute). */
+const MAX_IMPACT_PCT = 100;
+/** The lowest price a fill can print at: one tick of a sub-dollar stock. */
+const MIN_PRICE = 0.0001;
 const EPS = 1e-9;
 const MAX_EVENTS = 500;
 
@@ -908,10 +912,13 @@ export class SimBroker {
     const isMarketable = o.type === 'market' || o.type === 'stop';
     if (isMarketable) {
       const quote = side === 'buy' ? x + hs : x - hs;
-      const impactPct = barVolume > 0 ? (qty / barVolume) * 100 : 0;
+      // Impact grows with the share of the bar's volume taken, up to the whole bar: with no
+      // participation cap an order can be many bars' volume, and an unbounded charge would put fills
+      // tens of percent off the market (and sells below zero).
+      const impactPct = barVolume > 0 ? Math.min(MAX_IMPACT_PCT, (qty / barVolume) * 100) : 0;
       const slipBps = this.cfg.slippage.bps + this.cfg.slippage.impactBpsPerPctOfVolume * impactPct;
       const slip = (quote * slipBps) / 10_000;
-      price = side === 'buy' ? ceilTick(quote + slip) : floorTick(quote - slip);
+      price = side === 'buy' ? ceilTick(quote + slip) : Math.max(MIN_PRICE, floorTick(quote - slip));
       slippage = Math.abs(price - quote) * qty;
     } else {
       // Limit (or triggered stop-limit): never worse than the limit; better if the market gapped through.
@@ -934,6 +941,8 @@ export class SimBroker {
     const commission = Math.max(0, Math.round((commissionFor(this.cfg, filled, (o.avgFillPrice * o.filledQty + price * qty) / filled) - paid) * 100) / 100);
     o.commission = money(paid + commission);
     const symbol = o.symbol;
+    // The account as this fill finds it, for a trade it opens (the daily-loss rule reads it).
+    const before = this.s.openTripBySymbol[symbol] ? undefined : { equity: this.account().equity, dayStart: money(this.s.dayStartEquity) };
     const pos = this.s.positions[symbol] ?? { symbol, quantity: 0, avgPrice: 0, realizedPnl: 0 };
     const signed = side === 'buy' ? qty : -qty;
 
@@ -983,12 +992,12 @@ export class SimBroker {
     this.s.fills.push(fill);
     this.log(o.status === 'filled' ? 'filled' : 'partial', `${o.action.toUpperCase()} ${qty} ${symbol} @ ${price.toFixed(2)}${o.status === 'partially_filled' ? ` (partial ${o.filledQty}/${o.quantity})` : ''}`, o.id);
 
-    this.updateRoundTrip(o, fill, opening);
+    this.updateRoundTrip(o, fill, opening, before);
     this.manageBrackets(o, qty);
     this.s.lastPrice[symbol] = this.s.lastPrice[symbol] ?? price;
   }
 
-  private updateRoundTrip(o: Order, fill: Fill, opening: boolean): void {
+  private updateRoundTrip(o: Order, fill: Fill, opening: boolean, before?: { equity: number; dayStart: number }): void {
     const symbol = o.symbol;
     let tripId = this.s.openTripBySymbol[symbol];
     let trip = tripId ? this.tripById(tripId) : undefined;
@@ -1011,6 +1020,7 @@ export class SimBroker {
         bracketEntry: fill.price,
         stopOrder: { id: o.id, qty: 0 },
         ...(o.takeProfit !== undefined ? { targetPlanned: plannedPrice(o), targetEntry: fill.price, targetOrder: { id: o.id, qty: 0 } } : {}),
+        ...(before ? { entryEquity: before.equity, entryDayStartEquity: before.dayStart } : {}),
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,
