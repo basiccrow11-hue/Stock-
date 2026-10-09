@@ -5,3 +5,4 @@ dist
 test-results
 .vercel
 *.tsbuildinfo
+/smoke.png
