@@ -437,7 +437,7 @@ export class SimBroker {
       order.status = 'pending';
       warnings.push(
         marketSession(now) === 'regular'
-          ? 'The market is just opening: the order works from the first regular-hours bar (market orders fill at its open).'
+          ? 'The regular session has no bar yet: the order works from its first one (market orders fill at its open).'
           : session === 'closed' || order.type !== 'limit' || !order.extendedHours
             ? 'Market is not in regular hours. The order will work from the next regular session.'
             : 'Order queued.',
@@ -534,9 +534,30 @@ export class SimBroker {
 
   // ---------------------------------------------------------------- clock
 
+  /**
+   * Bring the clock up to `now`, the replay's or the simulated market's time, before an order is
+   * placed or changed. No bar trades in between, but the day can turn: yesterday's DAY orders expire,
+   * and an order placed before the new day's first bar waits for that bar instead of filling at the
+   * last close (data without extended hours, the simulated market before its first tick).
+   */
+  syncClock(now: UnixSeconds): void {
+    if (!(now > this.s.clock)) return;
+    this.s.clock = now;
+    this.rollDay(now);
+    this.touch();
+  }
+
   private currentSession(): MarketSession {
     const lb = this.latestBarTime();
-    return lb === null ? 'closed' : marketSession(lb);
+    if (lb === null) return 'closed';
+    // The clock has moved on to a day with no bar yet: nothing has traded in its session so far.
+    if (exchangeDate(this.s.clock) > exchangeDate(lb)) return 'closed';
+    return marketSession(lb);
+  }
+
+  /** Shares that can still trade against a bar of `volume` once `used` have: a bar without volume (none recorded) is not capped. */
+  private barCapacity(volume: number, used = 0): number {
+    return this.cfg.maxParticipation > 0 && volume > 0 ? Math.max(0, Math.floor(volume * this.cfg.maxParticipation) - used) : Infinity;
   }
 
   private latestBarTime(): number | null {
@@ -562,7 +583,7 @@ export class SimBroker {
     return this.cfg.allowExtendedHours && o.extendedHours && o.type === 'limit';
   }
 
-  /** Advance the broker's clock without a bar (e.g. sim market ticks); rolls the trading day. */
+  /** Start a new trading day when `barTime` is on one, and expire DAY orders whose session is over. */
   private rollDay(barTime: UnixSeconds): void {
     const date = exchangeDate(barTime);
     if (date !== this.s.sessionDate) {
@@ -599,7 +620,7 @@ export class SimBroker {
     }
 
     const path = this.intrabarPath(symbol, bar);
-    let capacity = this.cfg.maxParticipation > 0 ? Math.floor(bar.volume * this.cfg.maxParticipation) : Infinity;
+    let capacity = this.barCapacity(bar.volume);
     let traded = 0;
     const ext = session !== 'regular';
 
@@ -759,13 +780,14 @@ export class SimBroker {
     const bar = this.s.lastBar[o.symbol];
     const last = this.s.lastPrice[o.symbol];
     if (!bar || last === undefined) return;
+    // Its own last bar's session, and none at all while the clock is on a day with no bar yet.
     const session = marketSession(bar.time);
-    if (!this.eligible(o, session)) return;
+    if (!this.eligible(o, session) || !this.eligible(o, this.currentSession())) return;
     const level = this.triggerLevel(o, last, last, session !== 'regular');
     if (level === null) return;
     // The last bar's volume is shared by everything that trades against it, however many orders.
     const used = this.s.barVolumeUsed?.[o.symbol] ?? 0;
-    const capacity = this.cfg.maxParticipation > 0 ? Math.max(0, Math.floor(bar.volume * this.cfg.maxParticipation) - used) : Infinity;
+    const capacity = this.barCapacity(bar.volume, used);
     const skip = new Set<string>();
     const filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip);
     if (filled > 0) (this.s.barVolumeUsed ??= {})[o.symbol] = used + filled;
@@ -922,8 +944,8 @@ export class SimBroker {
         commission: 0,
         initialStop: o.stopLoss,
         initialTarget: o.takeProfit,
-        plannedEntry: o.type === 'limit' ? o.limitPrice : o.type === 'market' ? o.quotedPrice : o.stopPrice,
-        firstEntry: fill.price,
+        plannedEntry: plannedPrice(o),
+        bracketEntry: fill.price,
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,
@@ -942,7 +964,13 @@ export class SimBroker {
       trip.avgEntry = (trip.avgEntry * trip.entryQtyTotal + fill.price * fill.quantity) / (trip.entryQtyTotal + fill.quantity);
       trip.entryQtyTotal += fill.quantity;
       trip.pnl -= fill.commission;
-      if (trip.initialStop === undefined && o.stopLoss !== undefined) trip.initialStop = o.stopLoss;
+      if (trip.initialStop === undefined && o.stopLoss !== undefined) {
+        // An add brings the first stop (the trade opened without one): the stop's plan is that add's.
+        trip.initialStop = o.stopLoss;
+        trip.plannedEntry = plannedPrice(o);
+        trip.bracketEntry = fill.price;
+        trip.stopFromAdd = true;
+      }
       if (trip.initialTarget === undefined && o.takeProfit !== undefined) trip.initialTarget = o.takeProfit;
       if (!trip.tag && o.tag) trip.tag = o.tag;
     } else {
@@ -1028,6 +1056,11 @@ export function isOpen(o: Order): boolean {
 
 export function isOpeningAction(a: OrderAction): boolean {
   return a === 'buy' || a === 'short';
+}
+
+/** The price an entry order was placed at: its limit, its stop, or for a market order the price it was checked against. */
+function plannedPrice(o: Order): number | undefined {
+  return o.type === 'limit' ? o.limitPrice : o.type === 'market' ? o.quotedPrice : o.stopPrice;
 }
 
 export function describe(o: Order): string {

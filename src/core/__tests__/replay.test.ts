@@ -3,11 +3,11 @@ import { ReplayEngine } from '../replay/ReplayEngine';
 import { ReplaySession } from '../replay/ReplaySession';
 import { DemoDataProvider } from '../data/demoProvider';
 import { parseCsv } from '../data/csv';
-import { ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
+import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import type { BrokerCheckpoint } from '../broker/SimBroker';
 import { ema, rsi, vwap } from '../indicators/indicators';
 import type { Bar, UnixSeconds } from '../types';
-import { bar, et, randomBars } from './helpers';
+import { bar, et, minuteBars, randomBars } from './helpers';
 
 const D = '2025-01-15';
 
@@ -378,6 +378,65 @@ describe('ReplaySession: undo is exact', () => {
   });
 });
 
+describe('A new day before its first bar', () => {
+  // Regular hours only: no pre-market bars. Jan 14 closes at 100, Jan 15 opens at 110.
+  const rth = [...minuteBars('2025-01-14', '15:56', [[100, 100, 100, 100], [100, 100, 100, 100], [100, 100, 100, 100], [100, 100, 100, 100]]), ...minuteBars('2025-01-15', '09:30', [[110, 111, 109, 110], [110, 111, 109, 110], [110, 111, 109, 110]])];
+  const session = (start: number, config = ZERO_COST_CONFIG) => {
+    const e = new ReplayEngine({ symbol: 'GAP', start, end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, rth);
+    return new ReplaySession(e, { symbol: 'GAP', date: '2025-01-15', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 }, config, 'g', 'HISTORICAL');
+  };
+
+  it('fills orders placed at the open at the first bar of the day, never at the last close', () => {
+    const s = session(et('2025-01-15', '09:30'));
+    expect(s.broker.state.clock).toBe(et('2025-01-14', '16:00'));
+    const m = s.submit({ symbol: 'GAP', action: 'buy', type: 'market', quantity: 10 });
+    expect(m.order!.status).toBe('pending');
+    expect(m.warnings).toContain('The regular session has no bar yet: the order works from its first one (market orders fill at its open).');
+    // A marketable limit waits too, and so does changing it.
+    const l = s.submit({ symbol: 'GAP', action: 'buy', type: 'limit', limitPrice: 120, quantity: 10, tif: 'gtc' });
+    expect(l.order!.status).toBe('pending');
+    expect(s.modify(l.order!.id, { limitPrice: 125 }).ok).toBe(true);
+    expect(s.broker.state.fills).toEqual([]);
+    expect(s.broker.state.orders.map((o) => o.createdAt)).toEqual([et('2025-01-15', '09:30'), et('2025-01-15', '09:30')]);
+    s.step();
+    expect(s.broker.state.fills.map((f) => [f.price, f.time])).toEqual([
+      [110, et('2025-01-15', '09:30')],
+      [110, et('2025-01-15', '09:30')],
+    ]);
+  });
+
+  it('expires yesterday’s DAY orders and holds Close position for the open when the clock passes the night', () => {
+    const s = session(et('2025-01-14', '15:58'));
+    s.step(); // 15:59 on Jan 14
+    expect(s.submit({ symbol: 'GAP', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('filled');
+    const day = s.submit({ symbol: 'GAP', action: 'buy', type: 'limit', limitPrice: 90, quantity: 10 }).order!;
+    s.step(); // 16:00: the last bar of Jan 14 is in
+    expect(s.advance(60)).toEqual([]); // the night is skipped to the next open
+    expect(s.now).toBe(et('2025-01-15', '09:30'));
+    const close = s.closePosition('GAP');
+    expect(close.order!.status).toBe('pending');
+    expect(s.broker.state.orders.find((o) => o.id === day.id)!.status).toBe('expired');
+    s.step();
+    expect(s.broker.position('GAP').quantity).toBe(0);
+    expect(s.broker.state.fills[1]).toMatchObject({ price: 110, time: et('2025-01-15', '09:30') });
+  });
+});
+
+describe('Bars without volume', () => {
+  it('fills whole orders under the default volume cap and says nothing about a cap', () => {
+    const bars = minuteBars('2025-01-15', '09:30', Array.from({ length: 5 }, () => [100, 100.5, 99.5, 100] as [number, number, number, number]), 0);
+    const e = new ReplayEngine({ symbol: 'NOV', start: et('2025-01-15', '09:32'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, bars);
+    const s = new ReplaySession(e, { symbol: 'NOV', date: '2025-01-15', startTime: '09:32', endTime: '16:00', startingBalance: 1_000_000, lookbackDays: 0 }, DEFAULT_EXECUTION_CONFIG, 'n', 'HISTORICAL');
+    expect(DEFAULT_EXECUTION_CONFIG.maxParticipation).toBe(0.25);
+    const m = s.submit({ symbol: 'NOV', action: 'buy', type: 'market', quantity: 1000 });
+    expect(m.order!.status).toBe('filled');
+    expect(m.notes).toBeUndefined();
+    s.submit({ symbol: 'NOV', action: 'buy', type: 'limit', limitPrice: 99.6, quantity: 2000 });
+    s.step();
+    expect(s.broker.position('NOV').quantity).toBe(3000);
+  });
+});
+
 describe('Daily base bars', () => {
   // Daily bars are stamped at the 09:30 open, like a daily CSV.
   const days = ['2025-02-03', '2025-02-04', '2025-02-05', '2025-02-06', '2025-02-07'];
@@ -387,9 +446,11 @@ describe('Daily base bars', () => {
     const e = new ReplayEngine({ symbol: 'XYZ', start: et('2025-02-05', '09:30'), end: et('2025-02-07', '16:00'), baseTimeframe: '1D' }, daily);
     const s = new ReplaySession(e, { symbol: 'XYZ', date: '2025-02-05', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 2 }, ZERO_COST_CONFIG, 'd', 'DEMO');
     expect(s.broker.state.clock).toBe(et('2025-02-04', '16:00'));
-    s.submit({ symbol: 'XYZ', action: 'buy', type: 'market', quantity: 10, takeProfit: 103.5 });
-    expect(s.broker.state.fills[0].time).toBe(et('2025-02-04', '16:00'));
-    s.step(); // Feb 5: up bar 102 → 101 → 104 → 103, the target fills on the way up
+    // At 09:30 on Feb 5 its session has no bar yet: the order waits for it rather than taking Feb 4's close.
+    expect(s.submit({ symbol: 'XYZ', action: 'buy', type: 'market', quantity: 10, takeProfit: 103.5 }).order!.status).toBe('pending');
+    expect(s.broker.state.fills).toEqual([]);
+    s.step(); // Feb 5: up bar 102 → 101 → 104 → 103, the entry fills at its open and the target on the way up
+    expect([s.broker.state.fills[0].price, s.broker.state.fills[0].time]).toEqual([102, et('2025-02-05', '09:30')]);
     const exit = s.broker.state.fills[1];
     expect(exit.price).toBe(103.5);
     expect(exit.time).toBeGreaterThan(et('2025-02-05', '09:30'));
@@ -425,11 +486,19 @@ describe('Play on coarse base bars', () => {
     const e = new ReplayEngine({ symbol: 'Z', start: et('2024-03-04', '09:30'), end: et('2024-03-06', '16:00'), baseTimeframe: parsed.baseTimeframe }, parsed.bars);
     const s = new ReplaySession(e, { symbol: 'Z', date: '2024-03-04', startTime: '09:30', endTime: '16:00', endDate: '2024-03-06', startingBalance: 100_000, lookbackDays: 5 }, ZERO_COST_CONFIG, 'z', 'HISTORICAL');
     expect(e.lastBar()!.close).toBe(301);
-    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('filled');
-    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'limit', limitPrice: 999, quantity: 10, tif: 'gtc' }).order!.status).toBe('filled');
+    // March 4 has not traded yet at its 09:30: both orders wait for its bar and fill at its open.
+    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('pending');
+    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'limit', limitPrice: 999, quantity: 10, tif: 'gtc' }).order!.status).toBe('pending');
     s.stepCandle('1D');
     expect(s.now).toBe(et('2024-03-04', '16:00'));
     expect(e.lastBar()!.close).toBe(304);
+    expect(s.broker.state.fills.map((f) => [f.price, f.time])).toEqual([
+      [304, et('2024-03-04', '09:30')],
+      [304, et('2024-03-04', '09:30')],
+    ]);
+    // Paused at that close, the next market order fills at it, the last price shown.
+    expect(s.submit({ symbol: 'Z', action: 'buy', type: 'market', quantity: 10 }).order!.status).toBe('filled');
+    expect(s.broker.state.fills[2].price).toBe(304);
   });
 
   it('plays an hourly bar over its hour, and never reveals one that ends after the end time', () => {

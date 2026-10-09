@@ -17,8 +17,9 @@ export function TradeReviewModal() {
   if (!reviewId || !entry) return null;
   return (
     <Modal
-      title="Trade closed · review"
+      title={`Trade closed · ${entry.direction === 'long' ? 'Long' : 'Short'} ${entry.symbol}`}
       onClose={closeReview}
+      contentKey={entry.id}
       wide
       footer={
         <>

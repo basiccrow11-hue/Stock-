@@ -55,10 +55,35 @@ function focusHome(): void {
   (first('[data-focus-home]') ?? first('[aria-current="page"]'))?.focus({ preventScroll: true });
 }
 
-export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+/**
+ * A modal dialog. A new `contentKey` means new content in the same dialog (the next trade's review):
+ * it starts from the top, and focus goes to the dialog so its new name is read out.
+ */
+export function Modal({
+  title,
+  onClose,
+  children,
+  footer,
+  wide,
+  contentKey,
+}: {
+  title: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+  wide?: boolean;
+  contentKey?: string;
+}) {
   const id = useId();
   const backdropRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const shownKey = useRef(contentKey);
+  useEffect(() => {
+    if (shownKey.current === contentKey) return;
+    shownKey.current = contentKey;
+    if (backdropRef.current) backdropRef.current.scrollTop = 0;
+    dialogRef.current?.focus({ preventScroll: true });
+  }, [contentKey]);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   // Read during the first render, before anything inside the dialog takes focus. A dialog that opened
@@ -178,12 +203,11 @@ export function SourceBadge({ source, title }: { source: DataSourceKind; title?:
 }
 
 export function Toasts() {
-  const { toasts, dismiss } = useToasts();
+  const toasts = useToasts((s) => s.toasts);
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        // Clicking a toast dismisses it without taking focus away from the dialog or control in use.
-        <div key={t.id} className={`toast ${t.tone}`} onMouseDown={(e) => e.preventDefault()} onClick={() => dismiss(t.id)}>
+        <div key={t.id} className={`toast ${t.tone}`}>
           {t.text}
         </div>
       ))}

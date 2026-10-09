@@ -53,8 +53,10 @@ export const CHALLENGES: ChallengeDefinition[] = [
     setup: { startingBalance: 10_000, mode: 'replay', multiDay: true },
     evaluate(ctx) {
       for (const t of ctx.trips) {
+        if (t.initialStop === undefined) return { status: 'failed', progress: 0, detail: `Trade on ${t.symbol} had no stop loss.` };
+        if (t.stopFromAdd) return { status: 'failed', progress: 0, detail: `Trade on ${t.symbol} had no stop loss on its first entry.` };
         const r = riskPct(t, ctx);
-        if (r === null) return { status: 'failed', progress: 0, detail: `Trade on ${t.symbol} had no stop loss.` };
+        if (r === null) return { status: 'failed', progress: 0, detail: `The risk of a trade on ${t.symbol} to its stop could not be measured.` };
         if (riskBasis(t)?.from === 'first') return { status: 'failed', progress: 0, detail: `A trade on ${t.symbol} added past its stop, so it risked more than planned.` };
         if (r > 1 + 1e-6) return { status: 'failed', progress: 0, detail: `A trade risked ${r.toFixed(2)}% (limit 1%).` };
       }
@@ -91,7 +93,17 @@ export const CHALLENGES: ChallengeDefinition[] = [
     evaluate(ctx) {
       const closed = ctx.trips.filter((t) => t.closed);
       const rrs = closed.map(plannedRR);
-      if (rrs.some((r) => r === null)) return { status: 'failed', progress: 0, detail: 'A trade was missing a stop or a target.' };
+      const bad = closed.find((_, i) => rrs[i] === null);
+      if (bad) {
+        return {
+          status: 'failed',
+          progress: 0,
+          detail:
+            bad.initialStop === undefined || bad.initialTarget === undefined
+              ? 'A trade was missing a stop or a target.'
+              : `The planned reward:risk of a trade on ${bad.symbol} could not be measured: ${riskBasis(bad) === null ? 'its stop sat past its average entry' : 'its entry filled past its target'}.`,
+        };
+      }
       const avg = rrs.length ? (rrs as number[]).reduce((a, b) => a + b, 0) / rrs.length : 0;
       if (closed.length >= 10) {
         return avg >= 2

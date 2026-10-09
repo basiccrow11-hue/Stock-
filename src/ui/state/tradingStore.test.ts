@@ -180,3 +180,41 @@ describe('what the store publishes', () => {
     await store.endSession();
   });
 });
+
+describe('Learning Mode', () => {
+  it('pauses as soon as trades close, before the chart picture and the journal are written, and reviews them in exit order', async () => {
+    const store = await import('./tradingStore');
+    const { useJournal } = await import('./journalStore');
+    const { getSettings } = await import('./settingsStore');
+    expect([getSettings().learningMode, getSettings().autoSnapshot]).toEqual([true, true]);
+    // A chart picture that takes a while, as a real one can.
+    store.registerSnapshotProvider(() => new Promise((resolve) => setTimeout(() => resolve('data:image/jpeg;base64,AA=='), 30)));
+    expect(
+      await store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: ['QQQ'], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false }),
+    ).toBe(true);
+    const at = (v: number) => Math.round(v * 100) / 100;
+    for (const sym of ['SPY', 'QQQ']) {
+      const px = store.lastPrice(sym)!;
+      expect(store.submitOrder({ symbol: sym, action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.3), takeProfit: at(px + 0.3) }).ok).toBe(true);
+    }
+    const sessionId = store.useTrading.getState().session!.id;
+    const mine = () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId);
+    store.play();
+    store.jumpTo(exchangeTimeToUnix('2024-03-12', 15 * 60));
+    // Paused already, while the picture is still being taken.
+    expect(store.useTrading.getState().playing).toBe(false);
+    expect(mine()).toEqual([]);
+    await vi.waitFor(() => expect(mine().length).toBe(2));
+    const byExit = [...mine()].sort((a, b) => a.trip.exitTime! - b.trip.exitTime!);
+    expect(byExit[0].trip.exitTime).toBeLessThan(byExit[1].trip.exitTime!);
+    expect(store.useTrading.getState().reviewId).toBe(byExit[0].id);
+    expect(store.useTrading.getState().reviewQueue).toEqual([byExit[1].id]);
+    // The picture is of the chart on screen: the active symbol's trade gets it.
+    expect(byExit.map((e) => [e.symbol, !!e.snapshotKey]).sort()).toEqual([
+      ['QQQ', false],
+      ['SPY', true],
+    ]);
+    store.registerSnapshotProvider(null);
+    await store.endSession();
+  });
+});

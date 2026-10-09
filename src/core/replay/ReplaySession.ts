@@ -359,7 +359,9 @@ export class ReplaySession {
     this.rewinds += 1;
   }
 
+  // Order actions happen at the replay's time, which can be past the last bar (a new day before its first bar).
   submit(req: OrderRequest): SubmitResult {
+    this.broker.syncClock(this.now);
     const r = this.broker.submit(req);
     this.checkpoint();
     return r;
@@ -372,12 +374,14 @@ export class ReplaySession {
   }
 
   modify(orderId: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }) {
+    this.broker.syncClock(this.now);
     const r = this.broker.modify(orderId, changes);
     this.checkpoint();
     return r;
   }
 
   closePosition(symbol: string): SubmitResult {
+    this.broker.syncClock(this.now);
     const r = this.broker.closePosition(symbol);
     this.checkpoint();
     return r;

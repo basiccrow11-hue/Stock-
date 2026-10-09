@@ -39,16 +39,20 @@ export interface PerformanceStats {
 
 /**
  * The entry price and per-share risk to the initial stop that R is measured from: the average entry;
- * when that is at or past the stop, the first entry fill (adds past the stop moved the average); and
- * when that is past it too (a gap through both the entry order and its stop), the price the entry
- * order was placed at, which is the risk that was planned.
+ * when that is at or past the stop, the entry the stop came with (adds past the stop moved the
+ * average); and when that is past it too (a gap through both the entry order and its stop), the
+ * price the entry order was placed at, which is the risk that was planned. None when the trade opened
+ * without a stop and the add that brought one left the average past it: the stop then locked in a
+ * gain on the earlier shares rather than capping a loss.
  */
 export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;
   const dir = t.direction === 'long' ? 1 : -1;
-  const candidates: Array<[number | undefined, 'average' | 'first' | 'planned']> = [
-    [t.avgEntry, 'average'],
-    [t.firstEntry, 'first'],
+  const avgRisk = (t.avgEntry - t.initialStop) * dir;
+  if (avgRisk > 0) return { entry: t.avgEntry, risk: avgRisk, from: 'average' };
+  if (t.stopFromAdd) return null;
+  const candidates: Array<[number | undefined, 'first' | 'planned']> = [
+    [t.bracketEntry, 'first'],
     [t.plannedEntry, 'planned'],
   ];
   for (const [entry, from] of candidates) {
@@ -64,11 +68,16 @@ export function initialRiskPerShare(t: RoundTrip): number | null {
 }
 
 /**
- * True when the trade's first entry filled at or past its own initial stop (only a gap can do that).
- * Adds made later past the stop do not count: they are a choice, not a gap.
+ * True when the entry the initial stop came with filled at or past that stop (only a gap can do
+ * that). Adds made later past the stop do not count: they are a choice, not a gap.
  */
 export function entryPastStop(t: RoundTrip): boolean {
-  return t.initialStop !== undefined && ((t.firstEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
+  return t.initialStop !== undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
+}
+
+/** True when that entry filled at or past the initial target (a gap through both). */
+export function entryPastTarget(t: RoundTrip): boolean {
+  return t.initialTarget !== undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialTarget) * (t.direction === 'long' ? 1 : -1) >= 0;
 }
 
 /** Realized R multiple: P/L divided by the dollars at risk to the initial stop. */
@@ -78,11 +87,20 @@ export function rMultiple(t: RoundTrip): number | null {
   return t.pnl / (r * t.maxQuantity);
 }
 
+/**
+ * Reward to the initial target over risk to the initial stop, from the same entry as R. When the
+ * entry filled at or past the target (a gap), the plan is what the order was placed for.
+ */
 export function plannedRR(t: RoundTrip): number | null {
   const b = riskBasis(t);
   if (b === null || t.initialTarget === undefined) return null;
-  const reward = (t.initialTarget - b.entry) * (t.direction === 'long' ? 1 : -1);
-  return reward > 0 ? reward / b.risk : null;
+  const dir = t.direction === 'long' ? 1 : -1;
+  const reward = (t.initialTarget - b.entry) * dir;
+  if (reward > 0) return reward / b.risk;
+  if (t.plannedEntry === undefined) return null;
+  const plannedReward = (t.initialTarget - t.plannedEntry) * dir;
+  const plannedRisk = (t.plannedEntry - t.initialStop!) * dir;
+  return plannedReward > 0 && plannedRisk > 0 ? plannedReward / plannedRisk : null;
 }
 
 export function returnPct(t: RoundTrip): number {

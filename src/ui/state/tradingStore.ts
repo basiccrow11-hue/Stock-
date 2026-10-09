@@ -320,51 +320,73 @@ function publish(force = false): void {
 
 // ------------------------------------------------------------------ journal + learning hooks
 
-async function processClosedTrips(): Promise<void> {
+/** Journal writes for closed trades, one batch after another, so reviews queue in the order trades closed. */
+let journaling: Promise<void> = Promise.resolve();
+
+function processClosedTrips(): Promise<void> {
   const b = broker();
   const session = useTrading.getState().session;
-  if (!b || !session) return;
+  if (!b || !session) return journaling;
   // In the order they closed, so reviews of trades closed in one step come in that order too.
   const closed = b.state.roundTrips.filter((t) => t.closed && !eng.processedTrips.has(t.id)).sort((x, y) => x.exitTime! - y.exitTime!);
-  for (const trip of closed) {
-    if (eng.processedTrips.has(trip.id)) continue;
+  if (!closed.length) {
+    settleWatchedReviews();
+    return journaling;
+  }
+  // Claimed, reviewed and pictured now, as they closed. Learning Mode stops playback before anything
+  // is awaited, so the replay does not run on while the journal is written.
+  const settings = getSettings();
+  const timeframe = useTrading.getState().timeframe;
+  let picture: Promise<string | null> | null = null;
+  const batch = closed.map((trip) => {
     eng.processedTrips.add(trip.id);
-    const settings = getSettings();
     const entry: JournalEntry = journalEntryFromTrip(trip, { sessionId: session.id, mode: session.mode, rewound: (eng.replay?.rewinds ?? 0) > 0, blind: session.blind });
-    const timeframe = useTrading.getState().timeframe;
     try {
       entry.review = reviewOf(trip, timeframe, false);
     } catch (e) {
       console.error('Review failed', e);
     }
+    let snap: Promise<string | null> | null = null;
     if (settings.autoSnapshot && snapshotFn && useTrading.getState().activeSymbol === trip.symbol) {
-      try {
+      if (!picture) {
         // Publishing is throttled while playing; the picture shows the moment the trade closed.
         publish(true);
-        const img = await snapshotFn();
-        if (img) {
-          entry.snapshotKey = `snap:${entry.id}`;
-          await saveSnapshot(entry.snapshotKey, img);
-        }
-      } catch {
-        /* snapshot is best effort */
+        picture = snapshotFn().catch(() => null);
       }
+      snap = picture;
     }
-    await useJournal.getState().add(entry);
-    // Only once the entry is in the journal: settling looks it up there.
-    if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
-    recordTradeClosed();
-    const tone = trip.pnl >= 0 ? 'success' : 'error';
-    toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
-    if (settings.learningMode) {
-      pause();
-      // A jump or a gap can close several trades at once: each gets its review, one after another.
-      const { reviewId, reviewQueue } = useTrading.getState();
-      if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
-      else useTrading.setState({ reviewId: entry.id });
-    }
-  }
-  settleWatchedReviews();
+    return { trip, entry, snap };
+  });
+  if (settings.learningMode) pause();
+  journaling = journaling
+    .then(async () => {
+      for (const { trip, entry, snap } of batch) {
+        try {
+          const img = snap && (await snap);
+          if (img) {
+            entry.snapshotKey = `snap:${entry.id}`;
+            await saveSnapshot(entry.snapshotKey, img);
+          }
+        } catch {
+          /* snapshot is best effort */
+        }
+        await useJournal.getState().add(entry);
+        // Only once the entry is in the journal: settling looks it up there.
+        if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, timeframe);
+        recordTradeClosed();
+        const tone = trip.pnl >= 0 ? 'success' : 'error';
+        toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
+        if (settings.learningMode) {
+          // A jump or a gap can close several trades at once: each gets its review, one after another.
+          const { reviewId, reviewQueue } = useTrading.getState();
+          if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
+          else useTrading.setState({ reviewId: entry.id });
+        }
+      }
+      settleWatchedReviews();
+    })
+    .catch((e) => console.error('Journal update failed', e));
+  return journaling;
 }
 
 /** The learning review of `trip` with what the replay has shown so far. */
@@ -662,6 +684,8 @@ export function stepBackTarget(): UnixSeconds | null {
 }
 
 async function afterRewind(): Promise<void> {
+  // Entries for trades that closed just before the rewind are written first, so they can be removed.
+  await journaling;
   const session = useTrading.getState().session;
   const b = broker();
   if (!session || !b) return;
@@ -704,10 +728,17 @@ export function jumpTo(time: UnixSeconds): void {
   }
 }
 
+/** The simulated market's broker, its clock brought up to the market's time for an order action. */
+function simBrokerNow(): SimBroker | null {
+  if (!eng.sim || !eng.simBroker) return null;
+  eng.simBroker.syncClock(eng.sim.market.clock);
+  return eng.simBroker;
+}
+
 export function submitOrder(req: OrderRequest): SubmitResult {
   const b = broker();
   if (!b) return { ok: false, error: 'Start a replay or the simulated market first.', warnings: [] };
-  const r = eng.replay ? eng.replay.submit(req) : b.submit(req);
+  const r = eng.replay ? eng.replay.submit(req) : simBrokerNow()!.submit(req);
   publish(true);
   void processClosedTrips();
   return r;
@@ -730,7 +761,7 @@ export function cancelAllOrders(): void {
 }
 
 export function modifyOrder(id: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }): { ok: boolean; error?: string } {
-  const r = eng.replay ? eng.replay.modify(id, changes) : broker()?.modify(id, changes) ?? { ok: false, error: 'No session' };
+  const r = eng.replay ? eng.replay.modify(id, changes) : simBrokerNow()?.modify(id, changes) ?? { ok: false, error: 'No session' };
   publish(true);
   void processClosedTrips();
   return r;
@@ -739,7 +770,7 @@ export function modifyOrder(id: string, changes: { limitPrice?: number; stopPric
 export function closePosition(symbol: string): SubmitResult {
   const b = broker();
   if (!b) return { ok: false, error: 'No session', warnings: [] };
-  const r = eng.replay ? eng.replay.closePosition(symbol) : b.closePosition(symbol);
+  const r = eng.replay ? eng.replay.closePosition(symbol) : simBrokerNow()!.closePosition(symbol);
   publish(true);
   void processClosedTrips();
   return r;

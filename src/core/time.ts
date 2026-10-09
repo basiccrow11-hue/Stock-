@@ -181,19 +181,55 @@ function easter(y: number): string {
   return formatDate(y, month, day);
 }
 
-/** Fixed-date holiday observed on Friday if Saturday, Monday if Sunday. */
+/**
+ * Fixed-date holiday observed on Friday if Saturday, Monday if Sunday. Until Saturday trading ended
+ * (1952) a Saturday holiday closed only that Saturday.
+ */
 function observed(date: string): string | null {
   const dow = weekdayOf(date);
-  if (dow === 6) return addDays(date, -1);
+  if (dow === 6) return parseDate(date).y >= 1953 ? addDays(date, -1) : null;
   if (dow === 0) return addDays(date, 1);
   return date;
 }
 
-/** One-off closures (national days of mourning etc.). */
-const SPECIAL_CLOSURES = new Set(['2018-12-05', '2025-01-09']);
+/** One-off closures since 1960 (days of mourning, storms, blackouts, September 11). */
+const SPECIAL_CLOSURES = new Set([
+  '1963-11-25',
+  '1968-04-09',
+  '1969-03-31',
+  '1969-07-21',
+  '1972-12-28',
+  '1973-01-25',
+  '1977-07-14',
+  '1985-09-27',
+  '1994-04-27',
+  '2001-09-11',
+  '2001-09-12',
+  '2001-09-13',
+  '2001-09-14',
+  '2004-06-11',
+  '2007-01-02',
+  '2012-10-29',
+  '2012-10-30',
+  '2018-12-05',
+  '2025-01-09',
+]);
+
+/** Thanksgiving: the fourth Thursday of November since 1942, the third in 1940-41, the last Thursday before. */
+function thanksgiving(y: number): string {
+  if (y >= 1942 || y === 1939) return nthWeekday(y, 11, 4, 4);
+  if (y >= 1940) return nthWeekday(y, 11, 4, 3);
+  return lastWeekday(y, 11, 4);
+}
 
 const holidayCache = new Map<number, Set<string>>();
 
+/**
+ * NYSE full-day holidays in year `y`, as they were that year: MLK Day from 1998, Juneteenth from
+ * 2022, and Washington's Birthday and Memorial Day on Mondays from 1971 (fixed dates before). Older
+ * closures that no longer exist (Election Day, Lincoln's Birthday) are not listed, so no day that
+ * traded is ever taken for a holiday.
+ */
 export function nyseHolidays(y: number): Set<string> {
   const cached = holidayCache.get(y);
   if (cached) return cached;
@@ -201,14 +237,14 @@ export function nyseHolidays(y: number): Set<string> {
   // New Year's Day: if it falls on Saturday NYSE does NOT close the prior Friday.
   const ny = formatDate(y, 1, 1);
   days.push(weekdayOf(ny) === 6 ? null : observed(ny));
-  days.push(nthWeekday(y, 1, 1, 3)); // MLK Day
-  days.push(nthWeekday(y, 2, 1, 3)); // Presidents' Day
+  if (y >= 1998) days.push(nthWeekday(y, 1, 1, 3)); // MLK Day
+  days.push(y >= 1971 ? nthWeekday(y, 2, 1, 3) : observed(formatDate(y, 2, 22))); // Washington's Birthday
   days.push(addDays(easter(y), -2)); // Good Friday
-  days.push(lastWeekday(y, 5, 1)); // Memorial Day
+  days.push(y >= 1971 ? lastWeekday(y, 5, 1) : observed(formatDate(y, 5, 30))); // Memorial Day
   if (y >= 2022) days.push(observed(formatDate(y, 6, 19))); // Juneteenth
   days.push(observed(formatDate(y, 7, 4)));
   days.push(nthWeekday(y, 9, 1, 1)); // Labor Day
-  days.push(nthWeekday(y, 11, 4, 4)); // Thanksgiving
+  days.push(thanksgiving(y));
   days.push(observed(formatDate(y, 12, 25)));
   const set = new Set(days.filter((d): d is string => d !== null));
   for (const d of SPECIAL_CLOSURES) if (d.startsWith(String(y))) set.add(d);
@@ -242,8 +278,7 @@ export function regularCloseMinute(date: string): number {
 
 function computeRegularClose(date: string): number {
   const { y, m, d } = parseDate(date);
-  const thanksgiving = nthWeekday(y, 11, 4, 4);
-  if (date === addDays(thanksgiving, 1)) return EARLY_CLOSE;
+  if (date === addDays(thanksgiving(y), 1)) return EARLY_CLOSE;
   // Christmas Eve and July 3rd close early when they are trading days.
   if (m === 12 && d === 24 && isTradingDay(date)) return EARLY_CLOSE;
   if (m === 7 && d === 3 && isTradingDay(date) && weekdayOf(formatDate(y, 7, 4)) !== 6) return EARLY_CLOSE;

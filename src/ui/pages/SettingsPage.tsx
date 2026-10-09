@@ -75,6 +75,8 @@ function CsvImportCard() {
   const [error, setError] = useState<string | null>(null);
   // A second file for a ticker adds to its data by default (data split by year stays one history).
   const [replace, setReplace] = useState(false);
+  // A new file box after each save, so choosing the same file again reads it again.
+  const [fileBox, setFileBox] = useState(0);
   const ticker = symbol.trim().toUpperCase();
   const existing = datasets.find((d) => d.symbol === ticker);
   const canAdd = !!existing && !!parsed && existing.baseTimeframe === parsed.baseTimeframe;
@@ -124,6 +126,7 @@ function CsvImportCard() {
       setParsed(null);
       setSymbol('');
       setReplace(false);
+      setFileBox((n) => n + 1);
     } catch (e) {
       setError(`Could not save: ${(e as Error).message}`);
     }
@@ -138,7 +141,7 @@ function CsvImportCard() {
       <div className="form-grid">
         <label className="field">
           <span>CSV file</span>
-          <input type="file" accept=".csv,.txt,text/csv" onChange={(e) => void onFile(e.target.files?.[0])} />
+          <input key={fileBox} type="file" accept=".csv,.txt,text/csv" onChange={(e) => void onFile(e.target.files?.[0])} />
         </label>
         <label className="field">
           <span>Ticker</span>

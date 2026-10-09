@@ -27,6 +27,56 @@ describe('CSV import', () => {
     expect(r.bars[1].time).toBe(et('2025-01-15', '09:35'));
   });
 
+  it('reads dates with the year last in the order the file uses, and rejects days that do not exist', () => {
+    const rows = (dates: string[]) => `Date,Open,High,Low,Close,Volume\n${dates.map((d) => `${d},10,11,9,10.5,100`).join('\n')}\n`;
+    // Day first (a UK or European export): 16/01 settles it for the file, so 02/01 is 2 January.
+    const dmy = parseCsv(rows(['02/01/2024', '03/01/2024', '16/01/2024', '17/01/2024']));
+    expect(dmy.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['2024-01-02', '2024-01-03', '2024-01-16', '2024-01-17']);
+    expect(dmy.warnings).toContain('Dates were read as day/month/year (13/01/2024 is 13 January).');
+    // Month first: 01/16 settles it the other way.
+    const mdy = parseCsv(rows(['01/02/2024', '01/16/2024']));
+    expect(mdy.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['2024-01-02', '2024-01-16']);
+    expect(mdy.warnings).toEqual([]);
+    // Both orders in one file cannot be read.
+    expect(() => parseCsv(rows(['16/01/2024', '01/17/2024']))).toThrow(/mix day\/month and month\/day/);
+    // Every date could be either: month first, with a note; dotted dates are day first.
+    expect(parseCsv(rows(['01/02/2024', '01/03/2024'])).warnings.join(' ')).toMatch(/01\/02\/2024 can be read either way; they were read as month\/day \(US\)/);
+    const dotted = parseCsv(rows(['02.01.2024', '03.01.2024']));
+    expect(dotted.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['2024-01-02', '2024-01-03']);
+    // A day that does not exist is an invalid row, never rolled into another month or year.
+    expect(parseTimestamp('2024-02-30', 'exchange').t).toBeNaN();
+    expect(parseTimestamp('13/13/2024', 'exchange').t).toBeNaN();
+    expect(parseTimestamp('04/31/2024', 'exchange').t).toBeNaN();
+    expect(parseTimestamp('2024-01-16 25:00', 'exchange').t).toBeNaN();
+    expect(parseCsv(rows(['01/02/2024', '02/30/2024', '01/03/2024'])).rowsSkipped).toBe(1);
+  });
+
+  it('reads decimal commas and abbreviated volumes, and says what happens without volume', () => {
+    const eu = parseCsv('Date;Open;High;Low;Close;Volume\n2024-01-02 09:30;185,50;186,00;184,10;185,64;1.000\n2024-01-02 09:31;185,64;186,5;185,1;186,2;2.500\n');
+    expect(eu.bars.map((b) => [b.open, b.high, b.low, b.close, b.volume])).toEqual([
+      [185.5, 186, 184.1, 185.64, 1000],
+      [185.64, 186.5, 185.1, 186.2, 2500],
+    ]);
+    expect(eu.warnings).toContain('Numbers use a decimal comma: 185,64 was read as 185.64.');
+    expect(() => parseCsv('Date;Open;High;Low;Close\n2024-01-02 09:30;185,50;186,00;184,10;185,64\n2024-01-02 09:31;185.64;186.5;185.1;186.2\n')).toThrow(/mix decimal commas and decimal points/);
+    // Thousands separators in a decimal-point file still read as before.
+    expect(parseCsv('Date,Open,High,Low,Close\n2024-01-02,"1,234.50","1,240.00","1,230.25","1,238.75"\n').bars[0].close).toBe(1238.75);
+    const abbreviated = parseCsv('Date,Price,Open,High,Low,Vol.\n01/02/2024,10.5,10,11,9,82.49M\n01/03/2024,10.6,10.5,11,10,1.2K\n');
+    expect(abbreviated.bars.map((b) => b.volume)).toEqual([82_490_000, 1200]);
+    const none = parseCsv('Date,Open,High,Low,Close\n2024-01-02,10,11,9,10.5\n');
+    expect(none.warnings).toContain('No volume column: the volume pane is empty, VWAP is not meaningful, and fills are not limited by bar volume.');
+    const zero = parseCsv('Date,Open,High,Low,Close,Volume\n2024-01-02,10,11,9,10.5,0\n2024-01-03,10,11,9,10.5,\n');
+    expect(zero.warnings).toContain('Every volume is 0 or unreadable: the volume pane is empty, VWAP is not meaningful, and fills are not limited by bar volume.');
+  });
+
+  it('keeps daily rows on days the NYSE traded in their year, and lists the days it skips', () => {
+    // MLK Day closed the market only from 1998; Juneteenth from 2022; Memorial Day was May 30 before 1971.
+    const days = ['1995-01-16', '1996-01-15', '1997-01-20', '1998-01-19', '2021-06-18', '2023-06-19', '1969-05-26', '1969-05-30'];
+    const r = parseCsv(`Date,Open,High,Low,Close,Volume\n${days.map((d) => `${d},10,11,9,10.5,100`).join('\n')}\n`);
+    expect(r.bars.map((b) => new Date(b.time * 1000).toISOString().slice(0, 10))).toEqual(['1969-05-26', '1995-01-16', '1996-01-15', '1997-01-20', '2021-06-18']);
+    expect(r.warnings).toContain('3 daily bar(s) dated on a weekend or market holiday were skipped: 1969-05-30, 1998-01-19, 2023-06-19.');
+  });
+
   it('detects daily data and validates rows', () => {
     const csv = 'Date,Open,High,Low,Close,Adj Close,Volume\n2025-01-13,10,11,9,10.5,10.4,100\n2025-01-14,10,9,9,10.5,10.4,100\n2025-01-15,abc,11,9,10.5,10.4,100\n2025-01-16,10.5,12,10,11.5,11.4,100\n';
     const r = parseCsv(csv);

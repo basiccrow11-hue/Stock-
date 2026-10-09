@@ -100,7 +100,8 @@ function heatmapSummary(weeks: CalendarCell[][]): string {
 }
 
 function Heatmap({ weeks }: { weeks: CalendarCell[][] }) {
-  // Where the calendar is wider than its box (a narrow phone), show its end: this week and today.
+  // Where the calendar is wider than its box (a narrow phone), show its end: this week and today. The
+  // weekday labels stay put and the colour key sits below, outside the part that scrolls.
   const wrapRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -115,34 +116,36 @@ function Heatmap({ weeks }: { weeks: CalendarCell[][] }) {
     return () => ro.disconnect();
   }, [weeks.length]);
   return (
-    <div className="heatmap-wrap" ref={wrapRef}>
-      <div className="heatmap" role="img" aria-label={heatmapSummary(weeks)}>
-        <div className="heatmap-days" aria-hidden="true">
-          <span />
-          <span />
-          <span>Mon</span>
-          <span />
-          <span>Wed</span>
-          <span />
-          <span>Fri</span>
-          <span />
+    <div className="heatmap-wrap">
+      <div className="heatmap-scroll" ref={wrapRef}>
+        <div className="heatmap" role="img" aria-label={heatmapSummary(weeks)}>
+          <div className="heatmap-days" aria-hidden="true">
+            <span />
+            <span />
+            <span>Mon</span>
+            <span />
+            <span>Wed</span>
+            <span />
+            <span>Fri</span>
+            <span />
+          </div>
+          {weeks.map((col, i) => {
+            const first = col[0].key;
+            const prev = i > 0 ? weeks[i - 1][0].key : null;
+            const month = Number(first.slice(5, 7));
+            const showMonth = !prev || Number(prev.slice(5, 7)) !== month;
+            return (
+              <div key={first} className="heatmap-col">
+                <span className="heatmap-month" aria-hidden="true">
+                  {showMonth ? MONTHS[month - 1] : ''}
+                </span>
+                {col.map((c) => (
+                  <span key={c.key} className={`cell ${c.state}`} title={c.state === 'future' ? undefined : fmtCell(c)} />
+                ))}
+              </div>
+            );
+          })}
         </div>
-        {weeks.map((col, i) => {
-          const first = col[0].key;
-          const prev = i > 0 ? weeks[i - 1][0].key : null;
-          const month = Number(first.slice(5, 7));
-          const showMonth = !prev || Number(prev.slice(5, 7)) !== month;
-          return (
-            <div key={first} className="heatmap-col">
-              <span className="heatmap-month" aria-hidden="true">
-                {showMonth ? MONTHS[month - 1] : ''}
-              </span>
-              {col.map((c) => (
-                <span key={c.key} className={`cell ${c.state}`} title={c.state === 'future' ? undefined : fmtCell(c)} />
-              ))}
-            </div>
-          );
-        })}
       </div>
       <div className="heatmap-legend small muted">
         <span className="cell done" /> goal met <span className="cell frozen" /> freeze <span className="cell partial" /> some practice <span className="cell none" /> none

@@ -94,6 +94,24 @@ describe('simulated market', () => {
     expect(a.equity).toBeCloseTo(a.cash + a.longMarketValue + a.shortMarketValue, 4);
   });
 
+  it('fills an order placed at the open, before the first tick, at that tick and not at the last close', () => {
+    for (const seed of [3, 5]) {
+      // As the app starts it: the broker learns each price from the warm-up history, then the clock is 09:30.
+      const m = new SimMarket({ startDate: '2026-10-08', warmupSessions: 1, config: { seed } });
+      const broker = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG, source: 'SIMULATED' });
+      const h = m.history('NOVA');
+      broker.onBar('NOVA', h[h.length - 1], 60);
+      expect(exchangeDate(h[h.length - 1].time)).toBe('2026-10-07');
+      broker.syncClock(m.clock);
+      const r = broker.submit({ symbol: 'NOVA', action: 'buy', type: 'market', quantity: 10 });
+      expect(r.order!.status).toBe('pending');
+      const first = m.advance(m.config.tickSeconds).find((u) => u.symbol === 'NOVA')!;
+      broker.onBar('NOVA', first.tick, m.config.tickSeconds);
+      expect(broker.state.fills[0]).toMatchObject({ price: first.tick.open, time: first.tick.time });
+      expect(exchangeDate(broker.state.fills[0].time)).toBe('2026-10-08');
+    }
+  });
+
   it('respects configuration: zero event frequency means no news', () => {
     const quiet = new SimMarket({ startDate: '2026-10-08', warmupSessions: 0, config: { eventFrequency: 0 } });
     quiet.advance(390 * 60 * 3);

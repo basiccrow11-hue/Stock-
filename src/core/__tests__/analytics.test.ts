@@ -392,7 +392,7 @@ describe('learning review', () => {
       }
       const st = b.state;
       const t = st.roundTrips[0];
-      expect([t.closed, t.firstEntry, t.plannedEntry]).toEqual([true, 100, 101]);
+      expect([t.closed, t.bracketEntry, t.plannedEntry]).toEqual([true, 100, 101]);
       const ctx = { equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES };
       const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', ...ctx });
       expect(review.plannedRR).toBe(3);
@@ -427,7 +427,7 @@ describe('learning review', () => {
         next(98.5, 98.5, 97, 97.2);
         const st = b.state;
         const t = st.roundTrips[0];
-        expect([t.closed, t.firstEntry, t.avgEntry]).toEqual([true, 100, 98.875]);
+        expect([t.closed, t.bracketEntry, t.avgEntry]).toEqual([true, 100, 98.875]);
         const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
         const titles = review.findings.map((f) => f.title);
         expect(titles).not.toContain('Entry filled past your stop');
@@ -440,6 +440,77 @@ describe('learning review', () => {
         const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
         expect(grow).toMatchObject({ status: 'failed', detail: 'A trade on T added past its stop, so it risked more than planned.' });
       }
+    });
+
+    // Opened at market without a stop at 90 (100 shares), then an add at market brings the first stop.
+    function pyramid(add: number, stop: number) {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const t0 = et('2025-01-15', '10:00');
+      const bars = [bar(t0, 90, 90, 90, 90)];
+      const next = (o: number, h: number, l: number, c: number) => {
+        bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+        b.onBar('T', bars[bars.length - 1]);
+      };
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100 });
+      next(95, 100, 95, 100);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: add, stopLoss: stop });
+      next(100, 100, stop - 1, stop - 1); // the add's stop fills on the way down
+      b.closePosition('T');
+      next(stop - 1, stop - 1, stop - 1, stop - 1);
+      const st = b.state;
+      const t = st.roundTrips[0];
+      const ctx = { equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES };
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', ...ctx });
+      const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      return { t, review, grow, text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+    }
+
+    it('takes a stop that came with an add from that add, not from the first entry made without one', () => {
+      // 300 more at 100 with a stop at 95: average 97.50, so R is measured from it.
+      const { t, review, grow, text } = pyramid(300, 95);
+      expect([t.closed, t.stopFromAdd, t.bracketEntry, t.plannedEntry, t.avgEntry]).toEqual([true, true, 100, 100, 97.5]);
+      expect(text).not.toContain('Entry filled past your stop');
+      expect(text).not.toContain('next open');
+      expect(review.rMultiple).not.toBeNull();
+      expect(review.rules.find((r) => r.rule === 'Use a stop loss')).toMatchObject({ passed: false, detail: 'No stop at entry (one came with a later add, at 95.00)' });
+      expect(grow).toMatchObject({ status: 'failed', detail: 'Trade on T had no stop loss on its first entry.' });
+    });
+
+    it('says a stop that came with an add past the average entry locked in a gain, not that there was no stop', () => {
+      // 10 more at 100 with a stop at 99: average 90.91, below the stop.
+      const { review, text } = pyramid(10, 99);
+      expect(review.rMultiple).toBeNull();
+      expect(text).toContain('No stop on your first entry: Your stop at 99.00 came with a later add, and it sat past your average entry of 90.91');
+      expect(text).not.toContain('No stop loss');
+      expect(text).not.toContain('Added past your stop');
+      expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: null, detail: 'Not measurable: the stop sat past your average entry' });
+    });
+
+    it('measures planned R:R from the order’s price when the entry fills past its own target, and calls the exit the target', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const bars = [bar(et('2025-01-15', '15:59'), 100, 100.2, 99.8, 100), bar(et('2025-01-15', '16:05'), 100, 100, 100, 100, 5000)];
+      for (const x of bars) b.onBar('T', x);
+      // After the close, planned 2:1 from 100: stop 99, target 102. The next day opens at 102.50.
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 99, takeProfit: 102 }).order!.status).toBe('pending');
+      for (let i = 0; i < 3; i++) {
+        bars.push(bar(et('2025-01-16', '09:30') + 60 * i, 102.5, 102.6, 102.4, 102.5));
+        b.onBar('T', bars[bars.length - 1]);
+      }
+      const st = b.state;
+      const t = st.roundTrips[0];
+      expect([t.closed, t.avgEntry, t.plannedEntry]).toEqual([true, 102.5, 100]);
+      expect(plannedRR(t)).toBe(2);
+      const ctx = { equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES };
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', ...ctx });
+      expect(review.exitReason).toBe('take_profit');
+      const text = review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+      expect(text).toContain('via your profit target');
+      expect(text).toContain('Entry filled past your target: Your market order was placed with price at 100.00 and filled at the next open, 102.50, already past your target at 102.00.');
+      expect(text).not.toContain('Target reached');
+      expect(review.rules.find((r) => r.rule.startsWith('Planned'))).toMatchObject({ passed: true, detail: '2.00:1' });
+      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      expect(rr.status).toBe('in_progress');
     });
   });
 

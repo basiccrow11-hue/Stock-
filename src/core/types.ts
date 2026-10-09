@@ -153,12 +153,15 @@ export interface RoundTrip {
   initialStop?: number;
   initialTarget?: number;
   /**
-   * Price the entry order was placed at: its limit, its stop, or for a market order the price it was
-   * checked against. Absent on older trades.
+   * The entry order the initial stop came with (the first entry, unless it had no stop and a later
+   * add brought one): the price it was placed at (its limit, its stop, or for a market order the
+   * price it was checked against), and the price of its first fill. Later adds move avgEntry, not
+   * these. Absent on older trades.
    */
   plannedEntry?: number;
-  /** Price of the trade's first entry fill (later adds move avgEntry, not this). Absent on older trades. */
-  firstEntry?: number;
+  bracketEntry?: number;
+  /** The initial stop came with an add, not with the trade's first entry (which had none). */
+  stopFromAdd?: boolean;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

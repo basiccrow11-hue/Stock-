@@ -32,7 +32,7 @@ const ALIASES: Record<string, string[]> = {
   high: ['high', 'h'],
   low: ['low', 'l'],
   close: ['close', 'c', 'last', 'closing price', 'price'],
-  volume: ['volume', 'vol', 'v', 'qty'],
+  volume: ['volume', 'vol', 'vol.', 'v', 'qty'],
 };
 
 function splitLine(line: string, delim: string): string[] {
@@ -61,17 +61,49 @@ function detectDelimiter(header: string): string {
   return counts[0][0];
 }
 
-function parseNumber(s: string): number {
-  if (s === undefined) return NaN;
-  return Number(s.replace(/[$,\s]/g, ''));
+/**
+ * Which decimal mark a number shows, if it settles it: a comma (185,64 or 1.234,56, as in files from
+ * many European locales) or a point. The decimal mark is the later of ',' and '.' in a number that
+ * has both; one that has only one of them is a decimal mark unless exactly three digits follow it
+ * (then it may group thousands, as in 1,000).
+ */
+function decimalMarkOf(raw: string | undefined): ',' | '.' | null {
+  const s = (raw ?? '').replace(/[$\s"]/g, '');
+  const c = s.lastIndexOf(',');
+  const p = s.lastIndexOf('.');
+  if (c >= 0 && p >= 0) return c > p ? ',' : '.';
+  if (c >= 0) return s.indexOf(',') !== c ? '.' : s.length - c - 1 !== 3 ? ',' : null; // 1,234,567: commas group thousands
+  if (p >= 0) return s.indexOf('.') !== p ? ',' : s.length - p - 1 !== 3 ? '.' : null; // 1.234.567: points group thousands
+  return null;
 }
+
+function parseNumber(s: string | undefined, decimalComma = false): number {
+  if (s === undefined) return NaN;
+  const t = s.replace(/[$\s"]/g, '');
+  if (t === '') return NaN;
+  return Number(decimalComma ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, ''));
+}
+
+/** A volume cell, which some exports abbreviate (82.49M, 1.2K). NaN when unreadable. */
+function parseVolume(s: string | undefined, decimalComma: boolean): number {
+  const m = (s ?? '').replace(/[\s"]/g, '').match(/^(.*?)([KkMmBb])$/);
+  if (!m) return parseNumber(s, decimalComma);
+  return parseNumber(m[1], decimalComma) * { k: 1e3, m: 1e6, b: 1e9 }[m[2].toLowerCase() as 'k' | 'm' | 'b'];
+}
+
+const daysInMonth = (y: number, mo: number) => new Date(Date.UTC(y, mo, 0)).getUTCDate();
+
+/** A date written with the year last: 01/16/2024, 16.01.2024, 16-01-2024 (the first two numbers, and the separator). */
+const YEAR_LAST = /^(\d{1,2})([/.-])(\d{1,2})\2(\d{4})(?:[ T](.*))?$/;
 
 /**
  * Parses many timestamp formats. Returns unix seconds or NaN. `dateOnly` reports daily data. `date`
  * is the calendar day the stamp names (YYYY-MM-DD): as written for text, the UTC day for epoch
- * numbers. Daily bars are filed under it, whatever time of day the vendor stamped them with.
+ * numbers. Daily bars are filed under it, whatever time of day the vendor stamped them with. Dates
+ * with the year last are month first (US) unless `dayFirst`. A day or time that does not exist
+ * (month 13, 31 April, 25:00) is NaN, not rolled over.
  */
-export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: number; dateOnly: boolean; date?: string } {
+export function parseTimestamp(raw: string, naive: 'exchange' | 'utc', dayFirst = false): { t: number; dateOnly: boolean; date?: string } {
   const s = raw.trim().replace(/^"|"$/g, '');
   if (/^\d{9,13}(\.\d+)?$/.test(s)) {
     const n = Number(s);
@@ -90,16 +122,16 @@ export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: num
   if (m) {
     [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     rest = m[4] ?? '';
-  } else if ((m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](.*))?$/))) {
-    // US format MM/DD/YYYY
-    [mo, d, y] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    rest = m[4] ?? '';
+  } else if ((m = s.match(YEAR_LAST))) {
+    [mo, d, y] = dayFirst ? [Number(m[3]), Number(m[1]), Number(m[4])] : [Number(m[1]), Number(m[3]), Number(m[4])];
+    rest = m[5] ?? '';
   } else if ((m = s.match(/^(\d{4})(\d{2})(\d{2})(?:[ T]?(\d{2}):?(\d{2})(?::?(\d{2}))?)?$/))) {
     [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     rest = m[4] ? `${m[4]}:${m[5]}:${m[6] ?? '00'}` : '';
   } else {
     return { t: NaN, dateOnly: false };
   }
+  if (mo < 1 || mo > 12 || d < 1 || d > daysInMonth(y, mo)) return { t: NaN, dateOnly: false };
   const date = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   if (!rest) return { t: exchangeTimeToUnix(date, REGULAR_OPEN), dateOnly: true, date };
   const tm = rest.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*([AaPp][Mm])?$/);
@@ -107,6 +139,7 @@ export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: num
   let hh = Number(tm[1]);
   const mm = Number(tm[2]);
   const ss = Number(tm[3] ?? 0);
+  if (hh > (tm[4] ? 12 : 23) || mm > 59 || ss > 59) return { t: NaN, dateOnly: false };
   if (tm[4]) {
     const pm = tm[4].toLowerCase() === 'pm';
     if (hh === 12) hh = pm ? 12 : 0;
@@ -121,15 +154,15 @@ export function parseTimestamp(raw: string, naive: 'exchange' | 'utc'): { t: num
  * daily bars at midnight UTC, midnight New York, the open or the close; as instants, midnight UTC
  * falls on the previous evening in New York, which would date the bar a day early and show it before
  * its session has traded. `dates` gives the day per bar (the UTC day of the stamp when absent, which
- * is right for all of those). Bars on weekends and market holidays are dropped and counted.
+ * is right for all of those). Bars on weekends and market holidays are dropped and listed.
  */
-export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, string>): { bars: Bar[]; offDays: number; merged: number } {
+export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, string>): { bars: Bar[]; offDays: string[]; merged: number } {
   const out: Bar[] = [];
-  let offDays = 0;
+  const offDays: string[] = [];
   for (const b of bars) {
     const date = dates?.get(b) ?? new Date(b.time * 1000).toISOString().slice(0, 10);
     if (!isTradingDay(date)) {
-      offDays++;
+      offDays.push(date);
       continue;
     }
     out.push({ ...b, time: exchangeTimeToUnix(date, REGULAR_OPEN) });
@@ -199,24 +232,60 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
   if (iDateTime < 0 && iDate < 0) throw new Error(`No date/time column found. Expected one of: ${ALIASES.datetime.join(', ')}.`);
 
   const warnings: string[] = [];
+  const stampOf = (cols: string[]) => (iDate >= 0 && iClock >= 0 ? `${cols[iDate]} ${cols[iClock]}` : (cols[iDateTime >= 0 ? iDateTime : iDate] ?? ''));
+
+  // A first pass settles how the whole file writes dates and numbers. Dates with the year last are
+  // month/day (US) or day/month (most other places): a first number over 12 settles it, and without
+  // one a dotted date (16.01.2024) is day first. Prices settle the decimal mark.
+  let dayFirst = false;
+  let monthFirstSeen = false;
+  let ambiguous = '';
+  let dotted = false;
+  const marks = new Set<string>();
+  for (let li = 1; li < lines.length; li++) {
+    const cols = splitLine(lines[li], delim);
+    for (const i of [iOpen, iHigh, iLow, iClose]) {
+      const mark = decimalMarkOf(cols[i]);
+      if (mark) marks.add(mark);
+    }
+    const m = stampOf(cols).trim().replace(/^"|"$/g, '').match(YEAR_LAST);
+    if (!m) continue;
+    const [a, b] = [Number(m[1]), Number(m[3])];
+    if (a > 12 && b <= 12) dayFirst = true;
+    else if (b > 12 && a <= 12) monthFirstSeen = true;
+    else if (!ambiguous) ambiguous = m[0].split(/[ T]/)[0];
+    if (m[2] === '.') dotted = true;
+  }
+  if (dayFirst && monthFirstSeen) throw new Error('The dates mix day/month and month/day order (for example 13/01 and 01/13). Export them in one order, ideally YYYY-MM-DD.');
+  if (!dayFirst && !monthFirstSeen && ambiguous) {
+    dayFirst = dotted;
+    warnings.push(`Dates such as ${ambiguous} can be read either way; they were read as ${dayFirst ? 'day/month' : 'month/day (US)'}. Check the date range.`);
+  } else if (dayFirst) warnings.push('Dates were read as day/month/year (13/01/2024 is 13 January).');
+  if (marks.size > 1) throw new Error('The prices mix decimal commas and decimal points (185,64 and 185.64). Export them in one format.');
+  const decimalComma = marks.has(',');
+  if (decimalComma) warnings.push('Numbers use a decimal comma: 185,64 was read as 185.64.');
+
   const bars: Bar[] = [];
   const dates = new Map<Bar, string>();
   let skipped = 0;
+  let unreadableVolume = 0;
   let sawDateOnly = false;
   let sawIntraday = false;
   for (let li = 1; li < lines.length; li++) {
     const cols = splitLine(lines[li], delim);
-    let ts: { t: number; dateOnly: boolean; date?: string };
-    if (iDate >= 0 && iClock >= 0) ts = parseTimestamp(`${cols[iDate]} ${cols[iClock]}`, opts.naiveTimezone);
-    else ts = parseTimestamp(cols[iDateTime >= 0 ? iDateTime : iDate] ?? '', opts.naiveTimezone);
-    const o = parseNumber(cols[iOpen]);
-    const h = parseNumber(cols[iHigh]);
-    const l = parseNumber(cols[iLow]);
-    const c = parseNumber(cols[iClose]);
-    const v = iVol >= 0 ? parseNumber(cols[iVol]) : 0;
+    const ts = parseTimestamp(stampOf(cols), opts.naiveTimezone, dayFirst);
+    const o = parseNumber(cols[iOpen], decimalComma);
+    const h = parseNumber(cols[iHigh], decimalComma);
+    const l = parseNumber(cols[iLow], decimalComma);
+    const c = parseNumber(cols[iClose], decimalComma);
+    let v = iVol >= 0 ? parseVolume(cols[iVol], decimalComma) : 0;
     if (![ts.t, o, h, l, c].every(Number.isFinite) || o <= 0 || c <= 0 || l <= 0) {
       skipped++;
       continue;
+    }
+    if (!Number.isFinite(v) || v < 0) {
+      if ((cols[iVol] ?? '').trim() !== '') unreadableVolume++;
+      v = 0;
     }
     if (h < Math.max(o, c) - 1e-9 || l > Math.min(o, c) + 1e-9) {
       skipped++;
@@ -224,7 +293,7 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     }
     if (ts.dateOnly) sawDateOnly = true;
     else sawIntraday = true;
-    const bar: Bar = { time: ts.t, open: o, high: h, low: l, close: c, volume: Number.isFinite(v) && v > 0 ? v : 0 };
+    const bar: Bar = { time: ts.t, open: o, high: h, low: l, close: c, volume: v };
     bars.push(bar);
     if (ts.date) dates.set(bar, ts.date);
   }
@@ -247,12 +316,19 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     const daily = sessionStampDailyBars(deduped, dates);
     out = daily.bars;
     merged += daily.merged;
-    offDays = daily.offDays;
-    if (daily.offDays) warnings.push(`${daily.offDays} daily bar(s) dated on a weekend or market holiday were skipped.`);
+    offDays = daily.offDays.length;
+    if (daily.offDays.length) {
+      const shown = daily.offDays.slice(0, 5).join(', ');
+      warnings.push(`${daily.offDays.length} daily bar(s) dated on a weekend or market holiday were skipped: ${shown}${daily.offDays.length > 5 ? ` and ${daily.offDays.length - 5} more` : ''}.`);
+    }
     if (!out.length) throw new Error('No daily bars fall on trading days. Check the date column.');
   } else if (opts.timestampsAreBarClose) for (const b of out) b.time -= TF_SECONDS[tf];
   if (merged) warnings.push(`${merged} duplicate timestamps were merged (last row kept).`);
-  if (iVol < 0) warnings.push('No volume column: volume-based features (VWAP, participation limits) will be degraded.');
+  // Without volume a bar's volume is 0: no volume pane, no meaningful VWAP, and no cap on fills.
+  const noVolume = 'the volume pane is empty, VWAP is not meaningful, and fills are not limited by bar volume';
+  if (iVol < 0) warnings.push(`No volume column: ${noVolume}.`);
+  else if (out.every((b) => b.volume === 0)) warnings.push(`Every volume is 0 or unreadable: ${noVolume}.`);
+  else if (unreadableVolume) warnings.push(`${unreadableVolume} row(s) have an unreadable volume and were kept with volume 0.`);
   if (skipped) warnings.push(`${skipped} invalid row(s) skipped.`);
   return {
     bars: out,
