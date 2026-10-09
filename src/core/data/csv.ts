@@ -3,7 +3,7 @@
  * Accepts common column names and time formats, validates every row, and reports what it skipped.
  */
 import type { Bar, Timeframe } from '../types';
-import { REGULAR_OPEN, exchangeDate, exchangeTimeToUnix, isTradingDay } from '../time';
+import { REGULAR_OPEN, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, isTradingDay, regularCloseMinute } from '../time';
 
 export interface CsvParseOptions {
   /** How to read timestamps without an explicit offset. Default: exchange time (America/New_York). */
@@ -31,7 +31,7 @@ const ALIASES: Record<string, string[]> = {
   open: ['open', 'o', 'opening price'],
   high: ['high', 'h'],
   low: ['low', 'l'],
-  close: ['close', 'c', 'last', 'closing price', 'price'],
+  close: ['close', 'c', 'last', 'close/last', 'closing price', 'price'],
   volume: ['volume', 'vol', 'vol.', 'v', 'qty'],
 };
 
@@ -197,36 +197,61 @@ export function sessionStampDailyBars(bars: Bar[], dates?: ReadonlyMap<Bar, stri
  * vendors often stamp the first hourly bar 09:30 and the next 10:00. A size the replay does not
  * support (3-minute or 2-hour bars) is an error rather than being rounded to a nearby one.
  */
+const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars.';
+
+/**
+ * The bar size of a file, from the spacing of its bars. Intraday sizes come from the gaps within a
+ * session, leaving out the gap into each day's second bar (vendors whose first hourly bar is the
+ * half hour from 09:30) and gaps into a bar that starts a part of the session, at the 09:30 open or at
+ * the close (hourly bars on the hour before and after a session that starts at 09:30). The size is
+ * the largest whole-minute step that nearly every such gap is a multiple of: minutes with no trades
+ * leave a thinly traded 1-minute file at 1 minute, and 3 or 10-minute bars are refused rather than
+ * read as 1 or 5-minute bars, which would show each bar before it had finished.
+ */
 function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
-  if (dateOnly) return '1D';
   const all: number[] = [];
-  const later: number[] = [];
+  const inner: number[] = [];
   for (let i = 1; i < bars.length && all.length < 20_000; i++) {
     const d = bars[i].time - bars[i - 1].time;
-    if (!(d > 0 && d < 6 * 3600)) continue;
+    if (dateOnly || !(d > 0 && d < 6 * 3600)) continue;
     all.push(d);
-    if (i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) later.push(d);
+    const date = exchangeDate(bars[i].time);
+    const m = exchangeMinuteOfDay(bars[i].time);
+    const startsPart = m === REGULAR_OPEN || m === regularCloseMinute(date);
+    if (!startsPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
-  if (!all.length) return '1D';
-  const gaps = later.length >= Math.max(3, all.length / 4) ? later : all;
-  const table: [number, Timeframe][] = [
-    [14400, '4h'],
-    [3600, '1h'],
-    [1800, '30m'],
-    [900, '15m'],
-    [300, '5m'],
-    [60, '1m'],
-  ];
-  const counts = new Map<number, number>();
-  for (const d of gaps) counts.set(d, (counts.get(d) ?? 0) + 1);
-  const [typical, most] = [...counts].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
-  // The size itself must be a common gap (the commonest for sparse bars), or 3-minute bars would pass as 1-minute ones.
-  for (const [secs, tf] of table) {
-    const n = counts.get(secs) ?? 0;
-    if ((n >= Math.max(2, 0.03 * gaps.length) || n === most) && gaps.filter((d) => d % secs === 0).length >= 0.99 * gaps.length) return tf;
+  if (!all.length) return dailySpacing(bars);
+  const gaps = inner.length ? inner : all;
+  const allowed = Math.floor(gaps.length * 0.01);
+  let step = 0;
+  for (let k = 360; k >= 1 && !step; k--) {
+    const c = k * 60;
+    let misses = 0;
+    for (const d of gaps) if (d % c !== 0 && ++misses > allowed) break;
+    if (misses <= allowed) step = c;
   }
-  const spacing = typical % 3600 === 0 ? `${typical / 3600} hours` : typical % 60 === 0 ? `${typical / 60} minutes` : `${typical} seconds`;
-  throw new Error(`The bars in this file are ${spacing} apart, a bar size the replay does not support. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars.`);
+  const tf = (Object.keys(TF_SECONDS) as Timeframe[]).find((t) => t !== '1D' && TF_SECONDS[t] === step);
+  if (tf) return tf;
+  if (!step) {
+    const counts = new Map<number, number>();
+    for (const d of gaps) counts.set(d, (counts.get(d) ?? 0) + 1);
+    step = [...counts].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0][0];
+  }
+  const spacing = step % 3600 === 0 ? `${step / 3600} hours` : step % 60 === 0 ? `${step / 60} minutes` : `${step} seconds`;
+  throw new Error(`The bars in this file are ${spacing} apart, ${UNSUPPORTED}`);
+}
+
+/**
+ * Daily bars, unless the rows are evenly a week, a month or a quarter apart (weekly, monthly or
+ * quarterly bars). Daily rows with gaps (a sparse or hand-made file) stay daily.
+ */
+function dailySpacing(bars: Bar[]): Timeframe {
+  const days = bars.slice(1).map((b, i) => Math.round((b.time - bars[i].time) / 86400));
+  if (days.length < 2) return '1D';
+  const share = (lo: number, hi: number) => days.filter((d) => d >= lo && d <= hi).length / days.length;
+  const spacing = share(6, 8) >= 0.8 ? 'a week' : share(27, 32) >= 0.8 ? 'a month' : share(88, 93) >= 0.8 ? 'three months' : '';
+  if (spacing) throw new Error(`The rows in this file are ${spacing} apart, ${UNSUPPORTED}`);
+  return '1D';
 }
 
 const TF_SECONDS: Record<Timeframe, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1D': 86400 };

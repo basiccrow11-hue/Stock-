@@ -440,7 +440,7 @@ export class SimBroker {
       const hours = marketSession(now);
       warnings.push(
         hours === 'regular'
-          ? `${symbol} has not traded yet in this regular session: the order works from its first bar (market orders fill at its open).`
+          ? `${symbol} has not traded yet in this regular session: the order works from its first bar, on prices after this moment, never at an earlier close.`
           : !this.eligible(order, 'pre')
             ? 'Market is not in regular hours. The order will work from the next regular session.'
             : hours === 'closed'
@@ -556,14 +556,18 @@ export class SimBroker {
   }
 
   /**
-   * The session `symbol` trades in now: that of its own last bar, or none while the clock is on a day
-   * it has no bar for yet (the new day's first bar, a symbol that opens late, a daily bar that is only
-   * shown at the close). Orders then wait for its next bar rather than fill at the previous day's price.
+   * The session `symbol` trades in now: that of its own last bar, or none while the clock has moved on
+   * to a session it has no bar for yet (a new day before its first bar, a symbol that opens late, a
+   * daily bar that is only shown at the close, the post-market of a symbol without after-hours bars).
+   * Orders then wait for its next bar rather than fill at an earlier session's price. The session is
+   * read just before the clock, so at the very end of a bar's session (16:00 after the 15:59 bar, or a
+   * daily bar's close) the symbol still trades at its close.
    */
   private symbolSession(symbol: string): MarketSession {
     const bar = this.s.lastBar[symbol];
-    if (!bar || exchangeDate(this.s.clock) > exchangeDate(bar.time)) return 'closed';
-    return marketSession(bar.time);
+    if (!bar || exchangeDate(this.s.clock - 1) > exchangeDate(bar.time)) return 'closed';
+    const own = marketSession(bar.time);
+    return this.s.clock > bar.time && marketSession(this.s.clock - 1) !== own ? 'closed' : own;
   }
 
   /**
@@ -654,8 +658,14 @@ export class SimBroker {
       if (o.symbol !== symbol || !isOpen(o)) continue;
       const from = o.activeFrom ?? o.createdAt;
       if (from <= bar.time) continue;
-      // The conservative fill mode fills a market order at the open of a bar that starts after it.
-      const f = o.type === 'market' && this.cfg.marketOrderFill === 'next_bar_open' ? 1 : Math.min(1, (from - bar.time) / barSeconds);
+      // The conservative fill mode fills a market order at the open of a bar that starts after it. That
+      // bar may open the next session (a daily bar, an order in the day's last bar), so a DAY order lives until then.
+      const nextOpen = o.type === 'market' && this.cfg.marketOrderFill === 'next_bar_open';
+      const f = nextOpen ? 1 : Math.min(1, (from - bar.time) / barSeconds);
+      if (nextOpen && o.tif === 'day' && o.sessionDate) {
+        const next = this.orderSessionDate(bar.time + barSeconds);
+        if (next > o.sessionDate) o.sessionDate = next;
+      }
       startsAt.set(o.id, f);
       const k = points.findIndex((q) => q.f >= f);
       if (k > 0 && points[k].f > f) {
@@ -999,7 +1009,8 @@ export class SimBroker {
         initialTarget: o.takeProfit,
         plannedEntry: plannedPrice(o),
         bracketEntry: fill.price,
-        ...(o.takeProfit !== undefined ? { targetPlanned: plannedPrice(o), targetEntry: fill.price } : {}),
+        stopOrder: { id: o.id, qty: 0 },
+        ...(o.takeProfit !== undefined ? { targetPlanned: plannedPrice(o), targetEntry: fill.price, targetOrder: { id: o.id, qty: 0 } } : {}),
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,
@@ -1023,12 +1034,24 @@ export class SimBroker {
         trip.initialStop = o.stopLoss;
         trip.plannedEntry = plannedPrice(o);
         trip.bracketEntry = fill.price;
+        trip.stopOrder = { id: o.id, qty: 0 };
         trip.stopFromAdd = true;
       }
       if (trip.initialTarget === undefined && o.takeProfit !== undefined) {
         trip.initialTarget = o.takeProfit;
         trip.targetPlanned = plannedPrice(o);
         trip.targetEntry = fill.price;
+        trip.targetOrder = { id: o.id, qty: 0 };
+      }
+      // An entry order capped by bar volume fills in parts: the entry its stop or target came with is
+      // the average of all of them, so its own later parts never count as adds past the stop.
+      for (const [track, key] of [
+        [trip.stopOrder, 'bracketEntry'],
+        [trip.targetOrder, 'targetEntry'],
+      ] as const) {
+        if (!track || track.id !== o.id) continue;
+        trip[key] = track.qty > 0 ? (trip[key]! * track.qty + fill.price * fill.quantity) / (track.qty + fill.quantity) : fill.price;
+        track.qty += fill.quantity;
       }
       if (!trip.tag && o.tag) trip.tag = o.tag;
     } else {

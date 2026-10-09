@@ -4,7 +4,7 @@ import { assessRisk, positionSizeForRisk } from '../risk/risk';
 import { reviewTrade, DEFAULT_TRADING_RULES } from '../learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeContext } from '../challenges/challenges';
 import { SimBroker } from '../broker/SimBroker';
-import { ZERO_COST_CONFIG } from '../broker/config';
+import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG } from '../broker/config';
 import type { RoundTrip } from '../types';
 import { bar, et } from './helpers';
 
@@ -616,6 +616,47 @@ describe('learning review', () => {
       expect(text).toContain('Entry filled past your stop: Your entry order at 110.00 filled at 108.93, already past your stop at 109.50: price was past both by the time the order could fill.');
       expect(text).not.toMatch(/gapped|next open|bar's open/);
     });
+  });
+
+  it('treats one entry order filled in parts by the volume cap as one entry, not as adds past the stop', () => {
+    const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const t0 = et('2025-01-15', '10:00');
+    const bars = [
+      bar(t0, 100, 100, 100, 100, 4000),
+      bar(t0 + 60, 100.1, 100.1, 99.4, 99.45, 4000), // 1000 of the 2000 fill at the limit (25% of the volume)
+      bar(t0 + 120, 99, 99.1, 98.9, 99, 4000), // the rest of the same order fills at an open past the stop
+      bar(t0 + 180, 99, 99.1, 98.9, 99, 40000),
+    ];
+    b.onBar('T', bars[0]);
+    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day' }).ok).toBe(true);
+    for (const x of bars.slice(1)) b.onBar('T', x);
+    const st = b.state;
+    const t = st.roundTrips[0];
+    expect(t.closed).toBe(true);
+    expect(t.bracketEntry).toBeCloseTo(t.avgEntry, 9);
+    const r = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    const titles = r.findings.map((f) => f.title);
+    expect(titles).not.toContain('Added past your stop');
+    expect(r.findings.find((f) => f.title === 'Entry filled past your stop')!.detail).toMatch(/^Your entry order at 99\.90 filled in 2 parts, each capped at a share of a bar's volume/);
+    expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
+  });
+
+  it('counts a loss on a position carried from an earlier day toward the daily loss rule', () => {
+    const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const bars = [bar(et('2025-01-14', '15:58'), 100, 100, 100, 100), bar(et('2025-01-14', '15:59'), 100, 100, 100, 100)];
+    b.onBar('T', bars[0]);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 1000, stopLoss: 94, takeProfit: 110, tif: 'gtc' });
+    b.onBar('T', bars[1]);
+    // It opens 4% of the account lower the next morning and is closed; then a new trade the same day.
+    const d2 = [bar(et('2025-01-15', '09:30'), 96, 96, 96, 96), bar(et('2025-01-15', '09:31'), 96, 96, 96, 96)];
+    b.onBar('T', d2[0]);
+    b.closePosition('T');
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 95, takeProfit: 99 });
+    b.onBar('T', d2[1]);
+    b.closePosition('T');
+    const st = b.state;
+    const r = reviewTrade({ trip: st.roundTrips[1], fills: st.fills, orders: st.orders, revealedBars: [...bars, ...d2], timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    expect(r.rules.find((c) => c.rule.startsWith('Stop trading after'))).toEqual({ rule: 'Stop trading after −3% on the day', passed: false, detail: 'Down 4.00% on the day at entry' });
   });
 
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {

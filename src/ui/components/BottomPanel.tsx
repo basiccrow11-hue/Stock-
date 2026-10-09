@@ -5,7 +5,7 @@ import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
 import { EVENT_LABELS } from '../../core/sim/SimMarket';
 import { useJournal } from '../state/journalStore';
-import { EmptyState, rowAction } from './common';
+import { EmptyState, modalOpen, rowAction } from './common';
 import { dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { formatDuration, formatExchangeTime } from '../../core/time';
 import { toast } from '../state/toasts';
@@ -235,7 +235,12 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       aria-label={`New ${what}`}
       style={{ width: 90 }}
       onChange={(e) => setVal(e.target.value)}
-      onBlur={commit}
+      onBlur={(e) => {
+        // A dialog that opened by itself (a trade review, a milestone) took focus mid-edit: keep the box
+        // and what was typed, unsaved. The dialog gives focus back to it when it closes.
+        if (modalOpen() || (e.relatedTarget as HTMLElement | null)?.closest('[role="dialog"]')) return;
+        commit();
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {
           // Without this the same Enter would also press the price button that takes focus back.

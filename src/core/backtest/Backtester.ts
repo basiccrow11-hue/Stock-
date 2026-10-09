@@ -18,7 +18,7 @@ import { SimBroker } from '../broker/SimBroker';
 import { aggregateBars, bucketFor } from '../data/aggregate';
 import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
-import { exchangeDate, exchangeMinuteOfDay, marketSession, regularCloseMinute } from '../time';
+import { exchangeDate, exchangeTimeToUnix, marketSession, regularCloseMinute } from '../time';
 import { barEndTime } from '../replay/ReplayEngine';
 import { computeSeries, evalCondition, seriesKey, type StrategyDefinition } from './strategy';
 
@@ -66,6 +66,7 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   const base = strategy.regularHoursOnly ? p.bars.filter((b) => marketSession(b.time) === 'regular') : [...p.bars];
   if (base.length === 0) throw new Error('No bars in the selected range.');
   if (strategy.rules.length === 0) throw new Error('Add at least one rule.');
+  if (strategy.exitAtSessionEnd && p.baseTimeframe === '1D') warnings.push('Flatten before the close does not apply to daily bars: each bar is a whole session, so positions are held overnight.');
   if (strategy.sizing.mode === 'risk_percent' && !strategy.stopLossPct) {
     throw new Error('Risk-based sizing needs a stop loss %.');
   }
@@ -150,10 +151,12 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     }
     currentKey = key;
 
-    // Day-trading flatten in the final minute of the regular session.
-    if (strategy.exitAtSessionEnd && marketSession(b.time) === 'regular') {
+    // Day-trading flatten in the regular session's last bar: the one that ends at the close (the final
+    // minute on 1-minute data, 15:55 on 5-minute data). Decided by the clock alone, never by whether the
+    // data has more bars, so it cannot peek ahead. Daily bars are whole sessions and are left out.
+    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && marketSession(b.time) === 'regular') {
       const date = exchangeDate(b.time);
-      if (exchangeMinuteOfDay(b.time) >= regularCloseMinute(date) - 1) {
+      if (barEndTime(b, p.baseTimeframe) >= exchangeTimeToUnix(date, regularCloseMinute(date))) {
         pendingEntry = null;
         const q = broker.position(symbol).quantity;
         for (const o of broker.workingOrders(symbol)) broker.cancel(o.id, 'Session end');

@@ -10,7 +10,7 @@ import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../typ
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
-import { exchangeDate, exchangeMinuteOfDay, REGULAR_OPEN } from '../time';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, REGULAR_OPEN } from '../time';
 
 export interface TradingRules {
   maxRiskPctPerTrade: number;
@@ -227,6 +227,15 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const market = order?.type === 'market';
     const name = order && order !== entryOrders[0] ? (market ? 'market add' : 'add') : market ? 'market order' : 'entry order';
     const at = planned !== undefined ? ` at ${planned.toFixed(2)}` : '';
+    // Capped by bar volume, the order filled in parts and only the later ones went past the level.
+    const parts = tripFills.filter((f) => f && order && f.orderId === order.id).length;
+    const sign = long ? 1 : -1;
+    if (fill && parts > 1 && (what === 'target' ? (fill.price - level) * sign : (level - fill.price) * sign) < 0) {
+      return {
+        gap: false,
+        text: `Your ${name}${at} filled in ${parts} parts, each capped at a share of a bar's volume (Data & Settings), and the later parts filled past your ${what} at ${level.toFixed(2)}, for an average of ${price.toFixed(2)}.`,
+      };
+    }
     if (!fill?.at || fill.at === 'open') {
       return {
         gap: true,
@@ -236,7 +245,6 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       };
     }
     // The market price before this fill's spread and slippage: if that was short of the level, the costs carried it past.
-    const sign = long ? 1 : -1;
     const before = price - (sign * (fill.slippage + fill.spreadCost)) / fill.quantity;
     if ((what === 'target' ? (before - level) * sign : (level - before) * sign) < 0) {
       return { gap: false, text: `Your ${name}${at} filled at ${price.toFixed(2)}, past your ${what} at ${level.toFixed(2)}: the spread and slippage of the fill alone carried it past a ${what} that close.` };
@@ -540,10 +548,12 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
     out.push({ rule: `No entries in the first ${rules.noTradesFirstMinutes} min`, passed: mins >= rules.noTradesFirstMinutes || mins < 0, detail: `Entered ${mins} min after the open` });
   }
   if (rules.maxDailyLossPct > 0) {
-    const lossBefore = sameDay.filter((t) => t.closed && t.exitTime! <= trip.entryTime).reduce((a, t) => a + t.pnl, 0);
-    const eq = equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
-    const pct = eq > 0 ? (-lossBefore / eq) * 100 : 0;
-    out.push({ rule: `Stop trading after −${rules.maxDailyLossPct}% on the day`, passed: pct < rules.maxDailyLossPct, detail: lossBefore < 0 ? `Down ${pct.toFixed(2)}% on closed trades before entry` : 'Not down on the day at entry' });
+    // The day's P/L at entry as the account's Day P/L and Strict Mode count it: from the equity the day
+    // started with, so a loss on a position carried from an earlier day counts too.
+    const dayStart = equityAt(input.equityCurve, exchangeTimeToUnix(day, 0), input.startingBalance);
+    const dayPnl = equityAt(input.equityCurve, trip.entryTime, input.startingBalance) - dayStart;
+    const pct = dayStart > 0 ? (-dayPnl / dayStart) * 100 : 0;
+    out.push({ rule: `Stop trading after −${rules.maxDailyLossPct}% on the day`, passed: pct < rules.maxDailyLossPct, detail: dayPnl < 0 ? `Down ${pct.toFixed(2)}% on the day at entry` : 'Not down on the day at entry' });
   }
   return out;
 }

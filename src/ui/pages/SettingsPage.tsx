@@ -1,5 +1,5 @@
 /** Data sources, CSV import, API keys, execution assumptions, risk and trading rules. */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegistry';
@@ -69,6 +69,8 @@ function CsvImportCard() {
   const [datasets, setDatasets] = useState<CsvDataset[]>(csvProvider.list());
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [symbol, setSymbol] = useState('');
+  // The ticker last filled in from a file name: replaced when another file is chosen, unless it was typed over.
+  const guessed = useRef('');
   const [tz, setTz] = useState<'exchange' | 'utc'>('exchange');
   const [closeStamped, setCloseStamped] = useState(false);
   const [parsed, setParsed] = useState<CsvParseResult | null>(null);
@@ -105,8 +107,11 @@ function CsvImportCard() {
     }
     const text = await f.text();
     setFile({ name: f.name, text });
-    const guess = tickerFromFileName(f.name);
-    if (!symbol && guess) setSymbol(guess);
+    const guess = tickerFromFileName(f.name) ?? '';
+    if (!symbol || symbol === guessed.current) {
+      setSymbol(guess);
+      guessed.current = guess;
+    }
   };
 
   const save = async () => {
@@ -127,6 +132,7 @@ function CsvImportCard() {
       setFile(null);
       setParsed(null);
       setSymbol('');
+      guessed.current = '';
       setReplace(false);
       setFileBox((n) => n + 1);
     } catch (e) {

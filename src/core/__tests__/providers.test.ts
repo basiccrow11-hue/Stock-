@@ -104,6 +104,28 @@ describe('CSV import', () => {
     expect(parseCsv(csv([...at('2024-01-16', ['09:30', '13:30']), ...at('2024-01-17', ['09:30', '13:30'])])).baseTimeframe).toBe('4h');
     expect(() => parseCsv(csv(at('2024-01-16', ['09:30', '09:33', '09:36', '09:39'])))).toThrow('The bars in this file are 3 minutes apart, a bar size the replay does not support.');
     expect(() => parseCsv(csv(at('2024-01-16', ['09:30', '11:30', '13:30', '15:30'])))).toThrow('The bars in this file are 2 hours apart');
+    // Very thin: a dozen prints a day, 1 to 59 minutes apart, few of them exactly one minute.
+    const thin = ['09:31', '09:34', '09:38', '10:15', '10:17', '11:02', '11:09', '12:40', '13:13', '14:20', '15:21', '15:58', '15:59'];
+    expect(parseCsv(csv([...at('2024-01-16', thin), ...at('2024-01-17', thin)])).baseTimeframe).toBe('1m');
+    expect(() => parseCsv(csv(at('2024-01-16', ['09:30', '09:40', '09:50', '10:00', '10:10'])))).toThrow('The bars in this file are 10 minutes apart');
+    // Hourly with extended hours on the clock hour around a session that starts at 09:30 (yfinance prepost).
+    const prepost = ['04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00'];
+    expect(parseCsv(csv([...at('2024-01-16', prepost), ...at('2024-01-17', prepost)])).baseTimeframe).toBe('1h');
+    // 4-hour bars split where the sessions meet.
+    const segmented = ['04:00', '08:00', '09:30', '13:30', '16:00'];
+    expect(parseCsv(csv([...at('2024-01-16', segmented), ...at('2024-01-17', segmented)])).baseTimeframe).toBe('4h');
+  });
+
+  it('refuses weekly and monthly files, and keeps sparse daily files daily', () => {
+    const csv = (dates: string[]) => `Date,Open,High,Low,Close\n${dates.map((d) => `${d},10,11,9,10.5`).join('\n')}\n`;
+    expect(() => parseCsv(csv(['2024-01-08', '2024-01-15', '2024-01-22', '2024-01-29', '2024-02-05']))).toThrow('The rows in this file are a week apart, a bar size the replay does not support.');
+    expect(() => parseCsv(csv(['2024-01-02', '2024-02-01', '2024-03-01', '2024-04-01', '2024-05-01']))).toThrow('The rows in this file are a month apart');
+    expect(parseCsv(csv(['2024-01-02', '2024-01-16', '2024-02-21', '2024-02-22', '2024-06-03'])).baseTimeframe).toBe('1D');
+  });
+
+  it('reads the Nasdaq.com historical data export', () => {
+    const r = parseCsv('Date,Close/Last,Volume,Open,High,Low\n01/17/2024,$182.68,47317430,$181.27,$182.93,$180.30\n01/16/2024,$183.63,65603040,$182.16,$184.26,$180.93\n');
+    expect(r.bars.map((b) => b.close)).toEqual([183.63, 182.68]);
   });
 
   it('keeps daily rows on days the NYSE traded in their year, and lists the days it skips', () => {

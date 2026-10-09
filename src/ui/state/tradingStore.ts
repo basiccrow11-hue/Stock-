@@ -6,7 +6,7 @@
  * a small event bus so the chart can update incrementally instead of re-rendering.
  */
 import { create } from 'zustand';
-import type { AccountSnapshot, Bar, DataSourceKind, EquityPoint, Fill, Order, OrderRequest, Position, RoundTrip, Timeframe, UnixSeconds } from '../../core/types';
+import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
 import { ReplaySession, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
@@ -406,12 +406,14 @@ function processClosedTrips(): Promise<void> {
 /** The learning review of `trip` with what the replay has shown so far. */
 function reviewOf(trip: RoundTrip, timeframe: Timeframe, ended: boolean): TradeReview {
   const st = broker()!.state;
+  // Data coarser than the chart (a daily file on a 1m chart): its own bars are the finest candles there are.
+  const base = eng.replay?.engineFor(trip.symbol)?.baseTimeframe;
   return reviewTrade({
     trip,
     fills: st.fills,
     orders: st.orders,
     revealedBars: getBaseBars(trip.symbol),
-    timeframe,
+    timeframe: base && TIMEFRAMES.indexOf(base) > TIMEFRAMES.indexOf(timeframe) ? base : timeframe,
     equityCurve: st.equityCurve,
     startingBalance: st.startingBalance,
     allTrips: st.roundTrips,

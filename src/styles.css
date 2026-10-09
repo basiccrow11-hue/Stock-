@@ -471,12 +471,16 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
    toasts go to the bottom right, narrower, instead of over Play and Pause. */
 @media (max-width: 1180px) and (max-height: 640px), (max-height: 560px) {
   .toasts { left: auto; right: 8px; bottom: 8px; max-width: min(280px, calc(100vw - 16px)); }
+  /* A dialog covers those controls and keeps its buttons at the bottom right, so toasts go bottom left. */
+  body:has(.modal-backdrop) .toasts { left: 8px; right: auto; }
 }
 /* Narrow portrait phones: the replay controls sit low in the view under the chart, so toasts go to the top.
    While a dialog is open its title and Close button are at the top instead, so toasts go back to the bottom. */
 @media (max-width: 600px) and (orientation: portrait) {
   .toasts { top: 8px; bottom: auto; left: 8px; right: 8px; max-width: none; }
   body:has(.modal-backdrop) .toasts { top: auto; bottom: 8px; }
+  /* Room under a dialog scrolled to its end, so a two-line toast clears its buttons. */
+  .modal-backdrop { padding-bottom: 76px; }
 }
 @media (max-width: 820px) {
   .two-col { grid-template-columns: minmax(0, 1fr); }

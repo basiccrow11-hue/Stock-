@@ -19,7 +19,7 @@ import { useTrading } from '../state/tradingStore';
 import { useJournal } from '../state/journalStore';
 import { reviewedCount } from '../../core/journal';
 import { Modal, modalOpen, useModalCount } from './common';
-import { toast } from '../state/toasts';
+import { toast, useToasts } from '../state/toasts';
 import type { View } from './TopBar';
 
 const FREEZE_RULE = `Every ${FREEZE_EVERY}th day you meet your goal within a running streak earns a streak freeze (you can hold ${MAX_FREEZES}). Freezes cover missed days automatically, but only when you have enough for the whole gap.`;
@@ -320,6 +320,7 @@ export function StreakCelebration({ view }: { view: View }) {
   }, [c, held, dialogs, recheck]);
   // Held back by playback or a trade review: say so at once, so reaching the goal mid-session is not silent.
   const toldRef = useRef<string | null>(null);
+  const noteRef = useRef(0);
   useEffect(() => {
     if (!c) {
       toldRef.current = null;
@@ -330,9 +331,16 @@ export function StreakCelebration({ view }: { view: View }) {
       toldRef.current = key;
       const what = c.streak === c.milestone ? 'a milestone' : `past the ${c.milestone}-day milestone`;
       const when = reviewsPending ? 'shows after your trade review' : 'waits until you pause';
-      toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration ${when}.`, 6000);
+      noteRef.current = toast('success', `Daily goal reached: ${c.streak}-day streak, ${what}. The celebration ${when}.`, 6000);
     }
   }, [c, held, showing, reviewsPending]);
+  // Once the celebration is up, the note that it was waiting is out of date (and could sit over its button).
+  useEffect(() => {
+    if (showing && noteRef.current) {
+      useToasts.getState().dismiss(noteRef.current);
+      noteRef.current = 0;
+    }
+  }, [showing]);
   if (!c || !showing) return null;
   return (
     <Modal

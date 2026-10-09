@@ -5,6 +5,7 @@ import { DemoDataProvider } from '../data/demoProvider';
 import { ZERO_COST_CONFIG, DEFAULT_EXECUTION_CONFIG } from '../broker/config';
 import { bar, et } from './helpers';
 import type { Bar } from '../types';
+import { aggregateBars } from '../data/aggregate';
 import { exchangeDate, marketSession } from '../time';
 
 const provider = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
@@ -81,6 +82,28 @@ describe('backtester: mechanics', () => {
       expect(exchangeDate(t.entryTime)).toBe(exchangeDate(t.exitTime!));
       expect(marketSession(t.exitTime!)).toBe('regular');
     }
+  });
+
+  it('flattens before the close on 5-minute and hourly data too, and says it does not apply to daily bars', () => {
+    // Always long: buys whenever flat, so only the flatten can close a trade.
+    const strategy: StrategyDefinition = {
+      name: 'always long',
+      rules: [{ id: 'x', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'value', value: 0 } }] }],
+      sizing: { mode: 'shares', shares: 10 },
+      exitAtSessionEnd: true,
+      regularHoursOnly: true,
+    };
+    const minute = demoBars('AAPL', '2025-01-13', '2025-01-17').filter((b) => marketSession(b.time) === 'regular');
+    for (const tf of ['5m', '15m', '30m', '1h'] as const) {
+      const bars = aggregateBars(minute, tf);
+      const r = runBacktest(params(bars, strategy, { baseTimeframe: tf, timeframe: tf, config: ZERO_COST_CONFIG }));
+      const closed = r.trades.filter((t) => t.closed);
+      expect(closed.length, tf).toBeGreaterThanOrEqual(3);
+      for (const t of closed) expect(exchangeDate(t.exitTime!), tf).toBe(exchangeDate(t.entryTime));
+    }
+    const daily = aggregateBars(minute, '1D');
+    const d = runBacktest(params(daily, strategy, { baseTimeframe: '1D', timeframe: '1D', config: ZERO_COST_CONFIG }));
+    expect(d.warnings).toContain('Flatten before the close does not apply to daily bars: each bar is a whole session, so positions are held overnight.');
   });
 
   it('risk-percent sizing risks about the requested amount at the stop', () => {

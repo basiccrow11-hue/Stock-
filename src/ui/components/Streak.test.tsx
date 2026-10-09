@@ -34,7 +34,7 @@ async function mount({ keepModules = false } = {}) {
   };
   seen(useToasts.getState());
   useToasts.subscribe(seen);
-  return { streak, useTrading, toasts, home, unmount: () => act(() => root.unmount()) };
+  return { streak, useTrading, useToasts, toasts, home, unmount: () => act(() => root.unmount()) };
 }
 
 const dialog = () => document.querySelector('[role=dialog]');
@@ -43,7 +43,7 @@ describe('milestone celebration', () => {
   it('announces a held celebration each time a milestone is reached, in a tab left open for days', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'performance'] });
     vi.setSystemTime(new Date(2026, 9, 1, 10, 0, 0));
-    const { streak, useTrading, toasts, unmount } = await mount();
+    const { streak, useTrading, useToasts, toasts, unmount } = await mount();
     const stop = streak.startPracticeTracker(() => true, () => useTrading.getState().playing);
     const practiseDay = (d: number) => {
       act(() => {
@@ -58,6 +58,8 @@ describe('milestone celebration', () => {
         });
       act(() => useTrading.setState({ playing: false }));
       const shown = dialog()?.textContent ?? null;
+      // Once the celebration is up, the note that it was waiting is gone.
+      if (shown) expect(useToasts.getState().toasts.map((t) => t.text).filter((t) => /celebration waits/.test(t))).toEqual([]);
       if (shown) act(() => streak.dismissCelebration());
       return shown;
     };
