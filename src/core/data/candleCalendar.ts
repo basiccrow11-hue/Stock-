@@ -9,7 +9,7 @@
 import type { Bar, Timeframe, UnixSeconds } from '../types';
 import { TIMEFRAME_MINUTES } from '../types';
 import {
-  AFTERHOURS_CLOSE,
+  afterHoursCloseMinute,
   PREMARKET_OPEN,
   REGULAR_OPEN,
   addDays,
@@ -135,7 +135,7 @@ function sessionCandles(candles: readonly Bar[], timeframe: Timeframe) {
   const day0 = refDay ?? (n ? exchangeDate(candles[0].time) : NORMAL_DAY);
   const extended = n > 0 && (refDay ? openMin < REGULAR_OPEN || lastMin >= regularCloseMinute(refDay) : exchangeMinuteOfDay(candles[0].time) < REGULAR_OPEN || exchangeMinuteOfDay(candles[n - 1].time) >= regularCloseMinute(day0));
   const bucketAt = (date: string, min: number) => bucketFor(exchangeTimeToUnix(date, min), timeframe).start;
-  const sessionEnd = (date: string) => (extended ? Math.min(AFTERHOURS_CLOSE, regularCloseMinute(date) + 240) : regularCloseMinute(date));
+  const sessionEnd = (date: string) => (extended ? afterHoursCloseMinute(date) : regularCloseMinute(date));
   if (!refDay) openMin = exchangeMinuteOfDay(bucketAt(day0, extended ? PREMARKET_OPEN : REGULAR_OPEN));
   const standard = !refDay || exchangeMinuteOfDay(bucketAt(refDay, sessionEnd(refDay) - 1)) === lastMin;
   const ref = refDay;

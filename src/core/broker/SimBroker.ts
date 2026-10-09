@@ -27,8 +27,8 @@ import type {
 import { actionSide } from '../types';
 import type { ExecutionConfig } from './config';
 import { DEFAULT_EXECUTION_CONFIG, commissionFor, halfSpread } from './config';
-import { assessRisk, strictRiskViolation } from '../risk/risk';
-import { roundToTick } from '../util/math';
+import { assessRisk, strictRiskViolation, type Exposure } from '../risk/risk';
+import { formatTick, roundToTick } from '../util/math';
 import {
   exchangeDate,
   exchangeMinuteOfDay,
@@ -325,12 +325,99 @@ export class SimBroker {
   availableBuyingPower(): number {
     const acct = this.account();
     let reserved = 0;
-    for (const o of this.workingOrders()) {
-      if (!isOpeningAction(o.action)) continue;
-      const ref = o.limitPrice ?? o.stopPrice ?? this.s.lastPrice[o.symbol] ?? 0;
-      reserved += (o.quantity - o.filledQty) * ref;
-    }
+    for (const o of this.workingOrders()) if (isOpeningAction(o.action)) reserved += this.reservation(o);
     return Math.max(0, acct.buyingPower - reserved);
+  }
+
+  /** The buying power a working opening order holds back: its unfilled shares at its price. */
+  private reservation(o: Order): number {
+    return (o.quantity - o.filledQty) * (o.limitPrice ?? o.stopPrice ?? this.s.lastPrice[o.symbol] ?? 0);
+  }
+
+  /**
+   * The most shares of an opening order the buying-power check accepts now: what is available at the
+   * price it checks (a limit's own price, otherwise where the order is expected to fill).
+   */
+  affordableQuantity(o: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>, now?: UnixSeconds): number {
+    const symbol = o.symbol.toUpperCase();
+    if (this.s.lastPrice[symbol] === undefined) return 0;
+    const px = o.type === 'limit' ? o.limitPrice : this.expectedEntry({ ...o, symbol, extendedHours: !!o.extendedHours }, Math.max(now ?? this.s.clock, this.s.clock)).price;
+    return px && px > 0 ? Math.max(0, Math.floor((this.availableBuyingPower() + 0.005) / px)) : 0;
+  }
+
+  /**
+   * The shares a new `action` order in `symbol` would join (see Exposure): those held in its direction
+   * and those in its other working entries (all but `excludeId`). `stopAt` prices one exit stop as if
+   * it were moved there.
+   */
+  exposure(symbol: string, action: 'buy' | 'short', excludeId?: string, stopAt?: { id: string; price: number }): Exposure {
+    symbol = symbol.toUpperCase();
+    const dir = action === 'buy' ? 1 : -1;
+    const last = this.s.lastPrice[symbol] ?? 0;
+    const pos = this.position(symbol);
+    const held = pos.quantity * dir > 0 ? Math.abs(pos.quantity) : 0;
+    let shares = held;
+    let value = held * last;
+    let risk = 0;
+    let unprotected = 0;
+    if (held) {
+      const exit = action === 'buy' ? 'sell' : 'cover';
+      let covered = 0;
+      for (const o of this.workingOrders(symbol)) {
+        if (o.action !== exit || (o.type !== 'stop' && o.type !== 'stop_limit')) continue;
+        const n = Math.min(o.quantity - o.filledQty, held - covered);
+        if (n <= 0) continue;
+        covered += n;
+        const stop = stopAt?.id === o.id ? stopAt.price : o.stopPrice!;
+        risk += n * Math.max(0, (pos.avgPrice - stop) * dir);
+      }
+      unprotected += held - covered;
+    }
+    for (const o of this.workingOrders(symbol)) {
+      if (o.action !== action || o.id === excludeId) continue;
+      const n = o.quantity - o.filledQty;
+      const px = o.limitPrice ?? o.stopPrice ?? last;
+      shares += n;
+      value += n * px;
+      if (o.stopLoss !== undefined) risk += n * Math.max(0, (px - o.stopLoss) * dir);
+      else unprotected += n;
+    }
+    const equity = this.account().equity;
+    return { symbol, shares, valuePct: equity > 0 ? (value / equity) * 100 : 0, riskPct: equity > 0 ? (risk / equity) * 100 : 0, unprotected };
+  }
+
+  /**
+   * The checks an opening order must pass when it is placed or changed: its stop loss and target on the
+   * right side of where it is expected to fill, Strict Mode's limits for the whole trade it joins, and
+   * buying power. `own` is the working order being changed: it is left out of what the trade already
+   * holds, and the buying power it holds back is available to it. `o.quantity` is its unfilled shares.
+   */
+  private openingCheck(
+    o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'stopLoss' | 'takeProfit' | 'extendedHours'> & { quantity: number },
+    own?: Order,
+  ): { error?: string; warnings: string[]; quote: number } {
+    // Orders are checked against the price they would actually get: buys pay the ask, sells hit the bid.
+    const expected = this.expectedEntry(o);
+    const refPrice = expected.price;
+    const fail = (error: string) => ({ error, warnings: [], quote: expected.quote });
+    const acct = this.account();
+    const assess = (px: number) =>
+      assessRisk({ action: o.action, quantity: o.quantity, entryPrice: px, stopLoss: o.stopLoss, takeProfit: o.takeProfit, equity: acct.equity, commissionEstimate: commissionFor(this.cfg, o.quantity, px) });
+    const risk = assess(refPrice);
+    if (risk.errors.length) return fail(expected.atOnce ? throughTheMarket(risk.errors[0], o.type, refPrice, this.cfg.marketOrderFill) : risk.errors[0]);
+    // The risk itself is measured at the price the order is expected to fill at with its costs, as
+    // the ticket sizes it and the review judges it.
+    const fillAt = this.estimateFill(o) ?? refPrice;
+    const costed = fillAt === refPrice ? risk : assess(fillAt);
+    const strict = this.cfg.strictRisk;
+    const existing = strict.enabled ? this.exposure(o.symbol, o.action === 'short' ? 'short' : 'buy', own?.id) : undefined;
+    const violation = strictRiskViolation(strict, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity, existing });
+    if (violation) return fail(violation);
+    // A limit may still fill anywhere up to its price.
+    const needed = o.quantity * (o.type === 'limit' ? o.limitPrice! : refPrice);
+    const avail = this.availableBuyingPower() + (own ? this.reservation(own) : 0);
+    if (needed > avail + 0.005) return fail(`Insufficient buying power: need $${needed.toFixed(2)}, have $${avail.toFixed(2)}.`);
+    return { warnings: costed.warnings, quote: expected.quote };
   }
 
   // ---------------------------------------------------------------- orders
@@ -388,33 +475,12 @@ export class SimBroker {
     }
 
     const opening = isOpeningAction(req.action);
-    // Orders are checked against the price they would actually get: buys pay the ask, sells hit the bid.
-    const expected = this.expectedEntry({ ...req, symbol, extendedHours: !!req.extendedHours });
-    const refPrice = expected.price;
-
+    let quote = this.expectedEntry({ ...req, symbol, extendedHours: !!req.extendedHours }).quote;
     if (opening) {
-      const risk = assessRisk({
-        action: req.action,
-        quantity: qty,
-        entryPrice: refPrice,
-        stopLoss: req.stopLoss,
-        takeProfit: req.takeProfit,
-        equity: this.account().equity,
-        commissionEstimate: commissionFor(this.cfg, qty, refPrice),
-      });
-      if (risk.errors.length) return reject(expected.atOnce ? throughTheMarket(risk.errors[0], req.type, refPrice) : risk.errors[0]);
-      // The risk itself is measured at the price the order is expected to fill at with its costs, as
-      // the ticket sizes it and the review judges it.
-      const fillAt = this.estimateFill({ ...req, symbol, quantity: qty }) ?? refPrice;
-      const costed = fillAt === refPrice ? risk : assessRisk({ action: req.action, quantity: qty, entryPrice: fillAt, stopLoss: req.stopLoss, takeProfit: req.takeProfit, equity: this.account().equity, commissionEstimate: commissionFor(this.cfg, qty, fillAt) });
-      const acct = this.account();
-      const violation = strictRiskViolation(this.cfg.strictRisk, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity });
-      if (violation) return reject(violation);
-      warnings.push(...costed.warnings);
-      // A limit may still fill anywhere up to its price.
-      const needed = qty * (req.type === 'limit' ? req.limitPrice! : refPrice);
-      const avail = this.availableBuyingPower();
-      if (needed > avail + 0.005) return reject(`Insufficient buying power: need $${needed.toFixed(2)}, have $${avail.toFixed(2)}.`);
+      const check = this.openingCheck({ ...req, symbol, quantity: qty, extendedHours: !!req.extendedHours });
+      if (check.error) return reject(check.error);
+      warnings.push(...check.warnings);
+      quote = check.quote;
     } else if (req.stopLoss || req.takeProfit) {
       return reject('Stop loss / take profit brackets can only be attached to opening orders (Buy or Short).');
     }
@@ -441,7 +507,7 @@ export class SimBroker {
       triggered: false,
       sessionDate: this.orderSessionDate(now),
       activeFrom: now,
-      ...(req.type === 'market' ? { quotedPrice: expected.quote } : {}),
+      ...(req.type === 'market' ? { quotedPrice: quote } : {}),
     };
     if (!this.eligible(order, this.symbolSession(symbol))) {
       order.status = 'pending';
@@ -496,11 +562,20 @@ export class SimBroker {
     if (changes.stopPrice !== undefined && o.triggered) return { ok: false, error: 'The stop has already triggered, so its price no longer applies.' };
     const limitPrice = changes.limitPrice !== undefined ? roundToTick(changes.limitPrice) : o.limitPrice;
     const stopPrice = changes.stopPrice !== undefined ? roundToTick(changes.stopPrice) : o.stopPrice;
-    // An entry with a stop loss or target must keep them on the right side of where it now fills.
-    if (isOpeningAction(o.action) && (o.stopLoss !== undefined || o.takeProfit !== undefined)) {
-      const expected = this.expectedEntry({ ...o, limitPrice, stopPrice });
-      const { errors } = assessRisk({ action: o.action, quantity: o.quantity, entryPrice: expected.price, stopLoss: o.stopLoss, takeProfit: o.takeProfit, equity: this.account().equity });
-      if (errors.length) return { ok: false, error: expected.atOnce ? throughTheMarket(errors[0], o.type, expected.price) : errors[0] };
+    // A changed entry is checked as if it were placed now: its stop loss and target against where it
+    // now fills, Strict Mode and buying power.
+    if (isOpeningAction(o.action)) {
+      const { error } = this.openingCheck({ ...o, limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty }, o);
+      if (error) return { ok: false, error };
+    } else if (stopPrice !== undefined && stopPrice !== o.stopPrice && this.cfg.strictRisk.enabled) {
+      // Under Strict Mode an exit stop cannot be moved away to put more than the limit at risk.
+      const entry = o.action === 'sell' ? 'buy' : 'short';
+      const before = this.exposure(o.symbol, entry).riskPct;
+      const after = this.exposure(o.symbol, entry, undefined, { id: o.id, price: stopPrice }).riskPct;
+      const limit = this.cfg.strictRisk.maxRiskPctPerTrade;
+      if (after > before + 1e-9 && after > limit + 1e-9) {
+        return { ok: false, error: `Strict risk: with this stop at ${formatTick(stopPrice)}, the trade risks ${after.toFixed(2)}% (limit ${limit}%).` };
+      }
     }
     o.limitPrice = limitPrice;
     o.stopPrice = stopPrice;
@@ -599,7 +674,9 @@ export class SimBroker {
     const quote = last + (buy ? hs : -hs);
     if (o.type === 'market') return { price: quote, quote, atOnce: false };
     const own = o.type === 'stop' ? o.stopPrice! : o.limitPrice!;
-    if ((o.type === 'stop' || o.type === 'limit') && this.cfg.marketOrderFill === 'last_price' && this.eligible(o, session) && this.triggerLevel(o as Order, last, last, session !== 'regular') !== null) {
+    // Already through the market, it fills near the quote: at once, or at the next bar's open (about
+    // the same price) in next-bar-open mode.
+    if ((o.type === 'stop' || o.type === 'limit') && this.eligible(o, session) && this.triggerLevel(o as Order, last, last, session !== 'regular') !== null) {
       const atQuote = buy ? ceilTick(quote) : floorTick(quote);
       return { price: o.type === 'stop' ? atQuote : buy ? Math.min(own, atQuote) : Math.max(own, atQuote), quote, atOnce: true };
     }
@@ -1201,8 +1278,8 @@ export function isOpeningAction(a: OrderAction): boolean {
 }
 
 /** A bracket error for a stop or limit already through the market, which fills at once at the quote rather than at its own price. */
-function throughTheMarket(error: string, type: OrderType, price: number): string {
-  return `${error.replace(/\.$/, '')}: this ${type === 'stop' ? 'stop' : 'limit'} is already through the market, so it would fill at once at about ${price.toFixed(2)}.`;
+function throughTheMarket(error: string, type: OrderType, price: number, fill: ExecutionConfig['marketOrderFill']): string {
+  return `${error.replace(/\.$/, '')}: this ${type === 'stop' ? 'stop' : 'limit'} is already through the market, so it would fill ${fill === 'last_price' ? 'at once' : "at the next bar's open"} at about ${formatTick(price)}.`;
 }
 
 /** The price an entry order was placed at: its limit, its stop, or for a market order the price it was checked against. */

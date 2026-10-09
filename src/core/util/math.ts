@@ -8,6 +8,11 @@ export function roundToTick(price: number): number {
   return price >= 1 ? round(price, 2) : round(price, 4);
 }
 
+/** A price written to its tick: 2 decimals at/above $1, 4 below. */
+export function formatTick(price: number): string {
+  return price >= 1 ? price.toFixed(2) : price.toFixed(4);
+}
+
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }

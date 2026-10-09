@@ -116,22 +116,47 @@ export function positionSizeForRisk(equity: number, riskPct: number, entry: numb
   return Math.floor((equity * riskPct) / 100 / perShare);
 }
 
-/** Returns a reason the order must be blocked under strict risk controls, or null. */
+/**
+ * What a new opening order joins: the shares of the same symbol already held in its direction and
+ * those in its other working entries, as % of equity, with their risk to their stops. A held share's
+ * risk runs from the position's average price to the stop protecting it, an entry's from its price to
+ * its stop loss; a stop past that price counts as no risk. Shares with no stop have no measurable risk.
+ */
+export interface Exposure {
+  symbol: string;
+  shares: number;
+  valuePct: number;
+  riskPct: number;
+  unprotected: number;
+}
+
+/**
+ * Returns a reason the order must be blocked under strict risk controls, or null. With `existing`, the
+ * risk and position limits apply to the whole trade the order would join, not to the order alone, so
+ * adds and several working entries cannot build past them.
+ */
 export function strictRiskViolation(
   cfg: StrictRiskConfig,
   assessment: RiskAssessment,
-  ctx: { dayPnl: number; dayStartEquity: number },
+  ctx: { dayPnl: number; dayStartEquity: number; existing?: Exposure },
 ): string | null {
   if (!cfg.enabled || !assessment.opening) return null;
   if (ctx.dayStartEquity > 0 && (-ctx.dayPnl / ctx.dayStartEquity) * 100 >= cfg.maxDailyLossPct) {
     return `Strict risk: daily loss limit of ${cfg.maxDailyLossPct}% reached. New positions are blocked for today.`;
   }
   if (cfg.requireStopLoss && assessment.dollarRisk === null) return 'Strict risk: a valid stop loss is required.';
-  if (assessment.pctRisk !== null && assessment.pctRisk > cfg.maxRiskPctPerTrade + 1e-9) {
-    return `Strict risk: this trade risks ${assessment.pctRisk.toFixed(2)}% (limit ${cfg.maxRiskPctPerTrade}%).`;
+  const ex = ctx.existing && ctx.existing.shares > 0 ? ctx.existing : undefined;
+  const already = ex ? ` with the ${ex.shares} ${ex.symbol} shares you already hold or have working` : '';
+  if (ex && cfg.requireStopLoss && ex.unprotected > 0) {
+    return `Strict risk: ${ex.unprotected} of the ${ex.shares} ${ex.symbol} shares you already hold or have working have no stop, so this trade's risk has no limit. Give them a stop first.`;
   }
-  if (assessment.positionPctOfEquity > cfg.maxPositionPctOfEquity + 1e-9) {
-    return `Strict risk: position is ${assessment.positionPctOfEquity.toFixed(0)}% of equity (limit ${cfg.maxPositionPctOfEquity}%).`;
+  const pctRisk = assessment.pctRisk === null ? null : assessment.pctRisk + (ex?.riskPct ?? 0);
+  if (pctRisk !== null && pctRisk > cfg.maxRiskPctPerTrade + 1e-9) {
+    return `Strict risk: this trade risks ${pctRisk.toFixed(2)}%${already} (limit ${cfg.maxRiskPctPerTrade}%).`;
+  }
+  const positionPct = assessment.positionPctOfEquity + (ex?.valuePct ?? 0);
+  if (positionPct > cfg.maxPositionPctOfEquity + 1e-9) {
+    return `Strict risk: position is ${positionPct.toFixed(0)}% of equity${already} (limit ${cfg.maxPositionPctOfEquity}%).`;
   }
   return null;
 }

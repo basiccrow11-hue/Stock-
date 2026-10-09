@@ -208,7 +208,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
             ))}
           </select>
         </label>
-        <NumberField label="Starting balance" suffix="$" value={balance} min={100} step={1000} onChange={setBalance} disabled={!!challengeId} />
+        <NumberField label="Starting balance" suffix="$" value={balance} min={100} step={100} onChange={setBalance} disabled={!!challengeId} />
         <label className="field">
           <span>Replay speed</span>
           <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
@@ -327,7 +327,7 @@ function SimForm({ onDone, presetChallenge }: { onDone: () => void; presetChalle
         Stocks: {SIM_STOCKS.map((s) => `${s.symbol} (${s.personality.replace('_', ' ')})`).join(' · ')}
       </div>
       <div className="form-grid">
-        <NumberField label="Starting balance" suffix="$" value={balance} min={100} step={1000} onChange={setBalance} disabled={!!challengeId} />
+        <NumberField label="Starting balance" suffix="$" value={balance} min={100} step={100} onChange={setBalance} disabled={!!challengeId} />
         <NumberField label="Seed" suffix="blank = random" value={seed} step={1} onChange={setSeed} />
         <label className="field">
           <span>Volatility · {vol.toFixed(1)}x</span>

@@ -279,6 +279,11 @@ export function regularCloseMinute(date: string): number {
   return v;
 }
 
+/** When after-hours trading ends, in minutes: 20:00, or four hours after an early close (17:00). */
+export function afterHoursCloseMinute(date: string): number {
+  return Math.min(AFTERHOURS_CLOSE, regularCloseMinute(date) + 240);
+}
+
 function computeRegularClose(date: string): number {
   const { y, m, d } = parseDate(date);
   if (date === addDays(thanksgiving(y), 1)) return EARLY_CLOSE;

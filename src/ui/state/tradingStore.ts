@@ -23,6 +23,7 @@ import { toast } from './toasts';
 import { recordTradeClosed } from './streakStore';
 import { setLiveBlind } from './liveBlind';
 import { newId } from '../../core/util/ids';
+import type { Exposure } from '../../core/risk/risk';
 
 export type SessionMode = 'replay' | 'sim';
 
@@ -828,6 +829,17 @@ export function closeReview(): void {
 export function estimateFill(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number | null {
   const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
   return broker()?.estimateFill(req, now) ?? null;
+}
+
+/** What a new opening order in `symbol` would join, as Strict Mode measures it (SimBroker.exposure). */
+export function exposure(symbol: string, action: 'buy' | 'short'): Exposure | null {
+  return broker()?.exposure(symbol, action) ?? null;
+}
+
+/** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */
+export function affordableQuantity(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number {
+  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  return broker()?.affordableQuantity(req, now) ?? 0;
 }
 
 export function lastPrice(symbol: string): number | null {

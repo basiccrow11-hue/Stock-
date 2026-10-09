@@ -18,6 +18,7 @@ import { SimBroker } from '../broker/SimBroker';
 import { aggregateBars, bucketFor } from '../data/aggregate';
 import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
+import { roundToTick } from '../util/math';
 import { exchangeDate, exchangeTimeToUnix, marketSession, regularCloseMinute } from '../time';
 import { barEndTime } from '../replay/ReplayEngine';
 import { computeSeries, evalCondition, seriesKey, type StrategyDefinition } from './strategy';
@@ -108,19 +109,25 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   const submitEntry = (action: OrderAction, ref: number, time: UnixSeconds, candleTime: UnixSeconds) => {
     const equity = broker.account().equity;
     const long = action === 'buy';
-    const sl = strategy.stopLossPct ? round2(ref * (1 + ((long ? -1 : 1) * strategy.stopLossPct) / 100)) : undefined;
-    const tp = strategy.takeProfitPct ? round2(ref * (1 + ((long ? 1 : -1) * strategy.takeProfitPct) / 100)) : undefined;
+    // Brackets sit on the price tick (0.0001 below $1), so a % stop or target keeps its distance on a penny stock.
+    const sl = strategy.stopLossPct ? roundToTick(ref * (1 + ((long ? -1 : 1) * strategy.stopLossPct) / 100)) : undefined;
+    const tp = strategy.takeProfitPct ? roundToTick(ref * (1 + ((long ? 1 : -1) * strategy.takeProfitPct) / 100)) : undefined;
     let qty = 0;
     const sz = strategy.sizing;
     if (sz.mode === 'shares') qty = sz.shares;
     else if (sz.mode === 'percent_equity') qty = Math.floor((equity * sz.percent) / 100 / ref);
     else qty = positionSizeForRisk(equity, sz.percent, ref, sl!);
+    // % sizing never asks for more than the buying power left (with the ticket's small buffer for the
+    // fill at the next open); a fixed share count is the user's own and is refused if it does not fit.
+    const affordable = Math.floor(broker.affordableQuantity({ symbol, action, type: 'market' }) * 0.995);
+    const capped = sz.mode !== 'shares' && qty > affordable;
+    if (capped) qty = affordable;
     if (qty <= 0) {
-      signals.push({ time, candleTime, action, price: ref, executed: false, note: 'Position size is 0 shares' });
+      signals.push({ time, candleTime, action, price: ref, executed: false, note: capped ? 'No buying power left' : 'Position size is 0 shares' });
       return;
     }
     const r = broker.submit({ symbol, action, type: 'market', quantity: qty, stopLoss: sl, takeProfit: tp, tif: 'day', tag: strategy.name });
-    signals.push({ time, candleTime, action, price: ref, executed: r.ok, note: r.ok ? `${qty} sh` : r.error });
+    signals.push({ time, candleTime, action, price: ref, executed: r.ok, note: r.ok ? `${qty} sh${capped ? ', capped by buying power' : ''}` : r.error });
   };
 
   /** Close the session's position: cancel its orders (brackets, a working entry) and sell or cover it all at market. */
@@ -250,6 +257,3 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   };
 }
 
-function round2(v: number): number {
-  return Math.round(v * 100) / 100;
-}

@@ -251,3 +251,44 @@ describe('conditions', () => {
     expect(evalCondition(c, [NaN, 3], right, 1)).toBe(false);
   });
 });
+
+describe('backtester: sizing and brackets that fit the account and the stock', () => {
+  // One session of 1-minute bars at `from`, rising to `to` at 10:00.
+  const rise = (from: number, to: number): Bar[] =>
+    Array.from({ length: 60 }, (_, i) => {
+      const px = i < 30 ? from : to;
+      return bar(et('2025-01-15', '09:30') + i * 60, px, px, px, px, 1_000_000);
+    });
+  const breakout = (level: number, extra: Partial<StrategyDefinition> = {}): StrategyDefinition => ({
+    name: 'breakout',
+    rules: [{ id: 'b', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'crosses_above', right: { kind: 'value', value: level } }] }],
+    sizing: { mode: 'percent_equity', percent: 100 },
+    exitAtSessionEnd: false,
+    regularHoursOnly: true,
+    ...extra,
+  });
+  const run = (bars: Bar[], strategy: StrategyDefinition, marginMultiplier = 1) =>
+    runBacktest(params(bars, strategy, { timeframe: '1m', tradeFrom: et('2025-01-15', '09:30'), config: { ...DEFAULT_EXECUTION_CONFIG, marginMultiplier } }));
+
+  it('sizes a % of equity entry to the buying power left, where it would have been refused', () => {
+    // 100% of $100,000 at 5.10 is 19,607 shares, which cost more than the cash once the 5.105 ask is paid.
+    const r = run(rise(5, 5.1), breakout(5.05));
+    const signal = r.signals.find((s) => s.action === 'buy')!;
+    expect(signal).toMatchObject({ executed: true, note: '19490 sh, capped by buying power' });
+    expect(r.fills[0].quantity).toBe(19490);
+    // A fixed share count is the user's own: refused when it does not fit.
+    const fixed = run(rise(5, 5.1), breakout(5.05, { sizing: { mode: 'shares', shares: 19_607 } }));
+    expect(fixed.signals.find((s) => s.action === 'buy')).toMatchObject({ executed: false, note: 'Insufficient buying power: need $100093.73, have $100000.00.' });
+  });
+
+  it('places % stops and targets on the sub-dollar tick', () => {
+    const r = run(rise(0.36, 0.3642), breakout(0.362, { sizing: { mode: 'shares', shares: 1000 }, stopLossPct: 1, takeProfitPct: 2 }), 2);
+    const trip = r.trades[0];
+    expect(r.fills[0].quantity).toBe(1000);
+    // 0.3642 less 1% and plus 2%, to the 0.0001 tick rather than to whole cents (0.36 and 0.37).
+    const entry = r.signals.find((s) => s.action === 'buy')!.price;
+    expect(entry).toBe(0.3642);
+    expect(trip.initialStop).toBe(0.3606);
+    expect(trip.initialTarget).toBe(0.3715);
+  });
+});

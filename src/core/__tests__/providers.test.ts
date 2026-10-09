@@ -239,6 +239,15 @@ describe('CSV import', () => {
     // 4-hour bars from 08:00 with extended hours: 08:00-12:00, 12:00-16:00, 16:00-20:00.
     const ext4 = parseCsv(rows(days.slice(0, 2), () => ['12:00', '16:00', '20:00']), { timestampsAreBarClose: true });
     expect([ext4.baseTimeframe, starts(ext4).slice(0, 3)]).toEqual(['4h', ['11-26 08:00', '11-26 12:00', '11-26 16:00']]);
+    // After the 29th's early close, after-hours ends at 17:00, where a vendor may cut that day's last bar.
+    const halfDay = (d: string, stamps: string[]) => (d === '2024-11-29' ? [...stamps.slice(0, -1), '17:00'] : stamps);
+    for (const stamps of [['12:00', '16:00', '20:00'], ['08:00', '12:00', '16:00', '20:00']]) {
+      const r = parseCsv(rows(days, (d) => halfDay(d, stamps)), { timestampsAreBarClose: true });
+      expect([r.baseTimeframe, starts(r).filter((t) => t.startsWith('11-29'))]).toEqual(['4h', [...stamps.slice(0, -2).map((t) => `11-29 ${String(+t.slice(0, 2) - 4).padStart(2, '0')}:00`), '11-29 12:00', '11-29 16:00']]);
+    }
+    // A missing bar leaves one long gap; the bar after it still starts where the bar before it ended.
+    const thin = parseCsv(rows(days, (d) => (d === '2024-11-27' ? ['12:00', '20:00'] : ['12:00', '16:00', '20:00'])), { timestampsAreBarClose: true });
+    expect([thin.baseTimeframe, starts(thin).filter((t) => t.startsWith('11-27'))]).toEqual(['4h', ['11-27 08:00', '11-27 16:00']]);
     // Daily rows stamped at the close (13:00 on a half day), at the open or at midnight stay daily.
     for (const stamp of [(d: string) => [d === '2024-11-29' ? '13:00' : '16:00'], () => ['09:30'], () => ['00:00']]) {
       expect(parseCsv(rows(days, stamp), { timestampsAreBarClose: true }).baseTimeframe).toBe('1D');

@@ -26,6 +26,7 @@ import {
   TickMarkType,
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
+import { roundToTick } from '../../core/util/math';
 import { aggregateBars, bucketFor, mergeBars } from '../../core/data/aggregate';
 import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
 import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
@@ -195,7 +196,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       // point.y is relative to the clicked pane; only the price pane maps to prices.
       if (param.paneIndex !== undefined && param.paneIndex !== 0) return;
       const p = series.coordinateToPrice(param.point.y);
-      if (p !== null) pickPrice(Math.round(p * 100) / 100);
+      if (p !== null) pickPrice(roundToTick(p));
     });
     const bump = () => setGeometryVersion((v) => v + 1);
     // Dragging or double-clicking the price axis rescales prices without any chart event: follow

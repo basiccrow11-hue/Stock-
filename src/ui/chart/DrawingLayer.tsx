@@ -9,7 +9,7 @@ import type { IChartApi, ISeriesApi, SeriesType } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
 import { TIMEFRAME_MINUTES } from '../../core/types';
 import { candleCalendar, type CandleCalendar } from '../../core/data/candleCalendar';
-import { lastIndexAtOrBefore } from '../../core/util/math';
+import { lastIndexAtOrBefore, roundToTick } from '../../core/util/math';
 import { FIB_LEVELS, POINTS_NEEDED, useDrawings, type DrawPoint, type Drawing, type DrawingType } from './drawings';
 import { newId } from '../../core/util/ids';
 import { price as fmtPrice } from '../services/format';
@@ -238,7 +238,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
     const y = e.clientY - rect.top;
     const t = proj.t(x);
     const p = proj.p(y);
-    return t === null || p === null ? null : { time: t, price: Math.round(p * 100) / 100 };
+    return t === null || p === null ? null : { time: t, price: roundToTick(p) };
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -274,7 +274,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
         // holds even on a timeframe it was not drawn on; a handle snaps to the candle under it.
         const t = whole ? proj.shiftT(p.time, dx) : proj.t(px + dx);
         const pr = proj.p(py + dy);
-        return t === null || pr === null ? p : { time: t, price: Math.round(pr * 100) / 100 };
+        return t === null || pr === null ? p : { time: t, price: roundToTick(pr) };
       };
       const pts = drag.orig.map((p, i) => (drag.pointIndex === 'all' ? shift(p, true) : drag.pointIndex === i ? shift(p, false) : p));
       update(drag.id, pts);

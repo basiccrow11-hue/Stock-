@@ -505,9 +505,9 @@ function RiskCard() {
             <input type="checkbox" checked={sr.enabled} onChange={(e) => setStrict({ enabled: e.target.checked })} /> Block orders that break these limits
           </label>
           <div className="form-grid">
-            <NumberField label="Max risk per trade" suffix="% of equity" value={sr.maxRiskPctPerTrade} step={0.25} min={0.1} onChange={num((v) => setStrict({ maxRiskPctPerTrade: v }))} />
+            <NumberField label="Max risk per trade" suffix="% of equity" value={sr.maxRiskPctPerTrade} step={0.05} min={0.1} onChange={num((v) => setStrict({ maxRiskPctPerTrade: v }))} />
             <NumberField label="Max daily loss" suffix="% of equity" value={sr.maxDailyLossPct} step={0.5} min={0.5} onChange={num((v) => setStrict({ maxDailyLossPct: v }))} />
-            <NumberField label="Max position size" suffix="% of equity" value={sr.maxPositionPctOfEquity} step={10} min={1} onChange={num((v) => setStrict({ maxPositionPctOfEquity: v }))} />
+            <NumberField label="Max position size" suffix="% of equity" value={sr.maxPositionPctOfEquity} step={1} min={1} onChange={num((v) => setStrict({ maxPositionPctOfEquity: v }))} />
           </div>
           <label className="check">
             <input type="checkbox" checked={sr.requireStopLoss} onChange={(e) => setStrict({ requireStopLoss: e.target.checked })} /> Require a stop loss on every entry
@@ -517,7 +517,7 @@ function RiskCard() {
           <h3>My trading rules</h3>
           <p className="muted small">Used by Learning Mode reviews and the &ldquo;follow your rules&rdquo; challenge. They never block orders.</p>
           <div className="form-grid">
-            <NumberField label="Max risk per trade" suffix="%" value={rules.maxRiskPctPerTrade} step={0.25} min={0.1} onChange={num((v) => updateRules({ maxRiskPctPerTrade: v }))} />
+            <NumberField label="Max risk per trade" suffix="%" value={rules.maxRiskPctPerTrade} step={0.05} min={0.1} onChange={num((v) => updateRules({ maxRiskPctPerTrade: v }))} />
             <NumberField label="Min reward:risk" suffix=":1" value={rules.minRewardRisk} step={0.25} min={0} onChange={num((v) => updateRules({ minRewardRisk: v }))} />
             <NumberField label="Max trades per day" value={rules.maxTradesPerDay} step={1} min={1} onChange={num((v) => updateRules({ maxTradesPerDay: Math.round(v) }))} />
             <NumberField label="No trades in first" suffix="min · 0 = off" value={rules.noTradesFirstMinutes} step={5} min={0} onChange={num((v) => updateRules({ noTradesFirstMinutes: Math.round(v) }))} />
@@ -539,7 +539,7 @@ function GeneralCard() {
     <div className="card stack">
       <h2>General</h2>
       <div className="form-grid">
-        <NumberField label="Default starting balance" suffix="$" value={s.defaultBalance} step={1000} min={100} onChange={num((v) => s.update({ defaultBalance: v }))} />
+        <NumberField label="Default starting balance" suffix="$" value={s.defaultBalance} step={100} min={100} onChange={num((v) => s.update({ defaultBalance: v }))} />
         <label className="field" style={{ gridColumn: 'span 2' }}>
           <span>Watchlist (comma separated)</span>
           <input

@@ -670,6 +670,54 @@ describe('learning review', () => {
     );
   });
 
+  it("judges the stop an add brought by its own history, whatever happened to the first stop", () => {
+    // 500 bought at 100 with a stop at 98; `before` runs before the add of 1000 at 99.50 with its own
+    // stop at `addStop`, `after` after it; then price falls to 96.60 (or `low`).
+    const trade = (addStop: number, before: (b: SimBroker) => void, after: (b: SimBroker, add: string) => void, low = 96.6, up = false) => {
+      const t0 = et('2025-01-15', '09:30');
+      const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+      const bars = [bar(t0, 100, 100, 100, 100)];
+      const next = (o: number, h: number, l: number, c: number) => {
+        bars.push(bar(t0 + 60 * bars.length, o, h, l, c));
+        b.onBar('T', bars[bars.length - 1]);
+      };
+      b.onBar('T', bars[0]);
+      b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 500, stopLoss: 98 });
+      if (up) next(105, 105, 105, 105);
+      before(b);
+      next(up ? 105 : 99.5, up ? 105 : 99.5, up ? 105 : 99.5, up ? 105 : 99.5);
+      const add = b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 1000, stopLoss: addStop }).order!;
+      after(b, add.id);
+      next(bars.at(-1)!.close, bars.at(-1)!.close, low, low);
+      b.closePosition('T');
+      next(low, low, low, low);
+      const st = b.state;
+      const r = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return r.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+    };
+    const stopOf = (b: SimBroker, parent: string) => b.state.orders.find((o) => o.parentId === parent && o.type === 'stop')!.id;
+    const first = (b: SimBroker) => stopOf(b, b.state.orders[0].id);
+    const none = () => {};
+    // The first stop tightened to 99, the add's own stop at 97 never touched: not a widened stop.
+    const tightened = trade(97, (b) => b.modify(first(b), { stopPrice: 99 }), none);
+    expect(tightened).not.toMatch(/You moved|widened/);
+    expect(tightened).toContain("Your add's stop was wider: The stop that came with your add, at 97.00, was further from your entry than your first stop at 98.00");
+    // The add's own stop tightened from 96 to 97 is still wider than the first, and says so.
+    const addTightened = trade(96, none, (b, add) => b.modify(stopOf(b, add), { stopPrice: 97 }));
+    expect(addTightened).not.toMatch(/widened/);
+    expect(addTightened).toContain("Your add's stop was wider: The stop that came with your add, at 97.00 (you had moved it from 96.00), was further from your entry than your first stop at 98.00");
+    // Moved away from where the add placed it, it is a widened stop, measured from there.
+    const addWidened = trade(97, none, (b, add) => b.modify(stopOf(b, add), { stopPrice: 96 }), 95.6);
+    expect(addWidened).toContain('You widened your stop: You moved the stop that came with your add from 97.00 to 96.00, further from your entry, so this exit was -2.20R per share instead of the -1.60R where it was placed (your first stop planned -1.00R).');
+    // The first stop widened to 97 and the add's own stop placed there too: the widening is the user's.
+    const firstWidened = trade(97, (b) => b.modify(first(b), { stopPrice: 97 }), none);
+    expect(firstWidened).toContain('You widened your stop: You moved your first stop from 98.00 to 97.00, further from your entry, and the stop that came with your add was at 97.00, so this exit was');
+    // A pyramid: the first stop trailed to 103, an add at 105 with its own stop at 104 closes most of it.
+    const pyramid = trade(104, (b) => b.modify(first(b), { stopPrice: 103 }), none, 102.5, true);
+    expect(pyramid).toContain("Your add's stop closed the trade: The stop that came with your add, at 104.00 (your first stop was at 98.00), filled at 104.00: +$");
+    expect(pyramid).not.toMatch(/You (had )?moved/);
+  });
+
   it('treats one entry order filled in parts by the volume cap as one entry, not as adds past the stop', () => {
     const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
     const t0 = et('2025-01-15', '10:00');

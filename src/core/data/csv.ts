@@ -3,7 +3,7 @@
  * Accepts common column names and time formats, validates every row, and reports what it skipped.
  */
 import type { Bar, Timeframe } from '../types';
-import { AFTERHOURS_CLOSE, PREMARKET_OPEN, REGULAR_OPEN, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, isTradingDay, regularCloseMinute } from '../time';
+import { AFTERHOURS_CLOSE, PREMARKET_OPEN, REGULAR_OPEN, afterHoursCloseMinute, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, isTradingDay, regularCloseMinute } from '../time';
 
 export interface CsvParseOptions {
   /** How to read timestamps without an explicit offset. Default: exchange time (America/New_York). */
@@ -210,9 +210,14 @@ const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-
  */
 function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): Timeframe {
   const all: number[] = [];
+  // Close-stamped: whether each of `all` is a bar that ends where a session ends, which may be cut short.
+  const cut: boolean[] = [];
   const inner: number[] = [];
-  // Gaps of 6 hours or more within a day, and how many of the file's days have more than one row.
+  // Gaps of 6 hours or more within a day, how many days have one, and how many of the file's days
+  // have more than one row.
   const long: number[] = [];
+  let longDays = 0;
+  let longDate = '';
   // Close-stamped regular-hours files: each day's first bar, from the 09:30 open to its stamp.
   const firsts: number[] = [];
   const regular = closeStamped && regularStamps(bars);
@@ -231,7 +236,11 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): 
     const d = bars[i].time - bars[i - 1].time;
     if (dateOnly || !(d > 0)) continue;
     if (d >= 6 * 3600) {
-      if (date === prevDate) long.push(d);
+      if (date === prevDate) {
+        long.push(d);
+        if (date !== longDate) longDays++;
+        longDate = date;
+      }
       continue;
     }
     all.push(d);
@@ -239,29 +248,48 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): 
     if (closeStamped) {
       // A bar that ends at a session's edge may be cut short, and a gap across one may hide a short
       // bar before it (a thin day with no bar at the open), so neither sets the size.
-      const edges = [REGULAR_OPEN, regularCloseMinute(date), AFTERHOURS_CLOSE];
-      if (date === prevDate && !edges.some((e) => pm < e && m >= e)) inner.push(d);
+      // After-hours ends at 17:00 after an early close; a vendor may still stamp that day's last bar 20:00.
+      const ends = [regularCloseMinute(date), afterHoursCloseMinute(date), AFTERHOURS_CLOSE];
+      cut.push(date === prevDate && ends.includes(m));
+      if (date === prevDate && ![REGULAR_OPEN, ...ends].some((e) => pm < e && m >= e)) inner.push(d);
       continue;
     }
+    cut.push(false);
     const spansPart = exchangeDate(bars[i - 1].time) === date && [REGULAR_OPEN, regularCloseMinute(date)].some((edge) => pm < edge && m >= edge);
     if (!spansPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
-  if (closeStamped && !inner.length && multiDays * 2 >= days) for (const d of firsts) (d >= 6 * 3600 ? long : inner).push(d);
+  if (closeStamped && !inner.length && multiDays * 2 >= days) {
+    for (const d of firsts) {
+      if (d < 6 * 3600) inner.push(d);
+      else if (long.push(d)) longDays++;
+    }
+  }
   // Bars 6 hours or more apart within most days (6, 8 or 12-hour bars) are not daily bars: read as
   // daily, each day would keep only its last bar. A daily file with the odd second row on a day is.
-  // Close-stamped, such bars can come with a short one at the close (6-hour bars 09:30-15:30, 15:30-16:00).
-  if (long.length && multiDays * 2 >= days && (!all.length || (closeStamped && !inner.length))) {
+  // Close-stamped, such bars can come with a short one at the close (6-hour bars 09:30-15:30,
+  // 15:30-16:00), while a 4-hour file whose bars all touch a session's edge has a long gap only on
+  // the odd day a bar is missing.
+  if (long.length && multiDays * 2 >= days && (!all.length || (closeStamped && !inner.length && longDays * 2 >= multiDays))) {
     throw new Error(`The bars in this file are ${spacingText(mostCommon(long))} apart, ${UNSUPPORTED}`);
   }
   if (!all.length) return dailySpacing(bars);
+  // Sized by the gaps in `all` (every bar touches a session's edge, as in a close-stamped 4-hour file
+  // with extended hours), a bar shorter than the size that ends where a session ends is that session's
+  // last bar cut short (16:00-17:00 when after-hours ends at 17:00 after an early close), as long as
+  // more than the odd bar is a whole number of that size.
   const gaps = inner.length ? inner : all;
+  const short = inner.length ? [] : cut;
   const allowed = Math.floor(gaps.length * 0.01);
   let step = 0;
   for (let k = 360; k >= 1 && !step; k--) {
     const c = k * 60;
     let misses = 0;
-    for (const d of gaps) if (d % c !== 0 && ++misses > allowed) break;
-    if (misses <= allowed) step = c;
+    let whole = 0;
+    for (let j = 0; j < gaps.length && misses <= allowed; j++) {
+      if (gaps[j] % c === 0) whole++;
+      else if (!(short[j] && gaps[j] < c)) misses++;
+    }
+    if (misses <= allowed && whole > allowed) step = c;
   }
   const tf = (Object.keys(TF_SECONDS) as Timeframe[]).find((t) => t !== '1D' && TF_SECONDS[t] === step);
   if (tf) return tf;

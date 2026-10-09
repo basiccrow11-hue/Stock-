@@ -397,14 +397,14 @@ export function BacktestPage() {
               </select>
             </label>
             {strategy.sizing.mode === 'shares' ? (
-              <NumberField label="Shares" value={strategy.sizing.shares} step={10} min={1} onChange={(v) => v !== '' && setSizing({ mode: 'shares', shares: Math.max(1, Math.round(v)) })} />
+              <NumberField label="Shares" value={strategy.sizing.shares} step={1} min={1} onChange={(v) => v !== '' && setSizing({ mode: 'shares', shares: Math.max(1, Math.round(v)) })} />
             ) : (
               <NumberField
                 label={strategy.sizing.mode === 'risk_percent' ? 'Risk per trade' : 'Position size'}
                 suffix="%"
                 value={strategy.sizing.percent}
-                step={strategy.sizing.mode === 'risk_percent' ? 0.25 : 5}
-                min={0.1}
+                step={strategy.sizing.mode === 'risk_percent' ? 0.05 : 1}
+                min={strategy.sizing.mode === 'risk_percent' ? 0.1 : 1}
                 onChange={(v) => v !== '' && setSizing({ ...(strategy.sizing as { mode: 'risk_percent' | 'percent_equity'; percent: number }), percent: v })}
               />
             )}
@@ -455,7 +455,7 @@ export function BacktestPage() {
                 ))}
               </select>
             </label>
-            <NumberField label="Starting balance" suffix="$" value={balance} step={1000} min={100} onChange={setBalance} />
+            <NumberField label="Starting balance" suffix="$" value={balance} step={100} min={100} onChange={setBalance} />
             <NumberField label="Commission" suffix="$ per share" value={commission} step={0.001} min={0} onChange={setCommission} />
             <NumberField label="Slippage" suffix="bps" value={slippage} step={0.5} min={0} onChange={setSlippage} />
             <NumberField label="Spread" suffix="bps" value={spread} step={0.5} min={0} onChange={setSpread} />
