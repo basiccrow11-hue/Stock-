@@ -108,6 +108,17 @@ describe('ReplayEngine: no look-ahead', () => {
     expect(e.stepCandle('1h').map((b) => b.time)).toEqual([et(D, '10:00')]);
     expect(e.now).toBe(et(D, '11:00'));
   });
+
+  it('ends the last bar before the end time when the next bar opens, though that bar is past the end', () => {
+    // yfinance's extended-hours hourly file: 09:30, 10:30 ... 15:30, then the 16:00 post-market bar.
+    const times = ['14:30', '15:30', '16:00', '17:00'];
+    const hourly = times.map((t, i) => bar(et(D, t), 100 + i, 101 + i, 99 + i, 100 + i));
+    const e = new ReplayEngine({ symbol: 'TEST', start: et(D, '15:00'), end: et(D, '16:00'), baseTimeframe: '1h' }, hourly);
+    expect(e.barSeconds(hourly[1])).toBe(1800);
+    e.advanceTo(et(D, '16:00'));
+    expect(e.visibleBaseBars().map((b) => b.time)).toEqual([et(D, '14:30'), et(D, '15:30')]);
+    expect(e.finished).toBe(true);
+  });
 });
 
 function setupFor() {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
-import { assessRisk } from '../../core/risk/risk';
+import { assessRisk, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
 import { formatTick, roundToTick } from '../../core/util/math';
@@ -419,7 +419,9 @@ export function OrderTicket() {
             <span className="muted">Dollar risk</span>
             <span className="num">{money(risk?.dollarRisk)}</span>
             <span className="muted">% of account</span>
-            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade ? 'error' : ''}`}>{pct(risk?.pctRisk)}</span>
+            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
+              {risk?.pctRisk == null ? '—' : `${pctAgainst(risk.pctRisk, rules.maxRiskPctPerTrade)}%`}
+            </span>
             <span className="muted">Potential reward</span>
             <span className="num">{money(risk?.reward)}</span>
             <span className="muted">Reward : risk</span>

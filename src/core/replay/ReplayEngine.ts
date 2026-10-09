@@ -44,10 +44,15 @@ export class ReplayEngine {
     this.baseTimeframe = window.baseTimeframe;
     this.start = window.start;
     this.end = window.end;
-    const sorted = [...bars].filter((b) => b.time < window.end).sort((a, b) => a.time - b.time);
+    const sorted = [...bars].sort((a, b) => a.time - b.time);
+    // A bar's end can depend on when the next one opens, so ends come from the whole tape before the
+    // bars at or after the end are dropped (a 15:30 bar the 16:00 bar ends, in a replay ending at 16:00).
+    const ends = barEnds(sorted, window.baseTimeframe);
+    const keep = sorted.findIndex((b) => b.time >= window.end);
+    const n = keep < 0 ? sorted.length : keep;
     // Freeze copies so nothing outside can mutate the tape.
-    this.#bars = Object.freeze(sorted.map((b) => Object.freeze({ ...b })));
-    this.#ends = barEnds(this.#bars, window.baseTimeframe);
+    this.#bars = Object.freeze(sorted.slice(0, n).map((b) => Object.freeze({ ...b })));
+    this.#ends = ends.slice(0, n);
     this.#now = window.start;
     this.#cursor = lastIndexAtOrBefore(this.#ends, window.start, (t) => t);
     this.#firstSessionIndex = this.#cursor + 1;
