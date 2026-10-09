@@ -489,6 +489,7 @@ export class SimBroker {
     }
     if (changes.limitPrice !== undefined && (!(changes.limitPrice > 0) || (o.type !== 'limit' && o.type !== 'stop_limit'))) return { ok: false, error: 'Invalid limit price.' };
     if (changes.stopPrice !== undefined && (!(changes.stopPrice > 0) || (o.type !== 'stop' && o.type !== 'stop_limit'))) return { ok: false, error: 'Invalid stop price.' };
+    if (changes.stopPrice !== undefined && o.triggered) return { ok: false, error: 'The stop has already triggered, so its price no longer applies.' };
     const limitPrice = changes.limitPrice !== undefined ? roundToTick(changes.limitPrice) : o.limitPrice;
     const stopPrice = changes.stopPrice !== undefined ? roundToTick(changes.stopPrice) : o.stopPrice;
     // An entry with a stop loss or target must keep them on the right side of where it now fills.
@@ -824,6 +825,8 @@ export class SimBroker {
         return reach(c, b);
       }
       case 'stop': {
+        // Once fired a stop is a market order: what the volume cap left fills from the next bars.
+        if (o.triggered) return from;
         const [c, b] = stopCond(o.stopPrice!);
         return reach(c, b);
       }
@@ -887,6 +890,7 @@ export class SimBroker {
       this.log('triggered', `${describe(o)} triggered at ${x.toFixed(2)}; now a limit at ${o.limitPrice!.toFixed(2)}`, o.id);
       return 0; // the limit leg is re-evaluated from this point on the path
     }
+    if (o.type === 'stop') o.triggered = true;
 
     // Exits can never exceed the current position (protects against orphaned exit orders).
     let remaining = o.quantity - o.filledQty;
@@ -941,8 +945,8 @@ export class SimBroker {
     const commission = Math.max(0, Math.round((commissionFor(this.cfg, filled, (o.avgFillPrice * o.filledQty + price * qty) / filled) - paid) * 100) / 100);
     o.commission = money(paid + commission);
     const symbol = o.symbol;
-    // The account as this fill finds it, for a trade it opens (the daily-loss rule reads it).
-    const before = this.s.openTripBySymbol[symbol] ? undefined : { equity: this.account().equity, dayStart: money(this.s.dayStartEquity) };
+    // What the account marked the symbol at as this fill came, so its effect on equity then is known.
+    const markBefore = this.s.lastPrice[symbol] ?? price;
     const pos = this.s.positions[symbol] ?? { symbol, quantity: 0, avgPrice: 0, realizedPnl: 0 };
     const signed = side === 'buy' ? qty : -qty;
 
@@ -988,16 +992,17 @@ export class SimBroker {
       time,
       realizedPnl: money(realizedGross - commission),
       ...(at ? { at } : {}),
+      markBefore,
     };
     this.s.fills.push(fill);
     this.log(o.status === 'filled' ? 'filled' : 'partial', `${o.action.toUpperCase()} ${qty} ${symbol} @ ${price.toFixed(2)}${o.status === 'partially_filled' ? ` (partial ${o.filledQty}/${o.quantity})` : ''}`, o.id);
 
-    this.updateRoundTrip(o, fill, opening, before);
+    this.updateRoundTrip(o, fill, opening);
     this.manageBrackets(o, qty);
     this.s.lastPrice[symbol] = this.s.lastPrice[symbol] ?? price;
   }
 
-  private updateRoundTrip(o: Order, fill: Fill, opening: boolean, before?: { equity: number; dayStart: number }): void {
+  private updateRoundTrip(o: Order, fill: Fill, opening: boolean): void {
     const symbol = o.symbol;
     let tripId = this.s.openTripBySymbol[symbol];
     let trip = tripId ? this.tripById(tripId) : undefined;
@@ -1020,7 +1025,6 @@ export class SimBroker {
         bracketEntry: fill.price,
         stopOrder: { id: o.id, qty: 0 },
         ...(o.takeProfit !== undefined ? { targetPlanned: plannedPrice(o), targetEntry: fill.price, targetOrder: { id: o.id, qty: 0 } } : {}),
-        ...(before ? { entryEquity: before.equity, entryDayStartEquity: before.dayStart } : {}),
         tag: o.tag,
         highWhileOpen: fill.price,
         lowWhileOpen: fill.price,

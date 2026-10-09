@@ -18,7 +18,7 @@ import { dismissCelebration, openStreakPanel, setStreakGoal, useStreak } from '.
 import { useTrading } from '../state/tradingStore';
 import { useJournal } from '../state/journalStore';
 import { reviewedCount } from '../../core/journal';
-import { Modal, modalOpen, useModalCount } from './common';
+import { isTextField, Modal, modalOpen, useModalCount } from './common';
 import { toast, useToasts } from '../state/toasts';
 import type { View } from './TopBar';
 
@@ -284,9 +284,7 @@ if (typeof document !== 'undefined') document.addEventListener('keydown', () => 
 /** True while a text field has focus and a key was pressed in the last few seconds. */
 function typingInField(): boolean {
   const el = document.activeElement as HTMLElement | null;
-  if (!el || Date.now() - lastKeyAt > 3000) return false;
-  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
-  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file'].includes((el as HTMLInputElement).type);
+  return !!el && Date.now() - lastKeyAt <= 3000 && isTextField(el);
 }
 
 /**

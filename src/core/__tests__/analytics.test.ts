@@ -5,7 +5,9 @@ import { reviewTrade, DEFAULT_TRADING_RULES } from '../learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeContext } from '../challenges/challenges';
 import { SimBroker } from '../broker/SimBroker';
 import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG } from '../broker/config';
-import type { RoundTrip } from '../types';
+import type { Bar, RoundTrip } from '../types';
+import { ReplaySession } from '../replay/ReplaySession';
+import { ReplayEngine } from '../replay/ReplayEngine';
 import { bar, et } from './helpers';
 
 function trip(p: Partial<RoundTrip>): RoundTrip {
@@ -339,15 +341,22 @@ describe('learning review', () => {
     };
 
     it('goes by the order that closed most of a trade closed in parts', () => {
+      const stopMost = thin((next) => {
+        next(100, 102.5, 100, 102.2, 800); // the target takes 200 at 102
+        next(101.5, 101.6, 97.5, 97.8, 100_000); // the stop takes the other 800 at 98
+      });
+      expect(stopMost.review.exitReason).toBe('stop_loss');
+      expect(stopMost.review.findings[0].detail).toContain('exited @ 98.80 in 2 parts');
+      expect(stopMost.find('Closed in parts')).toBe('200 at your target at 102.00, then 800 by your stop at 98.00. The rest of this review goes by the order that closed the most shares.');
+      expect(stopMost.find('Target reached')).toContain('though only 200 of 1000 shares filled there');
+      // A stop that fired sells what the volume cap left at the next bar, even after price recovers.
       const stopFirst = thin((next) => {
         next(100, 100.2, 97.8, 98.5, 3200); // the stop takes 800 at 98
-        next(98.5, 101, 98.4, 100.9, 100_000);
-        next(100.9, 102.4, 100.8, 102.2, 100_000); // the target takes the last 200 at 102
+        next(98.5, 101, 98.4, 100.9, 100_000); // and the last 200 at this bar's open
       });
       expect(stopFirst.review.exitReason).toBe('stop_loss');
-      expect(stopFirst.review.findings[0].detail).toContain('exited @ 98.80 in 2 parts');
-      expect(stopFirst.find('Closed in parts')).toBe('800 by your stop at 98.00, then 200 at your target at 102.00. The rest of this review goes by the order that closed the most shares.');
-      expect(stopFirst.find('Target reached')).toContain('though only 200 of 1000 shares filled there');
+      expect(stopFirst.review.findings[0].detail).toContain('exited @ 98.10 via your stop loss');
+      expect(stopFirst.find('Closed in parts')).toBeUndefined();
 
       const half = thin((next) => {
         next(100, 102.5, 100.7, 101.2, 2000); // the target takes 500 at 102
@@ -377,7 +386,7 @@ describe('learning review', () => {
       expect(titles).toContain('Entry filled past your stop');
       expect(titles).not.toContain('No stop loss');
       expect(review.rules.filter((r) => r.passed === false)).toEqual([]);
-      expect(evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
+      expect(evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
     });
 
     it('measures risk from the price a market order was placed at when it fills at the next open past its stop', () => {
@@ -404,7 +413,7 @@ describe('learning review', () => {
       expect(review.rules.filter((r) => r.passed === false)).toEqual([]);
       for (const id of ['grow-20-1pct', 'avg-rr-2', 'rules-20']) {
         const c = CHALLENGES.find((x) => x.id === id)!;
-        expect(evaluateChallenge(c, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
+        expect(evaluateChallenge(c, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES }).status).toBe('in_progress');
       }
     });
 
@@ -437,7 +446,7 @@ describe('learning review', () => {
         expect(review.addedPastStop).toBe(true);
         expect(review.rMultiple).toBeCloseTo(-1.375, 9);
         expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: 'Added past your stop: more than the planned risk' });
-        const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+        const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
         expect(grow).toMatchObject({ status: 'failed', detail: 'A trade on T added past its stop, so it risked more than planned.' });
       }
     });
@@ -462,7 +471,7 @@ describe('learning review', () => {
       const t = st.roundTrips[0];
       const ctx = { equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES };
       const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', ...ctx });
-      const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
       return { t, review, grow, text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
     }
 
@@ -509,7 +518,7 @@ describe('learning review', () => {
       expect(text).toContain('Entry filled past your target: Your market order was placed with price at 100.00 and filled at the next open, 102.50, already past your target at 102.00.');
       expect(text).not.toContain('Target reached');
       expect(review.rules.find((r) => r.rule.startsWith('Planned'))).toMatchObject({ passed: true, detail: '2.00:1' });
-      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
       expect(rr.status).toBe('in_progress');
     });
   });
@@ -519,7 +528,7 @@ describe('learning review', () => {
       const st = b.state;
       const t = st.roundTrips[0];
       const r = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
-      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+      const rr = evaluateChallenge(CHALLENGES.find((c) => c.id === 'avg-rr-2')!, { trips: [t], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
       return { t, r, rr, text: r.findings.map((f) => `${f.title}: ${f.detail}`).join('\n'), rule: r.rules.find((x) => x.rule.startsWith('Planned'))! };
     };
     // Long 100 at 100 with a stop at 98 and no target; then, averaging down, 100 more at 99 with a target at 99.80.
@@ -689,6 +698,36 @@ describe('learning review', () => {
     expect(lossRule(d, daily, '1D')).toEqual(failed);
   });
 
+  it('judges the daily loss and risk at a trade’s entry by time, whatever order several symbols’ daily bars were processed in', () => {
+    // AAA long 1000 from the 14th with a stop at 96.5 (3.5% of the account); BBB buy limit 49.5 for the 15th, 500 shares, stop 47.5 (1%).
+    const run = (order: string[], aaa15: Bar, bbb15: Bar) => {
+      const data: Record<string, Bar[]> = {
+        AAA: [bar(et('2025-01-14', '09:30'), 99, 101, 98, 100), aaa15, bar(et('2025-01-16', '09:30'), 95.5, 96, 95, 95.5)],
+        BBB: [bar(et('2025-01-14', '09:30'), 50, 51, 49, 50), bbb15, bar(et('2025-01-16', '09:30'), 52, 52.5, 51.5, 52)],
+      };
+      const engines = order.map((s) => new ReplayEngine({ symbol: s, start: et('2025-01-15', '09:30'), end: et('2025-01-16', '16:00'), baseTimeframe: '1D' }, data[s]));
+      const session = new ReplaySession(engines, { symbol: order[0], date: '2025-01-15', startTime: '09:30', endTime: '16:00', endDate: '2025-01-16', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'd', 'HISTORICAL');
+      session.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 1000, stopLoss: 96.5, takeProfit: 110, tif: 'gtc' });
+      session.submit({ symbol: 'BBB', action: 'buy', type: 'limit', limitPrice: 49.5, quantity: 500, stopLoss: 47.5, takeProfit: 55, tif: 'gtc' });
+      session.step();
+      const st = session.broker.state;
+      const a = st.roundTrips.find((t) => t.symbol === 'AAA')!;
+      const b = st.roundTrips.find((t) => t.symbol === 'BBB')!;
+      const rev = reviewTrade({ trip: b, fills: st.fills, orders: st.orders, revealedBars: session.engineFor('BBB')!.visibleBaseBars(), timeframe: '1D', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return { stopFirst: a.exitTime! < b.entryTime, rules: rev.rules.filter((r) => /^Risk|^Stop trading/.test(r.rule)).map((r) => [r.passed, r.detail]) };
+    };
+    // AAA is stopped out late in the day, after BBB's entry: not counted, in either order.
+    const later = [bar(et('2025-01-15', '09:30'), 100, 101, 95, 95.5), bar(et('2025-01-15', '09:30'), 50, 53, 49, 52)] as const;
+    for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+      expect(run(order, ...later), order.join()).toEqual({ stopFirst: false, rules: [[true, '1.00%'], [true, 'Not down on the day at entry']] });
+    }
+    // AAA is stopped out early, before BBB's entry: counted, in either order.
+    const earlier = [bar(et('2025-01-15', '09:30'), 100, 104.5, 95, 103), bar(et('2025-01-15', '09:30'), 50, 50.5, 49, 49.2)] as const;
+    for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+      expect(run(order, ...earlier), order.join()).toEqual({ stopFirst: true, rules: [[false, '1.04%'], [false, 'Down 3.50% on the day at entry']] });
+    }
+  });
+
   it('gives no share of open profit kept when price never moved a tick the trade’s way', () => {
     // A three-fill average entry with float noise: 100.09999999999998 against a high of 100.1.
     const avgEntry = (100.1 + 100.1 + 100.1) / 3;
@@ -701,7 +740,7 @@ describe('learning review', () => {
 });
 
 describe('challenges', () => {
-  const base: ChallengeContext = { trips: [], equityCurve: [], startingBalance: 10_000, equity: 10_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES };
+  const base: ChallengeContext = { trips: [], fills: [], equityCurve: [], startingBalance: 10_000, equity: 10_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES };
   const grow = CHALLENGES.find((c) => c.id === 'grow-20-1pct')!;
   const dd = CHALLENGES.find((c) => c.id === 'day-max-dd-5')!;
 

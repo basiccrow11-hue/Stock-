@@ -572,6 +572,24 @@ describe('liquidity, partial fills and time in force', () => {
     identity(b.broker);
   });
 
+  it('a stop that fired is a market order: what the volume cap left fills from the next bars, even if price recovers', () => {
+    const { broker, next } = setup({ maxParticipation: 0.25 }, 100_000, 100);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 99 }).ok).toBe(true);
+    // Through the stop on 2,000 shares: 500 can sell. Then price recovers above the stop.
+    next(99.5, 99.5, 97.5, 98, 2000);
+    expect(broker.position(S).quantity).toBe(500);
+    const stop = broker.state.orders.find((o) => o.type === 'stop')!;
+    expect([stop.status, stop.triggered]).toEqual(['partially_filled', true]);
+    expect(broker.modify(stop.id, { stopPrice: 98 })).toEqual({ ok: false, error: 'The stop has already triggered, so its price no longer applies.' });
+    next(99.6, 99.8, 99.4, 99.7, 2000);
+    expect(broker.position(S).quantity).toBe(0);
+    expect(broker.state.fills.slice(1).map((f) => [f.action, f.quantity, f.price])).toEqual([
+      ['sell', 500, 99],
+      ['sell', 500, 99.6],
+    ]);
+    expect(broker.state.roundTrips[0].closed).toBe(true);
+  });
+
   it('with no volume cap, charges impact on at most one bar’s volume and never sells below the minimum tick', () => {
     const { broker, next } = setup({ maxParticipation: 0, slippage: { bps: 0, impactBpsPerPctOfVolume: 5 } }, 100_000, 5);
     next(5, 5, 5, 5, 500);

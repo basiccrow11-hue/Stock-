@@ -3,12 +3,14 @@
  * equity curve; it can pass, fail, or still be in progress. Sessions that used rewind/restart are
  * marked unofficial: you have seen the future, so the result cannot count as a blind result.
  */
-import type { EquityPoint, RoundTrip } from '../types';
+import type { EquityPoint, Fill, RoundTrip } from '../types';
 import { plannedRR, plannedRRGap, initialRiskPerShare, riskBasis } from '../analytics/stats';
-import { equityAt, followedAllRules, checkRules, type TradingRules } from '../learning/review';
+import { equityBeforeEntry, followedAllRules, checkRules, type TradingRules } from '../learning/review';
 
 export interface ChallengeContext {
   trips: readonly RoundTrip[];
+  /** Every fill of the session: a trade's risk is measured against the equity just before it opened. */
+  fills: readonly Fill[];
   equityCurve: readonly EquityPoint[];
   startingBalance: number;
   equity: number;
@@ -41,7 +43,7 @@ export interface ChallengeDefinition {
 function riskPct(t: RoundTrip, ctx: ChallengeContext): number | null {
   const rps = initialRiskPerShare(t);
   if (rps === null) return null;
-  const eq = t.entryEquity ?? equityAt(ctx.equityCurve, t.entryTime, ctx.startingBalance);
+  const eq = equityBeforeEntry(t, ctx.fills, ctx.equityCurve, ctx.startingBalance);
   return eq > 0 ? ((rps * t.maxQuantity) / eq) * 100 : null;
 }
 
@@ -121,7 +123,7 @@ export const CHALLENGES: ChallengeDefinition[] = [
       const closed = ctx.trips.filter((t) => t.closed);
       for (const t of closed) {
         const checks = checkRules(
-          { trip: t, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: ctx.equityCurve, startingBalance: ctx.startingBalance, allTrips: ctx.trips, rules: ctx.rules },
+          { trip: t, fills: ctx.fills, orders: [], revealedBars: [], timeframe: '1m', equityCurve: ctx.equityCurve, startingBalance: ctx.startingBalance, allTrips: ctx.trips, rules: ctx.rules },
           riskPct(t, ctx),
           plannedRR(t),
         );

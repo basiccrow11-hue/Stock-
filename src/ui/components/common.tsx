@@ -249,8 +249,28 @@ export function Stat({ k, v, cls }: { k: string; v: ReactNode; cls?: string }) {
   );
 }
 
+/** True for a field that takes typed text (a phone shows its on-screen keyboard for these). */
+export function isTextField(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file'].includes((el as HTMLInputElement).type);
+}
+
+// Whether the last input was a tap (or a pen), with no key pressed outside a text field since.
+// Chromium marks focus a script gives right after a text field or a key press as :focus-visible, so
+// on a phone the on-screen keyboard's Go key passes it on to the price button, then to the tab focus
+// moves to when that order goes away, and a dialog would take that tab for a keyboard user's opener.
+let touchInput = false;
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointerdown', (e) => (touchInput = e.pointerType === 'touch' || e.pointerType === 'pen'), true);
+  document.addEventListener('keydown', (e) => {
+    if (!isTextField(e.target instanceof Element ? e.target : null)) touchInput = false;
+  }, true);
+}
+
 /** True when `el` got focus from the keyboard (or a script after keyboard use), not from a click or tap. */
 function keyboardFocused(el: HTMLElement): boolean {
+  if (touchInput) return false;
   try {
     return el.matches(':focus-visible');
   } catch {

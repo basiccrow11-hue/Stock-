@@ -95,10 +95,13 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   let pendingEntry: { action: OrderAction; candleTime: UnixSeconds; ref: number } | null = null;
   let currentKey = '';
   let firstTradePrice: number | null = null;
-  // For the flatten before the close: the last regular session a bar was seen in, the last one
-  // flattened, and the days whose data had no bar at the close.
+  // For the flatten before the close: the last regular session a bar was seen in, the last one whose
+  // end has been acted on, the session whose position still has to be closed (until the book is flat),
+  // the order closing it, and the days it could not all be closed in the session's last bar.
   let regularDate = '';
-  let flattenedDate = '';
+  let endedDate = '';
+  let owedDate = '';
+  let flattenId: string | null = null;
   const lateFlattens: string[] = [];
   const benchmarkCurve: EquityPoint[] = [];
 
@@ -120,31 +123,43 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     signals.push({ time, candleTime, action, price: ref, executed: r.ok, note: r.ok ? `${qty} sh` : r.error });
   };
 
-  const flatten = (date: string): boolean => {
-    flattenedDate = date;
+  /** Close the session's position: cancel its orders (brackets, a working entry) and sell or cover it all at market. */
+  const flatten = (date: string) => {
+    endedDate = owedDate = date;
     pendingEntry = null;
-    const q = broker.position(symbol).quantity;
-    const working = broker.workingOrders(symbol);
-    for (const o of working) broker.cancel(o.id, 'Session end');
-    if (q !== 0) broker.submit({ symbol, action: q > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(q), tif: 'day' });
-    return q !== 0 || working.length > 0;
+    for (const o of broker.workingOrders(symbol)) broker.cancel(o.id, 'Session end');
+    closeRest();
   };
+  const closeRest = () => {
+    const q = broker.position(symbol).quantity;
+    flattenId = q !== 0 ? (broker.submit({ symbol, action: q > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(q), tif: 'day' }).order?.id ?? null) : null;
+  };
+  const flattenOpen = () => flattenId !== null && broker.workingOrders(symbol).some((o) => o.id === flattenId);
 
   for (let j = 0; j < base.length; j++) {
     const b = base[j];
     const { key } = bucketFor(b.time, p.timeframe);
+    // Orders placed as this bar opens belong to the session they can fill in, even after a gap in the
+    // data (a thin stock's day with no bar at the close), so they do not expire before their first bar.
+    broker.syncClock(b.time);
 
-    // A session whose data has no bar at the close (a thin stock with no trade in its last minute) is
-    // flattened at the first bar after it: the market order fills at the next regular session's open,
-    // as one placed after the close would. Decided by the clock reaching this bar, never by looking
-    // ahead, and before this bar's signals, which then act on a flat book.
+    // The session's position must be closed by its end. A session whose data has no bar at the close,
+    // or whose last bar let only part of it trade (the volume cap), is closed from the first bar after
+    // it: the market order fills at the next regular session's open, as one placed after the close
+    // would. Decided by the clock reaching this bar, never by looking ahead, and before this bar's
+    // signals, which wait for the book to be flat.
     let flattening = false;
-    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && regularDate && regularDate !== flattenedDate && (marketSession(b.time) !== 'regular' || exchangeDate(b.time) !== regularDate)) {
-      const day = regularDate;
-      // The order is placed now, as this bar opens, so it belongs to the session it can fill in.
-      broker.syncClock(b.time);
-      flattening = flatten(day);
-      if (flattening) lateFlattens.push(day);
+    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D') {
+      const past = (date: string) => marketSession(b.time) !== 'regular' || exchangeDate(b.time) !== date;
+      if (regularDate && regularDate !== endedDate && past(regularDate)) flatten(regularDate);
+      if (owedDate && past(owedDate)) {
+        if (broker.position(symbol).quantity === 0) owedDate = '';
+        else {
+          if (!lateFlattens.includes(owedDate)) lateFlattens.push(owedDate);
+          if (!flattenOpen()) closeRest();
+          flattening = true;
+        }
+      }
     }
 
     // A new candle opening means the previous one has closed: evaluate signals on it.
@@ -192,6 +207,7 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     }
 
     broker.onBar(symbol, b, barEndTime(b, p.baseTimeframe) - b.time);
+    if (owedDate && broker.position(symbol).quantity === 0) owedDate = '';
 
     if (pendingEntry && broker.position(symbol).quantity === 0) {
       const pe = pendingEntry;
@@ -210,7 +226,8 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   const trades = st.roundTrips.map((t) => ({ ...t }));
   if (lateFlattens.length) {
     const n = lateFlattens.length;
-    warnings.push(`On ${n === 1 ? `1 day (${lateFlattens[0]})` : `${n} days (first ${lateFlattens[0]})`} the data has no bar at the close, so the flatten filled at the next session's open, after the overnight gap.`);
+    const days = n <= 3 ? lateFlattens.join(', ') : `${lateFlattens.slice(0, 3).join(', ')} and ${n - 3} more`;
+    warnings.push(`On ${n === 1 ? '1 day' : `${n} days`} (${days}) the position could not all be closed in the session's last bar (no bar at the close, or more shares than the volume cap let trade there), so the rest was closed from the next session's open, after the overnight gap.`);
   }
   if (trades.some((t) => !t.closed)) warnings.push('A position was still open at the end of the test; it is excluded from closed-trade statistics but included in equity.');
   const last = base[base.length - 1];

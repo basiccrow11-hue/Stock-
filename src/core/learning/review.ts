@@ -146,6 +146,27 @@ export function equityAt(curve: readonly EquityPoint[], time: number, fallback: 
   return eq;
 }
 
+/**
+ * The account's equity just before `trip` opened: the equity curve's last point at or before its
+ * entry (every bar that had ended by then), plus the effect of each other fill from that point up to
+ * the entry, with its symbol marked at the close of its last bar. So a stop-out earlier in the entry's
+ * own bar counts, and nothing that happened after the entry does, in whatever order the bars of
+ * several symbols (a daily bar beside 1-minute data) were processed. Positions are marked at bar
+ * closes, not inside a bar.
+ */
+export function equityBeforeEntry(trip: RoundTrip, fills: readonly Fill[], curve: readonly EquityPoint[], startingBalance: number): number {
+  let i = curve.length - 1;
+  while (i >= 0 && curve[i].time > trip.entryTime) i--;
+  const from = i >= 0 ? curve[i].time : -Infinity;
+  let equity = i >= 0 ? curve[i].equity : startingBalance;
+  const own = new Set(trip.fills);
+  for (const f of fills) {
+    if (f.time < from || f.time > trip.entryTime || own.has(f.id)) continue;
+    equity += (f.side === 'buy' ? 1 : -1) * f.quantity * ((f.markBefore ?? f.price) - f.price) - f.commission;
+  }
+  return equity;
+}
+
 /** An excursion of `dollars` (open P/L), also per share, as % of the position and in R, at the trade's full size. */
 function excursion(dollars: number, trip: RoundTrip, riskPerShare: number | null): Excursion {
   const size = trip.maxQuantity;
@@ -253,7 +274,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     return { gap: false, text: `Your ${name}${at} filled at ${price.toFixed(2)}, already past your ${what} at ${level.toFixed(2)}: price was past both by the time the order could fill.` };
   };
   const gapNote = (what: string) => ` An order waiting for the next bar, or for the market to open, fills at that bar's open wherever price is, even past its own ${what}.`;
-  const equityAtEntry = trip.entryEquity ?? equityAt(input.equityCurve, trip.entryTime, input.startingBalance);
+  const equityAtEntry = equityBeforeEntry(trip, input.fills, input.equityCurve, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
 
@@ -549,11 +570,10 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   }
   if (rules.maxDailyLossPct > 0) {
     // The day's P/L at entry as the account's Day P/L and Strict Mode count it: from the equity the day
-    // started with, so a loss on a position carried from an earlier day counts too, and as the broker
-    // saw it at the fill, so a stop-out earlier in the entry's own bar counts. Older trades fall back to
-    // the equity curve, which has a point only at each bar's end.
-    const dayStart = trip.entryDayStartEquity ?? equityAt(input.equityCurve, exchangeTimeToUnix(day, 0), input.startingBalance);
-    const dayPnl = (trip.entryEquity ?? equityAt(input.equityCurve, trip.entryTime, input.startingBalance)) - dayStart;
+    // started with, so a loss on a position carried from an earlier day counts too, up to the moment of
+    // the entry, so a stop-out earlier in the entry's own bar counts.
+    const dayStart = equityAt(input.equityCurve, exchangeTimeToUnix(day, 0), input.startingBalance);
+    const dayPnl = equityBeforeEntry(trip, input.fills, input.equityCurve, input.startingBalance) - dayStart;
     const pct = dayStart > 0 ? (-dayPnl / dayStart) * 100 : 0;
     out.push({ rule: `Stop trading after −${rules.maxDailyLossPct}% on the day`, passed: pct < rules.maxDailyLossPct, detail: dayPnl < 0 ? `Down ${pct.toFixed(2)}% on the day at entry` : 'Not down on the day at entry' });
   }

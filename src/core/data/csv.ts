@@ -205,17 +205,34 @@ const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-
 function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
   const all: number[] = [];
   const inner: number[] = [];
-  for (let i = 1; i < bars.length && all.length < 20_000; i++) {
-    const d = bars[i].time - bars[i - 1].time;
-    if (dateOnly || !(d > 0 && d < 6 * 3600)) continue;
-    all.push(d);
+  // Gaps of 6 hours or more within a day, and how many of the file's days have more than one row.
+  const long: number[] = [];
+  let days = 0;
+  let multiDays = 0;
+  for (let i = 0; i < bars.length && all.length < 20_000; i++) {
     const date = exchangeDate(bars[i].time);
+    const prevDate = i > 0 ? exchangeDate(bars[i - 1].time) : '';
+    if (date !== prevDate) days++;
+    else if (i < 2 || exchangeDate(bars[i - 2].time) !== date) multiDays++;
+    if (i === 0) continue;
+    const d = bars[i].time - bars[i - 1].time;
+    if (dateOnly || !(d > 0)) continue;
+    if (d >= 6 * 3600) {
+      if (date === prevDate) long.push(d);
+      continue;
+    }
+    all.push(d);
     const m = exchangeMinuteOfDay(bars[i].time);
     const pm = exchangeMinuteOfDay(bars[i - 1].time);
     const spansPart = exchangeDate(bars[i - 1].time) === date && [REGULAR_OPEN, regularCloseMinute(date)].some((edge) => pm < edge && m >= edge);
     if (!spansPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
-  if (!all.length) return dailySpacing(bars);
+  if (!all.length) {
+    // Bars 6 hours or more apart within most days (6, 8 or 12-hour bars) are not daily bars: read as
+    // daily, each day would keep only its last bar. A daily file with the odd second row on a day is.
+    if (long.length && multiDays * 2 >= days) throw new Error(`The bars in this file are ${spacingText(mostCommon(long))} apart, ${UNSUPPORTED}`);
+    return dailySpacing(bars);
+  }
   const gaps = inner.length ? inner : all;
   const allowed = Math.floor(gaps.length * 0.01);
   let step = 0;
@@ -227,13 +244,17 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
   }
   const tf = (Object.keys(TF_SECONDS) as Timeframe[]).find((t) => t !== '1D' && TF_SECONDS[t] === step);
   if (tf) return tf;
-  if (!step) {
-    const counts = new Map<number, number>();
-    for (const d of gaps) counts.set(d, (counts.get(d) ?? 0) + 1);
-    step = [...counts].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0][0];
-  }
-  const spacing = step % 3600 === 0 ? `${step / 3600} hours` : step % 60 === 0 ? `${step / 60} minutes` : `${step} seconds`;
-  throw new Error(`The bars in this file are ${spacing} apart, ${UNSUPPORTED}`);
+  throw new Error(`The bars in this file are ${spacingText(step || mostCommon(gaps))} apart, ${UNSUPPORTED}`);
+}
+
+function mostCommon(gaps: number[]): number {
+  const counts = new Map<number, number>();
+  for (const d of gaps) counts.set(d, (counts.get(d) ?? 0) + 1);
+  return [...counts].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0][0];
+}
+
+function spacingText(step: number): string {
+  return step % 3600 === 0 ? `${step / 3600} hours` : step % 60 === 0 ? `${step / 60} minutes` : `${step} seconds`;
 }
 
 /**
@@ -379,14 +400,14 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     }
     deduped.push(b);
   }
-  let merged = bars.length - deduped.length;
+  const merged = bars.length - deduped.length;
   const tf = detectTimeframe(deduped, sawDateOnly && !sawIntraday);
   let out = deduped;
   let offDays = 0;
   if (tf === '1D') {
     const daily = sessionStampDailyBars(deduped, dates);
     out = daily.bars;
-    merged += daily.merged;
+    if (daily.merged) warnings.push(`${daily.merged} row(s) fell on the same day as another row and were merged into one daily bar (the last row kept).`);
     offDays = daily.offDays.length;
     if (daily.offDays.length) {
       const shown = daily.offDays.slice(0, 5).join(', ');

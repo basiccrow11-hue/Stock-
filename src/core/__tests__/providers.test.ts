@@ -119,6 +119,22 @@ describe('CSV import', () => {
     // 4-hour bars split where the sessions meet.
     const segmented = ['04:00', '08:00', '09:30', '13:30', '16:00'];
     expect(parseCsv(csv([...at('2024-01-16', segmented), ...at('2024-01-17', segmented)])).baseTimeframe).toBe('4h');
+    // 6, 8 and 12-hour bars: read as daily, each day would keep only its last bar.
+    const days = (hhmm: string[]) => csv(['2024-01-16', '2024-01-17', '2024-01-18'].flatMap((d) => at(d, hhmm)));
+    expect(() => parseCsv(days(['09:30', '15:30']))).toThrow('The bars in this file are 6 hours apart, a bar size the replay does not support.');
+    expect(() => parseCsv(days(['04:00', '10:00', '16:00']))).toThrow('The bars in this file are 6 hours apart');
+    expect(() => parseCsv(days(['04:00', '12:00', '20:00']))).toThrow('The bars in this file are 8 hours apart');
+    expect(() => parseCsv(days(['00:00', '12:00']))).toThrow('The bars in this file are 12 hours apart');
+  });
+
+  it('keeps a daily file with the odd second row on a day daily, and says the rows were merged', () => {
+    const rows = ['2024-01-16 16:00,10,11,9,10.5,100', '2024-01-17 16:00,10,11,9,10.5,100', '2024-01-18 09:30,10,11,9,10.6,100', '2024-01-18 16:00,10,11,9,10.7,100', '2024-01-19 16:00,10,11,9,10.5,100'];
+    const r = parseCsv(`Date,Open,High,Low,Close,Volume\n${rows.join('\n')}\n`);
+    expect(r.baseTimeframe).toBe('1D');
+    expect(r.bars).toHaveLength(4);
+    expect(r.bars[2].close).toBe(10.7);
+    expect(r.warnings).toContain('1 row(s) fell on the same day as another row and were merged into one daily bar (the last row kept).');
+    expect(r.warnings.some((w) => w.includes('duplicate timestamps'))).toBe(false);
   });
 
   it('refuses weekly and monthly files, and keeps sparse daily files daily', () => {

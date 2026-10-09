@@ -150,7 +150,7 @@ type PriceField = 'limitPrice' | 'stopPrice';
 function OrderPrices({ order }: { order: Order }) {
   if (order.type === 'market') return <>MKT</>;
   if (order.type === 'limit') return <OrderPriceEditor order={order} field="limitPrice" />;
-  if (order.type === 'stop') return <OrderPriceEditor order={order} field="stopPrice" />;
+  if (order.type === 'stop') return <OrderPriceEditor order={order} field="stopPrice" done={order.triggered} />;
   return (
     <span className="price-legs">
       <span className="muted small">STP</span>
@@ -174,15 +174,16 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
   const discard = useRef(false);
   useEffect(() => {
     if (editing && done) {
-      // A stop-limit's stop triggered while its stop was being edited: the typed stop no longer
-      // applies. Focus moves on to the limit price, which can still be changed.
+      // The stop triggered while it was being edited: the typed stop no longer applies. A stop-limit's
+      // focus moves on to its limit price, which can still be changed.
       const input = inputRef.current;
       discard.current = true;
       setEditing(false);
       if (input && document.activeElement === input) input.closest('.price-legs')?.querySelector<HTMLButtonElement>('button.price-edit')?.focus();
-      toast('warning', `${order.symbol} stop triggered while you were editing it, so the change was not applied. The order is now a limit at ${price(order.limitPrice)}.`, 7000);
+      const now = order.type === 'stop_limit' ? `The order is now a limit at ${price(order.limitPrice)}.` : 'What is left of it fills at market.';
+      toast('warning', `${order.symbol} stop triggered while you were editing it, so the change was not applied. ${now}`, 7000);
     }
-  }, [editing, done, order.symbol, order.limitPrice]);
+  }, [editing, done, order.symbol, order.type, order.limitPrice]);
   useEffect(() => {
     if (!editing && refocus.current) {
       refocus.current = false;
@@ -310,7 +311,7 @@ function OrdersTab({ orders }: { orders: Order[] }) {
                 <td>
                   <span className={`badge ${o.status === 'filled' ? 'success' : o.status === 'rejected' ? 'error' : o.status === 'pending' ? 'warn' : 'neutral'}`}>{o.status.replace('_', ' ')}</span>
                 </td>
-                <td className="muted small">{o.rejectReason ?? (o.status === 'pending' ? 'Waits for the session to open' : o.type === 'stop_limit' && o.triggered ? 'Stop triggered' : '')}</td>
+                <td className="muted small">{o.rejectReason ?? (o.status === 'pending' ? 'Waits for the session to open' : o.triggered ? (o.type === 'stop' ? 'Stop triggered: the rest fills at market' : 'Stop triggered') : '')}</td>
                 <td className="num">
                   {isOpen(o) && (
                     <button className="btn sm ghost" onClick={() => cancelOrder(o.id)}>

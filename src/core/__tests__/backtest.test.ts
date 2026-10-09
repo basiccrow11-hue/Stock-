@@ -128,11 +128,56 @@ describe('backtester: mechanics', () => {
         ['2025-01-14', et('2025-01-15', '09:30')],
         ['2025-01-16', et('2025-01-17', '09:30')],
       ]);
-      expect(r.warnings, tf).toContain("On 2 days (first 2025-01-14) the data has no bar at the close, so the flatten filled at the next session's open, after the overnight gap.");
+      expect(r.warnings, tf).toContain(
+        "On 2 days (2025-01-14, 2025-01-16) the position could not all be closed in the session's last bar (no bar at the close, or more shares than the volume cap let trade there), so the rest was closed from the next session's open, after the overnight gap.",
+      );
       // The rest are flattened the same day, and the strategy is long again after each late flatten.
       expect(closed.length - late.length, tf).toBeGreaterThanOrEqual(2);
       expect(r.trades.some((t) => t.entryTime > et('2025-01-17', '09:30') && t.entryTime < et('2025-01-17', '10:00')), tf).toBe(true);
     }
+  });
+
+  it('closes the rest at the next session’s open when the volume cap lets only part of the flatten trade in the last bar', () => {
+    const strategy: StrategyDefinition = {
+      name: 'always long',
+      rules: [{ id: 'x', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'value', value: 0 } }] }],
+      sizing: { mode: 'shares', shares: 1000 },
+      stopLossPct: 2,
+      exitAtSessionEnd: true,
+      regularHoursOnly: true,
+    };
+    // 2,000 shares a minute: the 25% cap trades 500 a bar, so each side of the trade takes two bars.
+    const bars: Bar[] = [];
+    for (const d of ['2025-01-14', '2025-01-15']) for (let m = 570; m < 960; m++) bars.push(bar(et(d, '00:00') + m * 60, 10, 10, 10, 10, 2000));
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1m', timeframe: '1m', config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 }, tradeFrom: et('2025-01-14', '09:30') }));
+    const first = r.trades[0];
+    expect(r.fills.filter((f) => f.orderId !== undefined && f.time >= et('2025-01-14', '15:59') && f.time < et('2025-01-15', '09:31')).map((f) => [f.action, f.quantity, f.time])).toEqual([
+      ['sell', 500, et('2025-01-14', '15:59')],
+      ['sell', 500, et('2025-01-15', '09:30')],
+    ]);
+    expect([first.closed, first.exitTime]).toEqual([true, et('2025-01-15', '09:30')]);
+    expect(r.warnings.filter((w) => w.startsWith('On '))).toEqual(["On 1 day (2025-01-14) the position could not all be closed in the session's last bar (no bar at the close, or more shares than the volume cap let trade there), so the rest was closed from the next session's open, after the overnight gap."]);
+  });
+
+  it('fills a signal from a day’s last candle at the next open even when the data has no bar at the close', () => {
+    // A close crossing above 10.5 on the 14th's last candle (15:58: there is no 15:59 bar). Flatten off.
+    const bars: Bar[] = [];
+    for (const d of ['2025-01-14', '2025-01-15'])
+      for (let m = 570; m < 959; m++) {
+        const last = d === '2025-01-14' && m === 958;
+        const px = d === '2025-01-15' ? 11 : 10;
+        bars.push(bar(et(d, '00:00') + m * 60, px, last ? 11 : px, px, last ? 11 : px, 100_000));
+      }
+    const strategy: StrategyDefinition = {
+      name: 'cross',
+      rules: [{ id: 'b', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'crosses_above', right: { kind: 'value', value: 10.5 } }] }],
+      sizing: { mode: 'shares', shares: 100 },
+      exitAtSessionEnd: false,
+      regularHoursOnly: true,
+    };
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1m', timeframe: '1m', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-14', '09:30') }));
+    expect(r.signals.map((x) => [x.time, x.action, x.executed])).toEqual([[et('2025-01-15', '09:30'), 'buy', true]]);
+    expect(r.fills.map((f) => [f.time, f.action, f.quantity, f.price])).toEqual([[et('2025-01-15', '09:30'), 'buy', 100, 11]]);
   });
 
   it('risk-percent sizing risks about the requested amount at the stop', () => {

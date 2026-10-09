@@ -85,7 +85,7 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   avgFillPrice: number;
   createdAt: UnixSeconds;
   updatedAt: UnixSeconds;
-  /** For stop_limit: true once the stop has triggered and it is resting as a limit. */
+  /** True once the stop has fired: a stop_limit then rests as a limit, a stop fills at market (the rest of one capped by bar volume fills from the next bars). */
   triggered: boolean;
   /** Bracket children reference their parent entry. */
   parentId?: string;
@@ -126,6 +126,11 @@ export interface Fill {
   at?: 'open' | 'placed' | 'bar';
   /** Realized P/L produced by this fill (closing fills only), after commission. */
   realizedPnl: number;
+  /**
+   * The price the account marked this symbol at when the fill came (the close of its last bar), so
+   * the fill's effect on equity at that moment is known (see equityBeforeEntry). Absent on older fills.
+   */
+  markBefore?: number;
 }
 
 export interface Position {
@@ -176,13 +181,6 @@ export interface RoundTrip {
   /** Bookkeeping for bracketEntry and targetEntry: those orders' ids and how many of their shares have filled in this trade. */
   stopOrder?: { id: string; qty: number };
   targetOrder?: { id: string; qty: number };
-  /**
-   * The account's equity just before the trade's first fill, and the equity its trading day started
-   * with: the day's P/L at entry as Strict Mode sees it, including anything realized earlier in the
-   * same bar. Absent on older trades.
-   */
-  entryEquity?: number;
-  entryDayStartEquity?: number;
   tag?: string;
   /** Highest / lowest price seen while the trade was open. */
   highWhileOpen: number;

@@ -459,6 +459,7 @@ function evaluateActiveChallenge(): void {
   const st = b.state;
   const result = evaluateChallenge(def, {
     trips: st.roundTrips,
+    fills: st.fills,
     equityCurve: st.equityCurve,
     startingBalance: st.startingBalance,
     equity: b.account().equity,
