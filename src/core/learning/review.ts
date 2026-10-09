@@ -147,22 +147,40 @@ export function equityAt(curve: readonly EquityPoint[], time: number, fallback: 
 }
 
 /**
- * The account's equity just before `trip` opened: the equity curve's last point at or before its
- * entry (every bar that had ended by then), plus the effect of each other fill from that point up to
- * the entry, with its symbol marked at the close of its last bar. So a stop-out earlier in the entry's
- * own bar counts, and nothing that happened after the entry does, in whatever order the bars of
- * several symbols (a daily bar beside 1-minute data) were processed. Positions are marked at bar
- * closes, not inside a bar.
+ * The account's equity just before `trip` opened, as the account knew it then: the equity curve's
+ * last point at or before the entry, plus each other fill that came after that point and before the
+ * entry and was known by the time the entry was (a daily bar beside 1-minute data is known only at
+ * its close, so its fills count for an entry on that daily bar, not for a 1-minute entry made while it
+ * was hidden). Each such fill moves equity by what the position held before it made from the price
+ * it was last marked at to the fill's price, less commission; shares it opens are valued at what was
+ * paid for them, so a position opened at a gap is not a loss. So a stop-out earlier in the entry's own
+ * bar counts, nothing after the entry does, and the result does not depend on the order in which the
+ * bars of several symbols were processed. Positions are marked at bar closes, not inside a bar.
  */
 export function equityBeforeEntry(trip: RoundTrip, fills: readonly Fill[], curve: readonly EquityPoint[], startingBalance: number): number {
   let i = curve.length - 1;
   while (i >= 0 && curve[i].time > trip.entryTime) i--;
-  const from = i >= 0 ? curve[i].time : -Infinity;
-  let equity = i >= 0 ? curve[i].equity : startingBalance;
+  const base = i >= 0 ? curve[i].equity : startingBalance;
+  const at = i >= 0 ? curve[i].time : -Infinity;
+  const entryIndex = fills.findIndex((f) => f.id === trip.fills[0]);
+  const entry = fills[entryIndex];
+  if (!entry || entry.knownAt === undefined) return base; // older fills: the curve alone
+  const known = entry.knownAt;
+  // A curve point is written as each bar ends, so it holds the fills of bars that had ended by then,
+  // but not those of an order that filled at once when placed at that same moment.
+  const inCurve = (f: Fill) => f.knownAt! < at || (f.knownAt === at && f.at !== 'placed');
   const own = new Set(trip.fills);
-  for (const f of fills) {
-    if (f.time < from || f.time > trip.entryTime || own.has(f.id)) continue;
-    equity += (f.side === 'buy' ? 1 : -1) * f.quantity * ((f.markBefore ?? f.price) - f.price) - f.commission;
+  const mark = new Map<string, number>();
+  let equity = base;
+  // In the fills' order, which for any one symbol is the order in time.
+  for (let k = 0; k < fills.length; k++) {
+    const f = fills[k];
+    if (own.has(f.id) || f.knownAt === undefined || f.knownAt > known || inCurve(f)) continue;
+    if (f.time > entry.time || (f.time === entry.time && k > entryIndex)) continue;
+    const held = f.positionBefore ?? 0;
+    const from = mark.get(f.symbol) ?? f.markBefore ?? f.price;
+    equity += held * (f.price - from) - f.commission;
+    mark.set(f.symbol, f.price);
   }
   return equity;
 }
@@ -375,6 +393,10 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const past = (stopAt - exitPx) * dir;
     const filledPast = past >= 0.02 - 1e-9 && past > 0.25 * riskPerShare;
     const moved = Math.abs(stopAt - trip.initialStop!) > 1e-9;
+    // A stop that fired is a market order: when the volume cap let only part of it trade there, the
+    // rest filled over the next bars, here after price had come back past the stop.
+    const stopParts = main!.order.type === 'stop' ? input.fills.filter((f) => f.orderId === main!.order.id) : [];
+    const restAfterRecovery = stopParts.length > 1 && (exitPx - stopAt) * dir > 0;
     if (pastStop) {
       const how = entryPast(stopOrder, trip.plannedEntry, bracketEntry, 'stop', trip.initialStop!);
       findings.push({
@@ -382,7 +404,14 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         title: 'Entry filled past your stop',
         detail: `${how.text} The stop then closed the trade at ${exitPx.toFixed(2)}: ${signed(trip.pnl)} after costs, ${fmtR(r ?? 0)} of the ${riskPerShare.toFixed(2)} per share you planned to risk.${how.gap ? gapNote('stop') : ''}`,
       });
-    } else if (inR(exitPx) >= 0) {
+    } else if (restAfterRecovery) {
+      const first = stopParts[0];
+      findings.push({
+        tone: 'neutral',
+        title: 'Your stop fired, and the rest filled after price came back',
+        detail: `Your stop at ${stopAt.toFixed(2)}${moved ? ` (moved from ${trip.initialStop!.toFixed(2)})` : ''} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${first.price.toFixed(2)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${exitPx.toFixed(2)}: ${signed(trip.pnl)} on the trade after costs. That went your way this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`,
+      });
+    } else if (moved && inR(exitPx) >= 0) {
       findings.push({
         tone: trip.pnl > 0.005 ? 'good' : 'neutral',
         title: 'Your moved stop closed the trade',

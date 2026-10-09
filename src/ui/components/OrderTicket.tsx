@@ -3,7 +3,7 @@ import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
 import { assessRisk, positionSizeForRisk } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
-import { closePosition, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
+import { closePosition, estimateFill, setPickTarget, submitOrder, useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
@@ -100,17 +100,23 @@ export function OrderTicket() {
     setStop('');
   }, [symbol, sessionId]);
 
-  // Estimated fill price used for risk math.
-  const entry = useMemo(() => {
+  // Estimated fill price for `n` shares, used for risk math: a limit at its limit; a market order or a
+  // stop with the spread, slippage and market impact its fill would pay (the broker's own estimate, which
+  // Strict Mode checks and the review judges against).
+  const estimate = (n: number): number | undefined => {
     if (type === 'limit' || type === 'stop_limit') return parse(limit);
+    if (type === 'stop' && parse(stop) === undefined) return undefined;
+    const e = estimateFill({ symbol, action, type, quantity: Math.max(1, n), stopPrice: parse(stop), extendedHours: ext });
+    if (e !== null) return e;
     if (type === 'stop') return parse(stop);
     if (last === undefined) return undefined;
-    const ext = now ? marketSession(now) !== 'regular' : false;
-    const hs = halfSpread(exec, last, ext);
+    const hs = halfSpread(exec, last, now ? marketSession(now) !== 'regular' : false);
     return action === 'buy' || action === 'cover' ? last + hs : last - hs;
-  }, [type, limit, stop, last, action, exec, now]);
+  };
 
   const q = Math.floor(Number(quantity) || 0);
+  // Recomputed as the quote, the account (fills use up the bar's volume) or the order changes.
+  const entry = useMemo(() => estimate(q), [type, limit, stop, last, action, exec, now, q, symbol, ext, account]);
   const risk = useMemo(() => {
     if (!entry || !account || q <= 0) return null;
     return assessRisk({ action, quantity: q, entryPrice: entry, stopLoss: opening ? parse(sl) : undefined, takeProfit: opening ? parse(tp) : undefined, equity: account.equity, commissionEstimate: commissionFor(exec, q, entry) });
@@ -125,7 +131,21 @@ export function OrderTicket() {
       toast('warning', 'Set a stop loss (and entry price for non-market orders) first. Position size = risk ÷ stop distance.');
       return;
     }
-    const n = positionSizeForRisk(account.equity, r, entry, stopPx);
+    // The largest size whose risk at its own estimated fill (a bigger order pays more market impact),
+    // with commissions in and out, is within the %: what the ticket shows and Strict Mode checks.
+    const budget = (account.equity * r) / 100;
+    let n = positionSizeForRisk(account.equity, r, estimate(1) ?? entry, stopPx);
+    for (let k = 0; k < 100 && n > 0; k++) {
+      const e = estimate(n);
+      const perShare = e === undefined ? 0 : (e - stopPx) * (direction === 'long' ? 1 : -1);
+      if (perShare <= 0) {
+        n = 0;
+        break;
+      }
+      const fees = 2 * commissionFor(exec, n, e!);
+      if (perShare * n + fees <= budget + 1e-9) break;
+      n = Math.min(n - 1, Math.floor((budget - fees) / perShare));
+    }
     if (n <= 0) {
       toast('warning', 'Stop is on the wrong side or too close to the entry.');
       return;

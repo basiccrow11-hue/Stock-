@@ -4,6 +4,7 @@ import { CsvDataProvider } from '../data/csvProvider';
 import { AlpacaProvider, PolygonProvider } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
 import { et } from './helpers';
+import { formatExchangeDateTime } from '../time';
 
 describe('CSV import', () => {
   it('parses a TradingView-style export with unix seconds', () => {
@@ -208,6 +209,52 @@ describe('CSV import', () => {
   it('can shift close-stamped bars to open time', () => {
     const csv = 'datetime,open,high,low,close,volume\n2025-01-15 09:31,1,1,1,1,1\n2025-01-15 09:32,1,1,1,1,1\n';
     expect(parseCsv(csv, { timestampsAreBarClose: true }).bars[0].time).toBe(et('2025-01-15', '09:30'));
+  });
+
+  it('reads close-stamped files whose last bar of the day is cut short by the close as the open-stamped bars', () => {
+    const rows = (days: string[], hhmm: (d: string) => string[]) => `Date,Open,High,Low,Close,Volume\n${days.flatMap((d) => hhmm(d).map((t) => `${d} ${t},10,11,9,10.5,100`)).join('\n')}\n`;
+    const days = ['2024-11-26', '2024-11-27', '2024-11-29', '2024-12-02']; // the 29th closes at 13:00
+    const starts = (r: ReturnType<typeof parseCsv>) => r.bars.map((b) => formatExchangeDateTime(b.time).slice(5, 16));
+    // TradeStation-style 240-minute regular-hours bars: 09:30-13:30 stamped 13:30, 13:30-16:00 stamped 16:00.
+    const fourHour = rows(days, (d) => (d === '2024-11-29' ? ['13:00'] : ['13:30', '16:00']));
+    const r4 = parseCsv(fourHour, { timestampsAreBarClose: true });
+    expect(r4.baseTimeframe).toBe('4h');
+    expect(starts(r4)).toEqual(['11-26 09:30', '11-26 13:30', '11-27 09:30', '11-27 13:30', '11-29 09:30', '12-02 09:30', '12-02 13:30']);
+    expect(() => parseCsv(fourHour)).toThrow('The bars in this file are 150 minutes apart, a bar size the replay does not support. Use 1, 5, 15 or 30-minute, 1 or 4-hour, or daily bars. If the file stamps each bar at its close, tick "Timestamps mark the bar close".');
+    // Hourly: 10:30 ... 15:30, then 15:30-16:00 stamped 16:00.
+    const r1 = parseCsv(rows(['2024-11-26', '2024-11-27'], () => ['10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00']), { timestampsAreBarClose: true });
+    expect([r1.baseTimeframe, starts(r1).slice(0, 7)]).toEqual(['1h', ['11-26 09:30', '11-26 10:30', '11-26 11:30', '11-26 12:30', '11-26 13:30', '11-26 14:30', '11-26 15:30']]);
+    // Hourly with extended hours on the clock hour and no 09:00-09:30 bar: 09:00, then 10:30.
+    const prepost = ['05:00', '06:00', '07:00', '08:00', '09:00', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00', '17:00', '18:00', '19:00', '20:00'];
+    expect(parseCsv(rows(days.slice(0, 2), () => prepost), { timestampsAreBarClose: true }).baseTimeframe).toBe('1h');
+    // 6-hour bars, close-stamped, are still refused.
+    expect(() => parseCsv(rows(days.slice(0, 2), () => ['15:30', '16:00']), { timestampsAreBarClose: true })).toThrow('The bars in this file are 6 hours apart');
+    expect(() => parseCsv(rows(days.slice(0, 2), () => ['10:00', '16:00', '20:00']), { timestampsAreBarClose: true })).toThrow('The bars in this file are 6 hours apart');
+    // Daily rows stamped at the close stay daily.
+    expect(parseCsv(rows(days, () => ['16:00']), { timestampsAreBarClose: true }).baseTimeframe).toBe('1D');
+    expect(r4.warnings).toEqual([]);
+    expect(r1.warnings).toEqual([]);
+  });
+
+  it('says when a file looks stamped the other way from the close-time option', () => {
+    const rows = (hhmm: string[]) => `Date,Open,High,Low,Close,Volume\n${['2024-11-26', '2024-11-27'].flatMap((d) => hhmm.map((t) => `${d} ${t},10,11,9,10.5,100`)).join('\n')}\n`;
+    const closeStamped = rows(['10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00']);
+    const openStamped = rows(['09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30']);
+    const lateNote = 'No bar is stamped 09:30 and some are stamped at the close, as in a file that stamps each bar at its close. If this one does, tick "Timestamps mark the bar close": read as start times, each bar is shown one bar late and the last of each day after the session.';
+    const earlyNote = 'Some bars are stamped 09:30, the open, and none earlier, as in a file that stamps each bar at its start. If this one does, untick "Timestamps mark the bar close": read as close times, each bar is shown one bar early, before its prices happened.';
+    expect(parseCsv(closeStamped).warnings).toEqual([lateNote]);
+    expect(parseCsv(closeStamped, { timestampsAreBarClose: true }).warnings).toEqual([]);
+    expect(parseCsv(openStamped).warnings).toEqual([]);
+    expect(parseCsv(openStamped, { timestampsAreBarClose: true }).warnings).toEqual([earlyNote]);
+    // With extended hours the signs are 20:00 and 04:00.
+    const eth = (from: number) => rows(Array.from({ length: 4 }, (_, i) => `${String(from + 4 * i).padStart(2, '0')}:00`));
+    expect(parseCsv(eth(8)).warnings).toEqual([lateNote.replace('09:30 and some are stamped at the close', '04:00 and some are stamped 20:00, when after-hours trading ends')]);
+    expect(parseCsv(eth(4), { timestampsAreBarClose: true }).warnings).toEqual([earlyNote.replace('09:30, the open,', '04:00, when pre-market trading starts,')]);
+    expect(parseCsv(eth(8), { timestampsAreBarClose: true }).warnings).toEqual([]);
+    expect(parseCsv(eth(4)).warnings).toEqual([]);
+    // A file that shows neither says nothing, and daily rows stamped at the close are daily.
+    expect(parseCsv(rows(['08:00', '09:00', '09:30', '10:30', '16:00', '17:00'])).warnings).toEqual([]);
+    expect(parseCsv(rows(['16:00'])).warnings).toEqual([]);
   });
 
   it('rejects files without required columns', () => {

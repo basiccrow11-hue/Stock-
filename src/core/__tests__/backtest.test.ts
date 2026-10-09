@@ -3,7 +3,7 @@ import { runBacktest, type BacktestParams } from '../backtest/Backtester';
 import { STRATEGY_PRESETS, evalCondition, type StrategyDefinition } from '../backtest/strategy';
 import { DemoDataProvider } from '../data/demoProvider';
 import { ZERO_COST_CONFIG, DEFAULT_EXECUTION_CONFIG } from '../broker/config';
-import { bar, et } from './helpers';
+import { bar, et, minuteBars } from './helpers';
 import type { Bar } from '../types';
 import { aggregateBars } from '../data/aggregate';
 import { exchangeDate, marketSession } from '../time';
@@ -178,6 +178,39 @@ describe('backtester: mechanics', () => {
     const r = runBacktest(params(bars, strategy, { baseTimeframe: '1m', timeframe: '1m', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-14', '09:30') }));
     expect(r.signals.map((x) => [x.time, x.action, x.executed])).toEqual([[et('2025-01-15', '09:30'), 'buy', true]]);
     expect(r.fills.map((f) => [f.time, f.action, f.quantity, f.price])).toEqual([[et('2025-01-15', '09:30'), 'buy', 100, 11]]);
+  });
+
+  const crossAt100 = (actions: Array<'buy' | 'sell' | 'short' | 'cover'>): StrategyDefinition['rules'] =>
+    actions.map((action) => ({ id: action, logic: 'all', action, conditions: [{ left: { kind: 'close' }, op: action === 'buy' || action === 'cover' ? 'crosses_above' : 'crosses_below', right: { kind: 'value', value: 100 } }] }));
+
+  it('sells what the volume cap left of a strategy exit at the next open, instead of holding it with no stop', () => {
+    // 2,000 shares a minute (500 a bar at the 25% cap). Long 1000 from 09:41; the close crosses below 100
+    // at 15:58, so the exit at 15:59 sells 500 and the rest goes at the 15th's open, 98, before the fall.
+    const d1: [number, number, number, number][] = Array.from({ length: 390 }, (_, i) => (i < 10 ? [99, 99.5, 98.8, 99] : i === 10 ? [99, 101.2, 98.9, 101] : i >= 388 ? [101, 101, 99.4, 99.5] : [101, 101.3, 100.8, 101]));
+    const d2: [number, number, number, number][] = Array.from({ length: 390 }, (_, i) => [98 - i * 0.02, 98.01 - i * 0.02, 97.97 - i * 0.02, 97.98 - i * 0.02]);
+    const bars = [...minuteBars('2025-01-14', '09:30', d1, 2000), ...minuteBars('2025-01-15', '09:30', d2, 2000)];
+    const strategy: StrategyDefinition = { name: 'cross', rules: crossAt100(['buy', 'sell']), stopLossPct: 2, sizing: { mode: 'shares', shares: 1000 }, exitAtSessionEnd: false, regularHoursOnly: true };
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1m', timeframe: '1m', config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 }, startingBalance: 1_000_000 }));
+    expect(r.fills.filter((f) => f.action === 'sell').map((f) => [f.quantity, f.time, f.price])).toEqual([
+      [500, et('2025-01-14', '15:59'), 101],
+      [500, et('2025-01-15', '09:30'), 98],
+    ]);
+    expect(r.trades[0].closed).toBe(true);
+  });
+
+  it('enters a reversal decided on a thin day’s last bar at the next open, instead of letting it expire', () => {
+    // The 14th ends at 15:45 (no bar at the close); the close crosses below 100 on the 15:44 candle, so
+    // the long is sold at 15:45 and the short, sent once flat, fills at the 15th's open.
+    const d1: [number, number, number, number][] = Array.from({ length: 376 }, (_, i) => (i === 374 ? [101, 101, 98.5, 99] : i === 375 ? [99, 99.2, 98.8, 99] : i < 10 ? [99, 99.5, 98.8, 99] : i === 10 ? [99, 101.2, 98.9, 101] : [101, 101.3, 100.8, 101]));
+    const d2: [number, number, number, number][] = Array.from({ length: 390 }, () => [98.5, 98.8, 98.2, 98.5]);
+    const bars = [...minuteBars('2025-01-14', '09:30', d1, 50_000), ...minuteBars('2025-01-15', '09:30', d2, 50_000)];
+    const strategy: StrategyDefinition = { name: 'reverse', rules: crossAt100(['buy', 'sell', 'short', 'cover']), sizing: { mode: 'shares', shares: 100 }, exitAtSessionEnd: false, regularHoursOnly: true };
+    const r = runBacktest(params(bars, strategy, { baseTimeframe: '1m', timeframe: '1m', config: ZERO_COST_CONFIG }));
+    expect(r.fills.map((f) => [f.action, f.quantity, f.time])).toEqual([
+      ['buy', 100, et('2025-01-14', '09:41')],
+      ['sell', 100, et('2025-01-14', '15:45')],
+      ['short', 100, et('2025-01-15', '09:30')],
+    ]);
   });
 
   it('risk-percent sizing risks about the requested amount at the stop', () => {

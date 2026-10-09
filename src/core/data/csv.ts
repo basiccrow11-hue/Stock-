@@ -3,7 +3,7 @@
  * Accepts common column names and time formats, validates every row, and reports what it skipped.
  */
 import type { Bar, Timeframe } from '../types';
-import { REGULAR_OPEN, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, isTradingDay, regularCloseMinute } from '../time';
+import { AFTERHOURS_CLOSE, PREMARKET_OPEN, REGULAR_OPEN, exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, isTradingDay, regularCloseMinute } from '../time';
 
 export interface CsvParseOptions {
   /** How to read timestamps without an explicit offset. Default: exchange time (America/New_York). */
@@ -201,19 +201,40 @@ const UNSUPPORTED = 'a bar size the replay does not support. Use 1, 5, 15 or 30-
  * the largest whole-minute step that nearly every such gap is a multiple of: minutes with no trades
  * leave a thinly traded 1-minute file at 1 minute, and 3 or 10-minute bars are refused rather than
  * read as 1 or 5-minute bars, which would show each bar before it had finished.
+ *
+ * With `closeStamped`, each stamp is a bar's end: the gap into a stamp is that bar's length, except
+ * for a bar that ends at a session's edge (09:30, the close, 20:00), which may be cut short (a 4-hour
+ * file's 13:30-16:00 bar), and a day's first bar is the time since the day began trading (09:30 in a
+ * regular-hours file, 04:00 otherwise).
  */
-function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
+function detectTimeframe(bars: Bar[], dateOnly: boolean, closeStamped = false): Timeframe {
   const all: number[] = [];
   const inner: number[] = [];
   // Gaps of 6 hours or more within a day, and how many of the file's days have more than one row.
   const long: number[] = [];
   let days = 0;
   let multiDays = 0;
+  const edges = (date: string) => [REGULAR_OPEN, regularCloseMinute(date), AFTERHOURS_CLOSE];
+  const dayStart = closeStamped && regularStamps(bars) ? REGULAR_OPEN : PREMARKET_OPEN;
   for (let i = 0; i < bars.length && all.length < 20_000; i++) {
     const date = exchangeDate(bars[i].time);
     const prevDate = i > 0 ? exchangeDate(bars[i - 1].time) : '';
+    const m = exchangeMinuteOfDay(bars[i].time);
     if (date !== prevDate) days++;
     else if (i < 2 || exchangeDate(bars[i - 2].time) !== date) multiDays++;
+    if (closeStamped && !dateOnly) {
+      const start = date !== prevDate ? (m > dayStart ? dayStart : null) : exchangeMinuteOfDay(bars[i - 1].time);
+      const d = start === null ? 0 : (m - start) * 60;
+      if (d <= 0) continue;
+      if (d >= 6 * 3600) long.push(d);
+      else {
+        all.push(d);
+        // A bar that ends at a session's edge may be cut short, and a gap across one may hide a short
+        // bar before it (a thin day with no bar at the open), so neither sets the size.
+        if (!edges(date).some((e) => m === e || (start! < e && m > e))) inner.push(d);
+      }
+      continue;
+    }
     if (i === 0) continue;
     const d = bars[i].time - bars[i - 1].time;
     if (dateOnly || !(d > 0)) continue;
@@ -222,17 +243,17 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
       continue;
     }
     all.push(d);
-    const m = exchangeMinuteOfDay(bars[i].time);
     const pm = exchangeMinuteOfDay(bars[i - 1].time);
     const spansPart = exchangeDate(bars[i - 1].time) === date && [REGULAR_OPEN, regularCloseMinute(date)].some((edge) => pm < edge && m >= edge);
     if (!spansPart && i >= 2 && exchangeDate(bars[i - 1].time) === exchangeDate(bars[i - 2].time)) inner.push(d);
   }
-  if (!all.length) {
-    // Bars 6 hours or more apart within most days (6, 8 or 12-hour bars) are not daily bars: read as
-    // daily, each day would keep only its last bar. A daily file with the odd second row on a day is.
-    if (long.length && multiDays * 2 >= days) throw new Error(`The bars in this file are ${spacingText(mostCommon(long))} apart, ${UNSUPPORTED}`);
-    return dailySpacing(bars);
+  // Bars 6 hours or more apart within most days (6, 8 or 12-hour bars) are not daily bars: read as
+  // daily, each day would keep only its last bar. A daily file with the odd second row on a day is.
+  // Close-stamped, such bars can come with a short one at the close (6-hour bars 09:30-15:30, 15:30-16:00).
+  if (long.length && multiDays * 2 >= days && (!all.length || (closeStamped && !inner.length))) {
+    throw new Error(`The bars in this file are ${spacingText(mostCommon(long))} apart, ${UNSUPPORTED}`);
   }
+  if (!all.length) return dailySpacing(bars);
   const gaps = inner.length ? inner : all;
   const allowed = Math.floor(gaps.length * 0.01);
   let step = 0;
@@ -245,6 +266,38 @@ function detectTimeframe(bars: Bar[], dateOnly: boolean): Timeframe {
   const tf = (Object.keys(TF_SECONDS) as Timeframe[]).find((t) => t !== '1D' && TF_SECONDS[t] === step);
   if (tf) return tf;
   throw new Error(`The bars in this file are ${spacingText(step || mostCommon(gaps))} apart, ${UNSUPPORTED}`);
+}
+
+/** Every stamp falls in a regular session (after its 09:30 open, up to its close): a regular-hours file stamped at bar close. */
+function regularStamps(bars: readonly Bar[]): boolean {
+  return bars.every((b) => {
+    const m = exchangeMinuteOfDay(b.time);
+    return m > REGULAR_OPEN && m <= regularCloseMinute(exchangeDate(b.time));
+  });
+}
+
+/**
+ * Stamps where a file stamped at bar close puts them and one stamped at bar open never does: some at
+ * the session's end (the close for a regular-hours file, else 20:00) and none at its start (09:30, else
+ * 04:00). Says so, or null.
+ */
+function closeStampSigns(bars: readonly Bar[]): string | null {
+  const minutes = bars.map((b) => exchangeMinuteOfDay(b.time));
+  if (regularStamps(bars)) {
+    return bars.some((b, i) => minutes[i] === regularCloseMinute(exchangeDate(b.time))) ? 'No bar is stamped 09:30 and some are stamped at the close' : null;
+  }
+  const extended = minutes.every((m) => m > PREMARKET_OPEN && m <= AFTERHOURS_CLOSE);
+  return extended && minutes.includes(AFTERHOURS_CLOSE) ? 'No bar is stamped 04:00 and some are stamped 20:00, when after-hours trading ends' : null;
+}
+
+/** The reverse: some stamps at the session's start (09:30, else 04:00), none before it or after its end. Says so, or null. */
+function openStampSigns(bars: readonly Bar[]): string | null {
+  const minutes = bars.map((b) => exchangeMinuteOfDay(b.time));
+  if (bars.every((b, i) => minutes[i] >= REGULAR_OPEN && minutes[i] <= regularCloseMinute(exchangeDate(b.time)))) {
+    return minutes.includes(REGULAR_OPEN) ? 'Some bars are stamped 09:30, the open, and none earlier' : null;
+  }
+  const extended = minutes.every((m) => m >= PREMARKET_OPEN && m < AFTERHOURS_CLOSE);
+  return extended && minutes.includes(PREMARKET_OPEN) ? 'Some bars are stamped 04:00, when pre-market trading starts, and none earlier' : null;
 }
 
 function mostCommon(gaps: number[]): number {
@@ -401,7 +454,23 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
     deduped.push(b);
   }
   const merged = bars.length - deduped.length;
-  const tf = detectTimeframe(deduped, sawDateOnly && !sawIntraday);
+  const dateOnly = sawDateOnly && !sawIntraday;
+  let tf: Timeframe;
+  try {
+    tf = detectTimeframe(deduped, dateOnly, opts.timestampsAreBarClose);
+  } catch (e) {
+    // A file that reads as a supported size once its stamps are taken as bar ends says so.
+    let closeFits = false;
+    if (!opts.timestampsAreBarClose && !dateOnly && closeStampSigns(deduped)) {
+      try {
+        closeFits = detectTimeframe(deduped, false, true) !== '1D';
+      } catch {
+        // refused that way too
+      }
+    }
+    if (closeFits) throw new Error(`${(e as Error).message} If the file stamps each bar at its close, tick "Timestamps mark the bar close".`);
+    throw e;
+  }
   let out = deduped;
   let offDays = 0;
   if (tf === '1D') {
@@ -414,7 +483,36 @@ export function parseCsv(text: string, options: Partial<CsvParseOptions> = {}): 
       warnings.push(`${daily.offDays.length} daily bar(s) dated on a weekend or market holiday were skipped: ${shown}${daily.offDays.length > 5 ? ` and ${daily.offDays.length - 5} more` : ''}.`);
     }
     if (!out.length) throw new Error('No daily bars fall on trading days. Check the date column.');
-  } else if (opts.timestampsAreBarClose) for (const b of out) b.time -= TF_SECONDS[tf];
+  } else if (opts.timestampsAreBarClose) {
+    const signs = openStampSigns(out);
+    if (signs) {
+      warnings.push(
+        `${signs}, as in a file that stamps each bar at its start. If this one does, untick "Timestamps mark the bar close": read as close times, each bar is shown one bar early, before its prices happened.`,
+      );
+    }
+    // A bar starts one bar before its stamp, or where the bar before it that day ended if that is
+    // later (a short bar at a session's edge, like a 4-hour file's 13:30-16:00 bar), or at 09:30 for
+    // a day's first bar in a regular-hours file (a half day's one 09:30-13:00 bar): the same bars as
+    // the vendor's open-stamped export.
+    const regularOnly = regularStamps(out);
+    let prev = -Infinity;
+    let prevDate = '';
+    for (const b of out) {
+      const stamp = b.time;
+      const date = exchangeDate(stamp);
+      const from = date === prevDate ? prev : regularOnly ? exchangeTimeToUnix(date, REGULAR_OPEN) : -Infinity;
+      b.time = Math.max(stamp - TF_SECONDS[tf], from);
+      prev = stamp;
+      prevDate = date;
+    }
+  } else {
+    const signs = closeStampSigns(out);
+    if (signs) {
+      warnings.push(
+        `${signs}, as in a file that stamps each bar at its close. If this one does, tick "Timestamps mark the bar close": read as start times, each bar is shown one bar late and the last of each day after the session.`,
+      );
+    }
+  }
   if (merged) warnings.push(`${merged} duplicate timestamps were merged (last row kept).`);
   // Without volume a bar's volume is 0: no volume pane, no meaningful VWAP, and no cap on fills.
   const noVolume = 'the volume pane is empty, VWAP is not meaningful, and fills are not limited by bar volume';

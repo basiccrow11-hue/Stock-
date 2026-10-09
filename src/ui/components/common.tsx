@@ -256,7 +256,8 @@ export function isTextField(el: Element | null): boolean {
   return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file'].includes((el as HTMLInputElement).type);
 }
 
-// Whether the last input was a tap (or a pen), with no key pressed outside a text field since.
+// Whether the last input was a tap (or a pen), with no Tab and no key pressed outside a text field since
+// (Tab moves focus, so it is keyboard navigation even when pressed in a text field).
 // Chromium marks focus a script gives right after a text field or a key press as :focus-visible, so
 // on a phone the on-screen keyboard's Go key passes it on to the price button, then to the tab focus
 // moves to when that order goes away, and a dialog would take that tab for a keyboard user's opener.
@@ -264,7 +265,7 @@ let touchInput = false;
 if (typeof document !== 'undefined') {
   document.addEventListener('pointerdown', (e) => (touchInput = e.pointerType === 'touch' || e.pointerType === 'pen'), true);
   document.addEventListener('keydown', (e) => {
-    if (!isTextField(e.target instanceof Element ? e.target : null)) touchInput = false;
+    if (e.key === 'Tab' || !isTextField(e.target instanceof Element ? e.target : null)) touchInput = false;
   }, true);
 }
 

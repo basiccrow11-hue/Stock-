@@ -403,10 +403,14 @@ export class SimBroker {
         commissionEstimate: commissionFor(this.cfg, qty, refPrice),
       });
       if (risk.errors.length) return reject(expected.atOnce ? throughTheMarket(risk.errors[0], req.type, refPrice) : risk.errors[0]);
+      // The risk itself is measured at the price the order is expected to fill at with its costs, as
+      // the ticket sizes it and the review judges it.
+      const fillAt = this.estimateFill({ ...req, symbol, quantity: qty }) ?? refPrice;
+      const costed = fillAt === refPrice ? risk : assessRisk({ action: req.action, quantity: qty, entryPrice: fillAt, stopLoss: req.stopLoss, takeProfit: req.takeProfit, equity: this.account().equity, commissionEstimate: commissionFor(this.cfg, qty, fillAt) });
       const acct = this.account();
-      const violation = strictRiskViolation(this.cfg.strictRisk, risk, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity });
+      const violation = strictRiskViolation(this.cfg.strictRisk, costed, { dayPnl: acct.dayPnl, dayStartEquity: this.s.dayStartEquity });
       if (violation) return reject(violation);
-      warnings.push(...risk.warnings);
+      warnings.push(...costed.warnings);
       // A limit may still fill anywhere up to its price.
       const needed = qty * (req.type === 'limit' ? req.limitPrice! : refPrice);
       const avail = this.availableBuyingPower();
@@ -596,6 +600,26 @@ export class SimBroker {
     return { price: own, quote, atOnce: false };
   }
 
+  /**
+   * Where an order is expected to fill if placed now, with the costs a fill pays: a limit at its
+   * limit; a market order, or a stop or limit already through the market, at the last price; a stop at
+   * its stop price; with the spread, slippage and the market impact of the shares the last bar's volume
+   * lets trade at once. The ticket sizes from this and Strict Mode checks risk at it, so a trade sized
+   * to the rule's % passes the review's check of that %. A market order that waits for the next bar's
+   * open, or a stop that price gaps through, can still fill elsewhere. Null before the symbol has a price.
+   */
+  estimateFill(o: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number | null {
+    const symbol = o.symbol.toUpperCase();
+    if (o.type === 'limit' || o.type === 'stop_limit') return o.limitPrice ?? null;
+    const last = this.s.lastPrice[symbol];
+    if (last === undefined) return null;
+    const expected = this.expectedEntry({ ...o, symbol, extendedHours: !!o.extendedHours });
+    const x = o.type === 'market' || expected.atOnce ? last : o.stopPrice!;
+    const volume = this.s.lastBar[symbol]?.volume ?? 0;
+    const qty = Math.min(o.quantity, this.barCapacity(volume, this.s.barVolumeUsed?.[symbol] ?? 0));
+    return this.marketFill(actionSide(o.action), x, qty, volume, this.symbolSession(symbol) !== 'regular').price;
+  }
+
   /** Shares that can still trade against a bar of `volume` once `used` have: a bar without volume (none recorded) is not capped. */
   private barCapacity(volume: number, used = 0): number {
     return this.cfg.maxParticipation > 0 && volume > 0 ? Math.max(0, Math.floor(volume * this.cfg.maxParticipation) - used) : Infinity;
@@ -714,7 +738,7 @@ export class SimBroker {
         reach(pos);
         // At the very start of the bar, for an order placed before it began: the bar's open set the price.
         const atOpen = seg === 0 && pos === path[0] && !startsAt.has(trig.order.id);
-        const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, skip, atOpen ? 'open' : 'bar');
+        const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, skip, atOpen ? 'open' : 'bar', bar.time + barSeconds);
         capacity -= used;
         traded += used;
         // A trade opened (or reversed into) here starts at this level.
@@ -857,7 +881,7 @@ export class SimBroker {
     const used = this.s.barVolumeUsed?.[o.symbol] ?? 0;
     const capacity = this.barCapacity(bar.volume, used);
     const skip = new Set<string>();
-    const filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed');
+    const filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
     if (filled > 0) (this.s.barVolumeUsed ??= {})[o.symbol] = used + filled;
     // A stop-limit may have triggered without filling; that's fine, it now rests as a limit.
     return isOpen(o) && capacity - filled <= 0 ? 'capped' : undefined;
@@ -866,8 +890,9 @@ export class SimBroker {
   /**
    * Execute an order that fired at path price `x`. Returns shares filled (0 if it only triggered
    * or could not fill). Adds the order to `skip` when it should not be reconsidered this bar.
+   * `knownAt` is when the fill becomes known (Fill.knownAt).
    */
-  private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>, at?: Fill['at']): number {
+  private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>, at: Fill['at'], knownAt: UnixSeconds): number {
     const side = actionSide(o.action);
     const pos = this.position(o.symbol);
 
@@ -915,15 +940,9 @@ export class SimBroker {
     let slippage = 0;
     const isMarketable = o.type === 'market' || o.type === 'stop';
     if (isMarketable) {
-      const quote = side === 'buy' ? x + hs : x - hs;
-      // Impact grows with the share of the bar's volume taken, up to the whole bar: with no
-      // participation cap an order can be many bars' volume, and an unbounded charge would put fills
-      // tens of percent off the market (and sells below zero).
-      const impactPct = barVolume > 0 ? Math.min(MAX_IMPACT_PCT, (qty / barVolume) * 100) : 0;
-      const slipBps = this.cfg.slippage.bps + this.cfg.slippage.impactBpsPerPctOfVolume * impactPct;
-      const slip = (quote * slipBps) / 10_000;
-      price = side === 'buy' ? ceilTick(quote + slip) : Math.max(MIN_PRICE, floorTick(quote - slip));
-      slippage = Math.abs(price - quote) * qty;
+      const fill = this.marketFill(side, x, qty, barVolume, ext);
+      price = fill.price;
+      slippage = Math.abs(price - fill.quote) * qty;
     } else {
       // Limit (or triggered stop-limit): never worse than the limit; better if the market gapped through.
       const L = o.limitPrice!;
@@ -931,12 +950,29 @@ export class SimBroker {
     }
     const spreadCost = hs * qty;
 
-    this.applyFill(o, qty, price, time, slippage, spreadCost, at);
+    this.applyFill(o, qty, price, time, slippage, spreadCost, at, knownAt);
     if (isOpen(o)) skip.add(o.id); // partially filled: capacity exhausted for this bar
     return qty;
   }
 
-  private applyFill(o: Order, qty: number, price: number, time: UnixSeconds, slippage: number, spreadCost: number, at?: Fill['at']): void {
+  /**
+   * The price a marketable order (a market order, or a stop once it fires) gets for `qty` shares at path
+   * price `x` against a bar of `barVolume` shares: the quote (buys pay the ask, sells hit the bid), then
+   * slippage and market impact, rounded to the tick against the trader.
+   */
+  private marketFill(side: Side, x: number, qty: number, barVolume: number, ext: boolean): { price: number; quote: number } {
+    const hs = halfSpread(this.cfg, x, ext);
+    const quote = side === 'buy' ? x + hs : x - hs;
+    // Impact grows with the share of the bar's volume taken, up to the whole bar: with no
+    // participation cap an order can be many bars' volume, and an unbounded charge would put fills
+    // tens of percent off the market (and sells below zero).
+    const impactPct = barVolume > 0 ? Math.min(MAX_IMPACT_PCT, (qty / barVolume) * 100) : 0;
+    const slipBps = this.cfg.slippage.bps + this.cfg.slippage.impactBpsPerPctOfVolume * impactPct;
+    const slip = (quote * slipBps) / 10_000;
+    return { price: side === 'buy' ? ceilTick(quote + slip) : Math.max(MIN_PRICE, floorTick(quote - slip)), quote };
+  }
+
+  private applyFill(o: Order, qty: number, price: number, time: UnixSeconds, slippage: number, spreadCost: number, at: Fill['at'], knownAt: UnixSeconds): void {
     const side: Side = actionSide(o.action);
     // The fee for everything this order has filled, less what its earlier partial fills paid: the
     // per-order fee and minimum are charged once per order, not once per fill.
@@ -948,6 +984,7 @@ export class SimBroker {
     // What the account marked the symbol at as this fill came, so its effect on equity then is known.
     const markBefore = this.s.lastPrice[symbol] ?? price;
     const pos = this.s.positions[symbol] ?? { symbol, quantity: 0, avgPrice: 0, realizedPnl: 0 };
+    const positionBefore = pos.quantity;
     const signed = side === 'buy' ? qty : -qty;
 
     // ---- position + realized P/L (average-cost)
@@ -993,6 +1030,8 @@ export class SimBroker {
       realizedPnl: money(realizedGross - commission),
       ...(at ? { at } : {}),
       markBefore,
+      positionBefore,
+      knownAt,
     };
     this.s.fills.push(fill);
     this.log(o.status === 'filled' ? 'filled' : 'partial', `${o.action.toUpperCase()} ${qty} ${symbol} @ ${price.toFixed(2)}${o.status === 'partially_filled' ? ` (partial ${o.filledQty}/${o.quantity})` : ''}`, o.id);

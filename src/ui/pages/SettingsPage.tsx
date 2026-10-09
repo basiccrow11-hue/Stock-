@@ -75,6 +75,8 @@ function CsvImportCard() {
   const [closeStamped, setCloseStamped] = useState(false);
   const [parsed, setParsed] = useState<CsvParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Counts reads, so a screen reader hears the result of each one, the same message again included.
+  const [readN, setReadN] = useState(0);
   // A second file for a ticker adds to its data by default (data split by year stays one history).
   const [replace, setReplace] = useState(false);
   // A new file box after each save, so choosing the same file again reads it again.
@@ -82,6 +84,13 @@ function CsvImportCard() {
   const ticker = symbol.trim().toUpperCase();
   const existing = datasets.find((d) => d.symbol === ticker);
   const canAdd = !!existing && !!parsed && existing.baseTimeframe === parsed.baseTimeframe;
+  const named = (text: string) => (file ? `${file.name}: ${text}` : text);
+  const errorText = error ? named(error) : '';
+  const summary = parsed
+    ? named(
+        `${parsed.rowsRead.toLocaleString('en-US')} rows read, ${parsed.bars.length.toLocaleString('en-US')} valid ${parsed.baseTimeframe} bars, ${parsed.rowsSkipped} skipped. Range ${dateTime(parsed.firstTime)} to ${dateTime(parsed.lastTime)} ET.`,
+      )
+    : '';
   const combined = useMemo(() => (canAdd && !replace ? combineBars(existing!.bars, parsed!.bars) : null), [canAdd, replace, existing, parsed]);
   // A deleted dataset takes its Delete button with it: focus goes to another dataset's, else the file box.
   const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('tbody button') ?? card.querySelector<HTMLElement>('input[type=file]'));
@@ -95,6 +104,7 @@ function CsvImportCard() {
       setParsed(null);
       setError((e as Error).message);
     }
+    setReadN((n) => n + 1);
   }, [file, tz, closeStamped]);
 
   const onFile = async (f: File | undefined) => {
@@ -103,6 +113,7 @@ function CsvImportCard() {
       setFile(null);
       setParsed(null);
       setError(`${f.name} is larger than 200 MB. Split it by year or symbol.`);
+      setReadN((n) => n + 1);
       return;
     }
     const text = await f.text();
@@ -137,6 +148,7 @@ function CsvImportCard() {
       setFileBox((n) => n + 1);
     } catch (e) {
       setError(`Could not save: ${(e as Error).message}`);
+      setReadN((n) => n + 1);
     }
   };
 
@@ -176,23 +188,28 @@ function CsvImportCard() {
           <input type="checkbox" checked={closeStamped} onChange={(e) => setCloseStamped(e.target.checked)} /> Timestamps mark the bar close
         </label>
       </div>
-      {error && (
-        <div className="alert error">
-          {file ? `${file.name}: ` : ''}
-          {error}
+      {errorText && (
+        <div className="alert error" aria-hidden="true">
+          {errorText}
         </div>
       )}
-      {parsed && (
-        <div className="alert info">
-          {file ? `${file.name}: ` : ''}
-          {parsed.rowsRead.toLocaleString('en-US')} rows read, {parsed.bars.length.toLocaleString('en-US')} valid {parsed.baseTimeframe} bars, {parsed.rowsSkipped} skipped. Range {dateTime(parsed.firstTime)} to {dateTime(parsed.lastTime)} ET.
-          {parsed.warnings.map((w, i) => (
+      {summary && (
+        <div className="alert info" aria-hidden="true">
+          {summary}
+          {parsed!.warnings.map((w, i) => (
             <div key={i} className="warn">
               {w}
             </div>
           ))}
         </div>
       )}
+      {/* Screen readers hear a refusal at once and the summary and its warnings when the reader is free. */}
+      <div className="sr-only" role="alert">
+        {errorText && <span key={readN}>{errorText}</span>}
+      </div>
+      <div className="sr-only" role="status">
+        {summary && <span key={readN}>{[summary, ...parsed!.warnings].join(' ')}</span>}
+      </div>
       {parsed && existing && (
         <fieldset className="stack" style={{ gap: 4, border: 0, padding: 0, margin: 0 }}>
           <legend className="small">

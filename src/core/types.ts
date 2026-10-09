@@ -131,6 +131,14 @@ export interface Fill {
    * the fill's effect on equity at that moment is known (see equityBeforeEntry). Absent on older fills.
    */
   markBefore?: number;
+  /** The symbol's position (signed: positive long) just before this fill. Absent on older fills. */
+  positionBefore?: number;
+  /**
+   * When the fill became known: the end of the bar it came from (a daily bar beside 1-minute data is
+   * shown, and its fills processed, only at its close), or the moment of placing for an order that
+   * filled at once. Absent on older fills.
+   */
+  knownAt?: UnixSeconds;
 }
 
 export interface Position {

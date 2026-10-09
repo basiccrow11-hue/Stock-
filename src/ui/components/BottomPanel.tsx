@@ -311,7 +311,7 @@ function OrdersTab({ orders }: { orders: Order[] }) {
                 <td>
                   <span className={`badge ${o.status === 'filled' ? 'success' : o.status === 'rejected' ? 'error' : o.status === 'pending' ? 'warn' : 'neutral'}`}>{o.status.replace('_', ' ')}</span>
                 </td>
-                <td className="muted small">{o.rejectReason ?? (o.status === 'pending' ? 'Waits for the session to open' : o.triggered ? (o.type === 'stop' ? 'Stop triggered: the rest fills at market' : 'Stop triggered') : '')}</td>
+                <td className="muted small">{o.rejectReason ?? (o.status === 'pending' ? 'Waits for the session to open' : o.triggered ? (o.type !== 'stop' ? 'Stop triggered' : isOpen(o) ? 'Stop triggered: the rest fills at market' : '') : '')}</td>
                 <td className="num">
                   {isOpen(o) && (
                     <button className="btn sm ghost" onClick={() => cancelOrder(o.id)}>

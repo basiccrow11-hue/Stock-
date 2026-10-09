@@ -162,6 +162,15 @@ export function runBacktest(p: BacktestParams): BacktestResult {
       }
     }
 
+    // An entry waiting for the book to be flat (a reversal, or a signal during a flatten) is sent as
+    // this bar opens, so it belongs to the session it can fill in, even after a thin day that had no
+    // bar at the close.
+    if (pendingEntry && broker.position(symbol).quantity === 0) {
+      const pe = pendingEntry;
+      pendingEntry = null;
+      submitEntry(pe.action, pe.ref, b.time, pe.candleTime);
+    }
+
     // A new candle opening means the previous one has closed: evaluate signals on it.
     if (currentKey && key !== currentKey && b.time >= p.tradeFrom) {
       const i = candleIndex.get(currentKey)!;
@@ -180,7 +189,9 @@ export function runBacktest(p: BacktestParams): BacktestResult {
           const applies = !flattening && (action === 'sell' ? q > 0 : q < 0);
           if (!applies) continue;
           for (const o of broker.workingOrders(symbol)) broker.cancel(o.id, 'Strategy exit');
-          const r = broker.submit({ symbol, action, type: 'market', quantity: Math.abs(q), tif: 'day' });
+          // Good till filled: what the volume cap leaves at the session's end is sold at the next open,
+          // as the stop it replaces would have been, rather than held with no exit at all.
+          const r = broker.submit({ symbol, action, type: 'market', quantity: Math.abs(q), tif: 'gtc' });
           signals.push({ time: b.time, candleTime: candles[i].time, action, price: ref, executed: r.ok, note: r.ok ? undefined : r.error });
         } else if (hasWorkingEntry) {
           continue;
@@ -208,12 +219,6 @@ export function runBacktest(p: BacktestParams): BacktestResult {
 
     broker.onBar(symbol, b, barEndTime(b, p.baseTimeframe) - b.time);
     if (owedDate && broker.position(symbol).quantity === 0) owedDate = '';
-
-    if (pendingEntry && broker.position(symbol).quantity === 0) {
-      const pe = pendingEntry;
-      pendingEntry = null;
-      submitEntry(pe.action, pe.ref, b.time, pe.candleTime);
-    }
 
     if (b.time >= p.tradeFrom) {
       if (firstTradePrice === null) firstTradePrice = b.open;

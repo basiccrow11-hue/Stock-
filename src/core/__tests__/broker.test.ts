@@ -328,6 +328,26 @@ describe('order validation', () => {
     expect(strict.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 }).ok).toBe(false); // no stop
     expect(strict.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 99 }).ok).toBe(true);
   });
+
+  it('estimates a fill with its spread, slippage, impact and tick rounding, and Strict Mode checks risk there', () => {
+    // Default costs at 100: half spread 0.01, 1 bp slippage plus 5 bp per 1% of the bar's volume.
+    const strictRisk = { enabled: true, maxRiskPctPerTrade: 1, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+    const { broker, next } = setup({ ...DEFAULT_EXECUTION_CONFIG, strictRisk });
+    next(100, 100, 100, 100, 50_000);
+    const order = { symbol: S, action: 'buy' as const, type: 'market' as const, quantity: 500 };
+    // 500 of 50,000 shares = 1% of the bar: 6 bp in all on the 100.01 ask is 100.070006, rounded up to 100.08.
+    expect(broker.estimateFill(order)).toBe(100.08);
+    expect(broker.estimateFill({ ...order, action: 'short' })).toBe(99.93);
+    expect(broker.estimateFill({ ...order, type: 'stop', stopPrice: 101 })).toBe(101.08);
+    expect(broker.estimateFill({ ...order, type: 'limit', limitPrice: 99.5 })).toBe(99.5);
+    // At the quote, 500 shares with a stop at 98.01 risk $1000 = 1%; at the fill they would risk $1035.
+    expect(broker.submit({ ...order, stopLoss: 98.01 }).error).toMatch(/^Strict risk: this trade risks 1\.0[34]% \(limit 1%\)\.$/);
+    // Sized at the estimate (483 shares take less of the bar, so 100.07), the order passes and fills there.
+    expect(broker.estimateFill({ ...order, quantity: 483 })).toBe(100.07);
+    expect(483 * (100.07 - 98.01)).toBeLessThanOrEqual(1000);
+    expect(broker.submit({ ...order, quantity: 483, stopLoss: 98.01 }).ok).toBe(true);
+    expect(broker.state.fills.at(-1)!.price).toBe(100.07);
+  });
 });
 
 describe('opening orders that meet a position the other way', () => {

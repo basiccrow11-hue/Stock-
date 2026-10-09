@@ -8,7 +8,7 @@ import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG } from '../broker/config';
 import type { Bar, RoundTrip } from '../types';
 import { ReplaySession } from '../replay/ReplaySession';
 import { ReplayEngine } from '../replay/ReplayEngine';
-import { bar, et } from './helpers';
+import { bar, et, minuteBars } from './helpers';
 
 function trip(p: Partial<RoundTrip>): RoundTrip {
   return {
@@ -357,6 +357,18 @@ describe('learning review', () => {
       expect(stopFirst.review.exitReason).toBe('stop_loss');
       expect(stopFirst.review.findings[0].detail).toContain('exited @ 98.10 via your stop loss');
       expect(stopFirst.find('Closed in parts')).toBeUndefined();
+
+      // The stop never moved: the rest filled above it because price came back, not because it was trailed.
+      const rest = thin((next) => {
+        next(100, 100.1, 97.9, 98.2, 800); // the stop takes 200 at 98
+        next(101.5, 101.8, 101.2, 101.6, 100_000); // and the other 800 at this bar's open
+      });
+      expect(rest.review.exitReason).toBe('stop_loss');
+      expect(rest.find('Your stop fired, and the rest filled after price came back')).toBe(
+        "Your stop at 98.00 fired, but the volume cap (Data & Settings) let only 200 of its 1000 shares sell on the bar it fired, at 98.00. A stop that has fired is a market order, so the rest sold over the next bars as price came back, for an average of 100.80: +$800.00 on the trade after costs. That went your way this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.",
+      );
+      expect(rest.find('Your moved stop closed the trade')).toBeUndefined();
+      expect(rest.find('Stop did its job')).toBeUndefined();
 
       const half = thin((next) => {
         next(100, 102.5, 100.7, 101.2, 2000); // the target takes 500 at 102
@@ -725,6 +737,61 @@ describe('learning review', () => {
     const earlier = [bar(et('2025-01-15', '09:30'), 100, 104.5, 95, 103), bar(et('2025-01-15', '09:30'), 50, 50.5, 49, 49.2)] as const;
     for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
       expect(run(order, ...earlier), order.join()).toEqual({ stopFirst: true, rules: [[false, '1.04%'], [false, 'Down 3.50% on the day at entry']] });
+    }
+  });
+
+  it('values a position opened at a gap at its price, not at the close before the gap, when judging a later entry', () => {
+    // BBB is bought at the 15th's open, which gapped from 50 to 53; AAA's limit entry fills later that day.
+    // AAA: 500 shares, stop 97 below a 99 entry = $1000 = 1% of the account. The account lost nothing.
+    for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+      const data: Record<string, Bar[]> = {
+        AAA: [bar(et('2025-01-14', '09:30'), 99, 101, 98, 100), bar(et('2025-01-15', '09:30'), 100, 101, 98.5, 100), bar(et('2025-01-16', '09:30'), 100, 101, 99, 100)],
+        BBB: [bar(et('2025-01-14', '09:30'), 49, 51, 48, 50), bar(et('2025-01-15', '09:30'), 53, 54, 52.5, 53.5), bar(et('2025-01-16', '09:30'), 53.5, 54, 53, 53.5)],
+      };
+      const engines = order.map((s) => new ReplayEngine({ symbol: s, start: et('2025-01-15', '09:30'), end: et('2025-01-16', '16:00'), baseTimeframe: '1D' }, data[s]));
+      const session = new ReplaySession(engines, { symbol: order[0], date: '2025-01-15', startTime: '09:30', endTime: '16:00', endDate: '2025-01-16', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'd', 'HISTORICAL');
+      session.submit({ symbol: 'BBB', action: 'buy', type: 'market', quantity: 1000, tif: 'gtc' });
+      session.submit({ symbol: 'AAA', action: 'buy', type: 'limit', limitPrice: 99, quantity: 500, stopLoss: 97, takeProfit: 110, tif: 'gtc' });
+      session.step();
+      const st = session.broker.state;
+      const a = st.roundTrips.find((t) => t.symbol === 'AAA')!;
+      expect(st.fills.find((f) => f.symbol === 'BBB')!.price).toBe(53);
+      const rev = reviewTrade({ trip: a, fills: st.fills, orders: st.orders, revealedBars: session.engineFor('AAA')!.visibleBaseBars(), timeframe: '1D', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      expect(rev.equityAtEntry, order.join()).toBe(100_000);
+      expect(rev.rules.filter((r) => /^Risk|^Stop trading/.test(r.rule)).map((r) => [r.passed, r.detail])).toEqual([[true, '1.00%'], [true, 'Not down on the day at entry']]);
+      const ctx = { trips: [a], fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: 100_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES };
+      expect(evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, ctx).status).toBe('in_progress');
+    }
+  });
+
+  it('leaves a daily bar’s fills out of a 1-minute entry made while that bar was still hidden, at 09:30 as at 09:31', () => {
+    // AAA (daily) is held long 1000 from the 14th with a stop at 96.5; the 15th opens at 96, through the
+    // stop. That bar is shown at the close, so a 1-minute BBB entry that morning saw an account still at
+    // $100,000, as the ticket and Strict Mode did. BBB: 2000 shares with a stop 0.50 away = 1%.
+    const verdict = (stepsBeforeEntry: number, order: string[]) => {
+      const flat = (n: number) => Array.from({ length: n }, () => [50, 50.05, 49.95, 50] as [number, number, number, number]);
+      const data: Record<string, { bars: Bar[]; tf: '1D' | '1m' }> = {
+        AAA: { tf: '1D', bars: [bar(et('2025-01-14', '09:30'), 99, 101, 98, 100), bar(et('2025-01-15', '09:30'), 96, 97, 95, 96.5), bar(et('2025-01-16', '09:30'), 96, 97, 95, 96)] },
+        BBB: { tf: '1m', bars: [...minuteBars('2025-01-14', '15:58', flat(2)), ...minuteBars('2025-01-15', '09:30', flat(390))] },
+      };
+      const engines = order.map((s) => new ReplayEngine({ symbol: s, start: et('2025-01-14', '16:00'), end: et('2025-01-15', '16:00'), baseTimeframe: data[s].tf }, data[s].bars));
+      const s = new ReplaySession(engines, { symbol: order[0], date: '2025-01-14', startTime: '16:00', endTime: '16:00', endDate: '2025-01-15', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'd', 'HISTORICAL');
+      s.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 1000, stopLoss: 96.5, takeProfit: 120, tif: 'gtc' });
+      s.jumpTo(et('2025-01-15', '09:00'));
+      for (let i = 0; i < stepsBeforeEntry; i++) s.step();
+      s.submit({ symbol: 'BBB', action: 'buy', type: 'market', quantity: 2000, stopLoss: 49.5, takeProfit: 52, tif: 'day' });
+      while (!s.finished) s.step();
+      const st = s.broker.state;
+      const b = st.roundTrips.find((t) => t.symbol === 'BBB')!;
+      const aaaStop = st.roundTrips.find((t) => t.symbol === 'AAA')!.exitTime!;
+      expect(aaaStop).toBeLessThanOrEqual(b.entryTime);
+      const rev = reviewTrade({ trip: b, fills: st.fills, orders: st.orders, revealedBars: s.engineFor('BBB')!.visibleBaseBars(), timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      return { equity: rev.equityAtEntry, rules: rev.rules.filter((r) => /^Risk|^Stop trading/.test(r.rule)).map((r) => [r.passed, r.detail]) };
+    };
+    for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+      for (const steps of [0, 1]) {
+        expect(verdict(steps, order), `${order.join()} after ${steps}`).toEqual({ equity: 100_000, rules: [[true, '1.00%'], [true, 'Not down on the day at entry']] });
+      }
     }
   });
 
