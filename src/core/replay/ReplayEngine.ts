@@ -198,6 +198,11 @@ export class ReplayEngine {
     return this.#bars.slice(Math.max(0, from), Math.min(to, this.#cursor + 1)).map((b) => ({ ...b }));
   }
 
+  /** Revealed bars that open at or after `t` (copies). */
+  revealedSince(t: UnixSeconds): Bar[] {
+    return this.revealedBars(lastIndexAtOrBefore(this.#bars, t - 1, (b) => b.time) + 1, this.#cursor + 1);
+  }
+
   /** Incremental aggregator primed with all revealed bars; useful for efficient chart updates. */
   createAggregator(timeframe: Timeframe): { aggregator: BarAggregator; bars: Bar[] } {
     const aggregator = new BarAggregator(timeframe, this.baseTimeframe);

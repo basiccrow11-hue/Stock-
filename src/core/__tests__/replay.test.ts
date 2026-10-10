@@ -8,6 +8,7 @@ import type { BrokerCheckpoint } from '../broker/SimBroker';
 import { ema, rsi, vwap } from '../indicators/indicators';
 import type { Bar, UnixSeconds } from '../types';
 import { bar, et, minuteBars, randomBars } from './helpers';
+import { formatExchangeTime } from '../time';
 
 const D = '2025-01-15';
 
@@ -742,5 +743,82 @@ describe('Demo data provider', () => {
     s.jumpTo(et(D, '10:07') + 30);
     expect(account(s)).toEqual(account(await run(et(D, '10:07') + 30)));
     expect(s.broker.state.roundTrips.filter((t) => t.closed).length).toBeGreaterThan(0);
+  });
+});
+
+describe('Play through quiet stretches', () => {
+  const flat = (n: number, px: number) => Array.from({ length: n }, () => [px, px, px, px] as [number, number, number, number]);
+  /** Regular-hours 1m bars: Jan 14 whole, Jan 15 to 11:00, a halt of `halt` minutes, then trading again. */
+  const halted = (halt: number) => {
+    const resume = 11 * 60 + halt;
+    const bars = [
+      ...minuteBars('2025-01-14', '09:30', flat(390, 100)),
+      ...minuteBars('2025-01-15', '09:30', flat(90, 100)),
+      ...minuteBars('2025-01-15', `${Math.floor(resume / 60)}:${String(resume % 60).padStart(2, '0')}`, flat(60, 101)),
+    ];
+    const e = new ReplayEngine({ symbol: 'H', start: et('2025-01-15', '09:30'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, bars);
+    return new ReplaySession(e, { symbol: 'H', date: '2025-01-15', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'h', 'HISTORICAL');
+  };
+
+  it('lets a halt pass at the chosen speed, so Play never tells how long it lasts', () => {
+    const clocks = [25, 45, 120].map((halt) => {
+      const s = halted(halt);
+      s.jumpTo(et('2025-01-15', '11:00'));
+      return [1, 2, 3].map(() => {
+        s.advance(60);
+        return formatExchangeTime(s.now);
+      });
+    });
+    expect(clocks).toEqual([
+      ['11:01', '11:02', '11:03'],
+      ['11:01', '11:02', '11:03'],
+      ['11:01', '11:02', '11:03'],
+    ]);
+  });
+
+  it('skips the night by the calendar, and the hours the data has no bars in by its recent sessions', () => {
+    // Regular-hours data: from the 16:00 close straight to the next open, on a Friday to Monday's.
+    const rth = [...minuteBars('2025-01-16', '09:30', flat(390, 50)), ...minuteBars('2025-01-17', '15:58', flat(2, 50)), ...minuteBars('2025-01-21', '09:30', flat(5, 51))];
+    const r = new ReplaySession(
+      new ReplayEngine({ symbol: 'R', start: et('2025-01-17', '15:58'), end: et('2025-01-21', '16:00'), baseTimeframe: '1m' }, rth),
+      { symbol: 'R', date: '2025-01-17', startTime: '15:58', endDate: '2025-01-21', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 },
+      ZERO_COST_CONFIG,
+      'r',
+      'HISTORICAL',
+    );
+    r.advance(120);
+    expect(r.now).toBe(et('2025-01-17', '16:00'));
+    r.advance(60); // Monday Jan 20 is a holiday (MLK Day)
+    expect(r.now).toBe(et('2025-01-21', '09:30'));
+    // Data with a pre-market: its hours start at 04:00, which plays at speed, bars or not.
+    const ext = [...minuteBars('2025-01-16', '04:00', flat(960, 50)), ...minuteBars('2025-01-17', '04:00', flat(960, 50)), ...minuteBars('2025-01-21', '07:00', flat(3, 51))];
+    const x = new ReplaySession(
+      new ReplayEngine({ symbol: 'X', start: et('2025-01-17', '19:58'), end: et('2025-01-21', '16:00'), baseTimeframe: '1m' }, ext),
+      { symbol: 'X', date: '2025-01-17', startTime: '19:58', endDate: '2025-01-21', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 },
+      ZERO_COST_CONFIG,
+      'x',
+      'HISTORICAL',
+    );
+    x.advance(120);
+    x.advance(60);
+    expect(x.now).toBe(et('2025-01-21', '04:00'));
+    x.advance(60);
+    expect(x.now).toBe(et('2025-01-21', '04:01'));
+  });
+
+  it('ends an early-close day at 13:00', () => {
+    // The day after Thanksgiving 2024 closes at 13:00.
+    const bars = [...minuteBars('2024-11-27', '09:30', flat(390, 50)), ...minuteBars('2024-11-29', '09:30', flat(210, 50)), ...minuteBars('2024-12-02', '09:30', flat(5, 51))];
+    const s = new ReplaySession(
+      new ReplayEngine({ symbol: 'E', start: et('2024-11-29', '12:58'), end: et('2024-12-02', '16:00'), baseTimeframe: '1m' }, bars),
+      { symbol: 'E', date: '2024-11-29', startTime: '12:58', endDate: '2024-12-02', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 },
+      ZERO_COST_CONFIG,
+      'e',
+      'HISTORICAL',
+    );
+    s.advance(120);
+    expect(s.now).toBe(et('2024-11-29', '13:00'));
+    s.advance(60);
+    expect(s.now).toBe(et('2024-12-02', '09:30'));
   });
 });

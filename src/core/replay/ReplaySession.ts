@@ -22,10 +22,17 @@ import { ReplayEngine } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
+  REGULAR_CLOSE,
+  afterHoursCloseMinute,
+  exchangeDate,
+  exchangeMinuteOfDay,
   exchangeTimeToUnix,
   formatExchangeTime,
+  isTradingDay,
+  nextTradingDay,
   parseHHMM,
   prevTradingDay,
+  regularCloseMinute,
   tradingDayOnOrBefore,
 } from '../time';
 
@@ -74,12 +81,17 @@ interface Checkpoint {
 /** Most bars fed between checkpoints, so a rewind replays at most this many. */
 const CHECKPOINT_BARS = 256;
 
+/** How many recent sessions of revealed bars tell the hours of the day the data trades in. */
+const HOURS_SESSIONS = 5;
+
 export class ReplaySession {
   readonly broker: SimBroker;
   readonly engines: ReadonlyMap<string, ReplayEngine>;
   rewinds = 0;
   /** Oldest first. The first is the clean start, which Restart returns to. */
   private checkpoints: Checkpoint[] = [];
+  /** The data's trading hours (tradingHours), as worked out on the exchange day `date`. */
+  private hours: { date: string; open: number; close: number } | null = null;
 
   constructor(
     engines: ReplayEngine | ReplayEngine[],
@@ -272,21 +284,67 @@ export class ReplaySession {
   }
 
   /**
-   * Advance simulated time by `seconds` (used by Play). Closed-market gaps (overnight, weekends)
-   * are skipped so multi-day replays don't sit on an empty chart.
+   * Advance simulated time by `seconds` (used by Play). Time outside the data's trading hours (nights,
+   * weekends, holidays, and the pre-market or after-hours of data that has none) is skipped by the
+   * calendar, so multi-day replays don't sit on an empty chart. Inside those hours time passes at the
+   * chosen speed whether bars come or not, whatever the base timeframe (an hourly or daily bar takes
+   * its hour or session): skipping a quiet stretch to the next bar would tell how long a halt lasts.
    */
   advance(seconds: number): RevealedBar[] {
     let target = this.now + seconds;
-    // A stretch with no bar trading that is longer than 30 minutes (a night, a weekend, a halt) is
-    // skipped to the next bar's open. While a bar trades, time passes at the chosen speed, whatever
-    // the base timeframe: an hourly or daily bar takes its hour or session.
-    let open: UnixSeconds | null = null;
-    for (const e of this.engines.values()) {
-      const t = e.nextBarTime();
-      if (t !== null && (open === null || t < open)) open = t;
-    }
-    if (open !== null && open > target && open - this.now > 30 * 60) target = open;
+    const resume = this.hoursResume(this.now);
+    if (resume !== null && resume > target) target = resume;
     return this.advanceAll(target);
+  }
+
+  /**
+   * The part of the exchange day the replay's data trades in, in minutes: from the earliest bar opening
+   * to the latest bar ending in the last few sessions of bars already revealed (what a trader knows of a
+   * stock's hours from its recent past), widened to the setup's start and end times when they make a
+   * daily window (a replay set to run to 20:00 is watched after hours). With nothing to go by, the
+   * whole extended session.
+   */
+  private tradingHours(): { open: number; close: number } {
+    const date = exchangeDate(this.now);
+    if (this.hours?.date === date) return this.hours;
+    let from = date;
+    for (let i = 0; i < HOURS_SESSIONS; i++) from = prevTradingDay(from);
+    const since = exchangeTimeToUnix(from, 0);
+    let open = Infinity;
+    let close = -Infinity;
+    for (const e of this.engines.values()) {
+      for (const bar of e.revealedSince(since)) {
+        const m = exchangeMinuteOfDay(bar.time);
+        open = Math.min(open, m);
+        close = Math.max(close, Math.min(24 * 60, m + e.barSeconds(bar) / 60));
+      }
+    }
+    const start = parseHHMM(this.setup.startTime);
+    const end = parseHHMM(this.setup.endTime);
+    if (end > start) {
+      open = Math.min(open, start);
+      close = Math.max(close, end);
+    }
+    if (open === Infinity) {
+      open = PREMARKET_OPEN;
+      close = AFTERHOURS_CLOSE;
+    }
+    this.hours = { date, open, close };
+    return this.hours;
+  }
+
+  /** When the data's trading hours next begin, if `t` is outside them; null while they last. */
+  private hoursResume(t: UnixSeconds): UnixSeconds | null {
+    const { open, close } = this.tradingHours();
+    const date = exchangeDate(t);
+    const m = exchangeMinuteOfDay(t);
+    if (isTradingDay(date)) {
+      // On an early-close day the regular session, and the after-hours with it, end earlier.
+      const shut = close <= REGULAR_CLOSE ? Math.min(close, regularCloseMinute(date)) : Math.min(close + regularCloseMinute(date) - REGULAR_CLOSE, afterHoursCloseMinute(date));
+      if (m < open) return exchangeTimeToUnix(date, open);
+      if (m < shut) return null;
+    }
+    return exchangeTimeToUnix(nextTradingDay(date), open);
   }
 
   /** Jump to an exchange time. Forward jumps process every skipped bar (orders can fill). */
@@ -341,6 +399,7 @@ export class ReplaySession {
     // at the start, or Play stopped within the first minute) nothing has been seen.
     const before = this.cursors();
     for (const e of this.engines.values()) e.rewindTo(time);
+    this.hours = null;
     const cursors = this.cursors();
     const back = cursors.some((c, k) => c < before[k]);
     const i = restart ? 0 : this.checkpointAt(cursors);
