@@ -164,6 +164,10 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .metric .k { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
 .metric .v { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
 .integrity { display: flex; align-items: center; gap: 8px; }
+/* Optional parts of the top bar that do not fit on its row (TopBar fitOptional). The product name
+   stays readable to screen readers. */
+.topbar [data-cut]:not(.brand-name) { display: none !important; }
+.topbar .brand-name[data-cut] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* The terminal and the other pages share this area. A page covers the terminal, which stays laid
    out underneath (hidden, not display:none), so the chart keeps its size: the snapshot of a trade
@@ -175,9 +179,8 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   flex: 1; min-height: 0;
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr) 320px;
-  /* On shorter screens (a laptop, a browser with docked devtools) the bottom panel gives height to
-     the chart, smoothly, so a window one pixel taller never shrinks the chart. */
-  grid-template-rows: minmax(0, 1fr) clamp(160px, 28vh, 250px);
+  /* The bottom panel sets its own height (.area-bottom). */
+  grid-template-rows: minmax(0, 1fr) auto;
   grid-template-areas: 'watch chart right' 'bottom bottom right';
   gap: 1px; background: var(--border);
 }
@@ -189,7 +192,27 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .area-watch { grid-area: watch; }
 .area-chart { grid-area: chart; }
 .area-right { grid-area: right; overflow: auto; }
-.area-bottom { grid-area: bottom; }
+/* The bottom panel leaves the chart about 480px (the top bar, the chart's toolbar and replay
+   controls take about 130px more), up to 250px for itself, growing smoothly with the window so one
+   pixel taller never shrinks the chart. Below its 140px floor (windows under 750px tall, a laptop)
+   it starts collapsed to its tabs (useBottomDock). A height the user dragged to (--bottom-h) is
+   kept, but never so tall that the chart has under about 200px. */
+.area-bottom { grid-area: bottom; height: min(var(--bottom-h, clamp(140px, 100vh - 610px, 250px)), 100vh - 340px); }
+.area-bottom.collapsed { height: auto; }
+/* Its top edge resizes it (drag, or the arrow keys once focused). */
+.dock-resize { flex: none; height: 7px; cursor: row-resize; touch-action: none; position: relative; }
+.dock-resize::after { content: ''; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--border-2); }
+.dock-resize:hover::after, .dock-resize:focus-visible::after, .dock-resize:active::after { left: 0; width: 100%; margin-left: 0; background: var(--accent); }
+.dock-resize:focus-visible { outline: none; }
+.tabs .dock-toggle { margin-left: auto; display: inline-flex; align-items: center; color: var(--text-2); }
+.tabs .dock-toggle:hover { color: var(--text); }
+/* Collapsed, no tab's contents show, so none is marked as showing. */
+.area-bottom.collapsed .tabs { border-bottom: 0; }
+.area-bottom.collapsed .tabs button.on { border-bottom-color: transparent; color: var(--text-2); }
+/* The Journal tab: this session's trades, and the chosen one's notes. */
+.dock-journal { display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.dock-journal-list td { vertical-align: top; }
+.dock-journal-list tr[aria-current='true'] td { background: var(--panel-3); }
 
 /* ---------- watchlist ---------- */
 .watch-row { display: grid; grid-template-columns: 1fr auto; align-items: start; width: 100%; padding: 6px 10px; cursor: pointer; border: 0; border-bottom: 1px solid var(--row-line); background: none; text-align: left; }
@@ -203,7 +226,16 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 
 /* ---------- chart ---------- */
 .chart-toolbar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.chart-toolbar .seg button { padding: 4px 8px; }
 .chart-host { position: relative; flex: 1; min-height: 0; display: flex; }
+/* Drawing tools: a column along the chart's left edge, as in most charting apps. It scrolls if the chart is very short. */
+.draw-tools { flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 6px 4px; border-right: 1px solid var(--border); overflow-y: auto; }
+.draw-tools .seg { flex-direction: column; flex-shrink: 0; }
+.draw-tools .seg button { width: 28px; padding: 4px 0; border-right: 0; border-bottom: 1px solid var(--border-2); }
+.draw-tools .seg button:last-child { border-bottom: 0; }
+.draw-tools .seg button.on { box-shadow: inset 2px 0 0 var(--accent); }
+.draw-tools input[type='color'] { width: 26px; height: 24px; padding: 0; border: 0; background: none; flex-shrink: 0; }
+.draw-tools .btn { flex-shrink: 0; }
 /* isolation keeps lightweight-charts' internal z-indexes (pane separators use 50) below toolbar popovers. */
 .chart-wrap { position: relative; flex: 1; min-height: 0; isolation: isolate; }
 .chart-wrap.picking { cursor: crosshair; }
@@ -242,13 +274,38 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .chart-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 5; background: var(--panel); padding: 16px; }
 
 /* ---------- replay controls ---------- */
-.replay-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.replay-bar { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 .clock { font-family: var(--mono); font-size: 15px; padding: 2px 8px; background: var(--panel-2); border-radius: var(--radius); border: 1px solid var(--border-2); }
-.progress { height: 4px; background: var(--panel-3); border-radius: 2px; overflow: hidden; flex: 1; min-width: 80px; }
+/* The session's progress: a line along the replay bar's top edge. */
+.replay-bar .progress { position: absolute; left: 0; right: 0; top: -1px; height: 3px; background: var(--panel-3); overflow: hidden; }
 .progress > div { height: 100%; background: var(--accent); }
+.jump-pop { width: max-content; max-width: min(360px, calc(100vw - 16px)); }
+
+/* ---------- right column ---------- */
+/* Paper account: three figures to a row, each name above its value. */
+.acct { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; margin: -2px 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.acct > div { min-width: 0; }
+.acct dt { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct dd { margin: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.right-section { margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.pos-mini { margin: 0 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.pos-mini h3 { margin-bottom: 4px; }
+.pos-mini-row { display: flex; align-items: center; gap: 4px; border-radius: var(--radius); }
+.pos-mini-row.on { background: var(--row-selected); box-shadow: inset 2px 0 0 var(--accent); }
+.pos-mini-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: none; border: 0; border-radius: var(--radius); cursor: pointer; text-align: left; white-space: nowrap; }
+.pos-mini-pick:hover { background: var(--panel-2); }
+.pos-mini-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pos-mini-pick .badge { padding: 0 5px; }
+.pos-mini-pnl { margin-left: auto; }
 
 /* ---------- order ticket ---------- */
 .ticket { display: flex; flex-direction: column; gap: 8px; }
+.ticket-head { row-gap: 2px; }
+/* The prices keep to the right, on a line of their own under the symbol if the column is narrow. */
+.ticket-prices { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 2px 10px; }
+/* The submit button, with the warnings about the order and its result, stays in view at the bottom
+   of the column while the fields above scroll (OrderTicket keeps Tab from hiding a field under it). */
+.ticket-submit { position: sticky; bottom: -10px; z-index: 1; display: flex; flex-direction: column; gap: 8px; margin: 0 -10px; padding: 8px 10px 10px; background: var(--panel); border-top: 1px solid var(--border); }
 .ticket .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .ticket .grid2 > label.field > select, .ticket .grid2 > label.field > input { min-width: 0; }
 .ticket .actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
@@ -435,23 +492,25 @@ input[type='range'] { accent-color: var(--accent); }
 input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 
 /* ---------- responsive ---------- */
-/* The top bar sheds optional parts as it narrows, so the data-source label never leaves the screen. */
-@media (max-width: 1780px) {
-  /* Cash, buying power and realized/unrealized P/L are also in the account box on the right. */
-  .metrics .metric.opt { display: none; }
+/* The top bar's optional parts (figures, the clock, the product name) come and go as they fit
+   (TopBar fitOptional), so the data-source label never leaves the screen. */
+/* The chart column under 900px wide (a 1366px laptop; the side columns take 532px, 301px at 1180px
+   and below): the last price gives way in the replay bar (it is on the ticket and the price scale). */
+@media (max-width: 1431px) {
+  .replay-bar .replay-last { display: none; }
 }
-@media (max-width: 1460px) {
-  .brand .brand-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-}
-@media (max-width: 1340px) {
-  .topbar .session-when { display: none; }
+/* The chart column under 800px wide (a 1280px laptop, a 1024px tablet): tighter, so both bars
+   above and below the chart keep to one row. */
+@media (min-width: 1181px) and (max-width: 1331px), (max-width: 1100px) {
+  .chart-toolbar, .replay-bar { gap: 4px; }
+  .clock { font-size: 13px; }
 }
 /* Narrow desktops and tablets: the watchlist moves to the top of the right column, so every symbol
    can still be picked. */
 @media (max-width: 1180px) {
   .terminal {
     grid-template-columns: minmax(0, 1fr) 300px;
-    grid-template-rows: 180px minmax(0, 1fr) clamp(160px, 28vh, 250px);
+    grid-template-rows: 180px minmax(0, 1fr) auto;
     grid-template-areas: 'chart watch' 'chart right' 'bottom right';
   }
 }
@@ -463,10 +522,21 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .terminal { display: flex; flex-direction: column; overflow: auto; }
   .terminal > .panel { flex-shrink: 0; }
   .area-watch { max-height: 220px; }
-  /* The toolbar and replay controls wrap onto several rows here; the chart keeps a real height. */
-  .chart-host { flex: none; height: clamp(260px, 55vh, 420px); }
+  /* The toolbar and replay controls wrap onto several rows here; the chart keeps a real height, and
+     the drawing tools are a row above it rather than a column taking its width. */
+  .chart-host { flex: none; flex-direction: column; }
+  .chart-host > .chart-wrap { flex: none; height: clamp(260px, 55vh, 420px); }
+  .draw-tools { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); overflow: visible; }
+  .draw-tools .seg { flex-direction: row; }
+  .draw-tools .seg button { width: 30px; border-bottom: 0; border-right: 1px solid var(--border-2); }
+  .draw-tools .seg button:last-child { border-right: 0; }
+  .draw-tools .seg button.on { box-shadow: inset 0 -2px 0 var(--accent); }
   .area-right { overflow: visible; }
   .area-bottom { height: 320px; }
+  /* The page scrolls here, so the submit area stays in its place and the bottom panel keeps its height. */
+  .ticket-submit { position: static; margin: 0; padding: 0; border-top: 0; }
+  .dock-resize { display: none; }
+  .dock-journal { grid-template-columns: minmax(0, 1fr); }
 }
 /* Short screens (a phone in landscape): the replay controls sit at the bottom left of the view, so
    toasts go to the bottom right, narrower, instead of over Play and Pause. */

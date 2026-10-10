@@ -8,6 +8,7 @@ import { bracketErrors, closePosition, estimateFill, setPickTarget, sizeByRisk, 
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
+import { modelledQuote } from '../services/modelledQuote';
 import { modalOpen, useFocusRescue } from './common';
 
 const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
@@ -87,11 +88,28 @@ export function OrderTicket() {
   // A new session (the ticket stays mounted) starts without the last session's order result.
   const sessionId = session?.id;
   useEffect(() => setResult(null), [symbol, action, type, sessionId]);
-  // The result sits below the submit button, which can be at the bottom edge of a scrolled panel.
+  // The submit button, the warnings about the order and the result stay in view at the bottom of the
+  // column as it scrolls (styles.css .ticket-submit). Where the page scrolls instead (the one-column
+  // layout) the result sits below the button, which can be at the bottom edge of the screen.
+  const footRef = useRef<HTMLDivElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (result) resultRef.current?.scrollIntoView({ block: 'nearest' });
+    const foot = footRef.current;
+    if (result && foot && getComputedStyle(foot).position !== 'sticky') resultRef.current?.scrollIntoView({ block: 'nearest' });
   }, [result]);
+  // A field reached with Tab scrolls into view above that area, not under it.
+  const hasSession = !!session;
+  useEffect(() => {
+    const foot = footRef.current;
+    const scroller = foot?.closest<HTMLElement>('.panel-body');
+    if (!foot || !scroller || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => (scroller.style.scrollPaddingBottom = `${foot.offsetHeight}px`));
+    ro.observe(foot);
+    return () => {
+      ro.disconnect();
+      scroller.style.scrollPaddingBottom = '';
+    };
+  }, [hasSession]);
 
   // Stop and target prices only make sense for one direction, one symbol and one session: clear them when any changes.
   const direction = action === 'buy' || action === 'sell' ? 'long' : 'short';
@@ -261,15 +279,25 @@ export function OrderTicket() {
   );
 
   const actCls = ACTIONS.find((x) => x.a === action)!.cls;
+  // The spread model's bid and ask around the last price (wider outside regular hours), not a real quote.
+  const modelled = last !== undefined ? modelledQuote(exec, last, now ? marketSession(now) !== 'regular' : false) : null;
   const label = `${action.toUpperCase()} ${q || 0} ${symbol} ${type === 'market' ? 'MKT' : type === 'limit' ? `LMT ${limit || '—'}` : type === 'stop' ? `STP ${stop || '—'}` : `STP ${stop || '—'} LMT ${limit || '—'}`}`;
   const strict = exec.strictRisk.enabled;
 
   return (
     <div className="ticket" ref={ticketRef}>
-      <div className="row">
-        <h3>Order ticket</h3>
-        <div className="spacer" />
-        <span className="mono">{fmtPrice(last)}</span>
+      <div className="row wrap ticket-head">
+        <h3>{symbol}</h3>
+        <span className="ticket-prices">
+          {modelled && (
+            <span className="mono small" title="Modelled from the last price and the spread set in Data & Settings (wider outside regular hours). Not a real quote: market orders also pay slippage and market impact.">
+              <span className="muted">Bid</span> {fmtPrice(modelled.bid)} <span className="muted">Ask</span> {fmtPrice(modelled.ask)}
+            </span>
+          )}
+          <span className="mono">
+            <span className="muted small">Last</span> {fmtPrice(last)}
+          </span>
+        </span>
       </div>
       <div className="actions" role="group" aria-label="Order side">
         {ACTIONS.map((x) => (
@@ -393,36 +421,38 @@ export function OrderTicket() {
         <span className="muted">Est. commission</span>
         <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
       </div>
-      {/* Why the order can't be placed: read with the button, and announced (below) once typing settles. */}
-      {bracket.map((e, i) => (
-        <div key={e} id={`${bracketId}-${i}`} className="alert error" aria-hidden="true">
-          {e}
-        </div>
-      ))}
-      <div className="sr-only" role="status">
-        {bracketSaid}
-      </div>
-      {risk?.warnings.map((w) => (
-        <div key={w} className="alert warn">
-          {w}
-        </div>
-      ))}
       {strict && opening && (
         <div className="alert info">
           Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
-      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracket.map((_, i) => `${bracketId}-${i}`).join(' ') : undefined}>
-        {label}
-      </button>
-      {result && (
-        <div ref={resultRef} className={`alert ${result.tone}`} aria-hidden="true">
-          {result.text}
+      <div className="ticket-submit" ref={footRef}>
+        {/* Why the order can't be placed: read with the button, and announced (below) once typing settles. */}
+        {bracket.map((e, i) => (
+          <div key={e} id={`${bracketId}-${i}`} className="alert error" aria-hidden="true">
+            {e}
+          </div>
+        ))}
+        <div className="sr-only" role="status">
+          {bracketSaid}
         </div>
-      )}
-      {/* Screen readers hear the outcome of every submit, the same message twice included. */}
-      <div className="sr-only" role="status">
-        {result && <span key={result.n}>{result.text}</span>}
+        {risk?.warnings.map((w) => (
+          <div key={w} className="alert warn">
+            {w}
+          </div>
+        ))}
+        <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracket.map((_, i) => `${bracketId}-${i}`).join(' ') : undefined}>
+          {label}
+        </button>
+        {result && (
+          <div ref={resultRef} className={`alert ${result.tone}`} aria-hidden="true">
+            {result.text}
+          </div>
+        )}
+        {/* Screen readers hear the outcome of every submit, the same message twice included. */}
+        <div className="sr-only" role="status">
+          {result && <span key={result.n}>{result.text}</span>}
+        </div>
       </div>
 
       {position && (

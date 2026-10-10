@@ -1,6 +1,7 @@
 /**
  * One journal entry: trade facts, chart snapshot, the Learning Mode review and editable notes.
- * Used by the post-trade review popup and the Journal page.
+ * Used by the post-trade review popup and the Journal page, and (its notes only) by the trade
+ * screen's Journal tab.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { JournalEntry, JournalNotes } from '../../core/journal';
@@ -28,7 +29,16 @@ function edited(notes: JournalNotes, base: JournalNotes): Partial<JournalNotes> 
   return Object.fromEntries(NOTE_FIELDS.filter(({ key }) => notes[key] !== base[key]).map(({ key }) => [key, notes[key]]));
 }
 
-export function JournalEntryDetail({ entry, showReview = true }: { entry: JournalEntry; showReview?: boolean }) {
+export function JournalEntryDetail({
+  entry,
+  showReview = true,
+  notesOnly = false,
+}: {
+  entry: JournalEntry;
+  showReview?: boolean;
+  /** Only the tag and notes (the trade screen's Journal tab, next to the chart). */
+  notesOnly?: boolean;
+}) {
   const updateNotes = useJournal((s) => s.updateNotes);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [notes, setNotes] = useState<JournalNotes>(entry.notes);
@@ -73,7 +83,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
     setSaved(true);
     let alive = true;
     setSnapshot(null);
-    if (entry.snapshotKey)
+    if (entry.snapshotKey && !notesOnly)
       loadSnapshot(entry.snapshotKey)
         .then((s) => alive && setSnapshot(s ?? null))
         .catch(() => undefined);
@@ -113,6 +123,43 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   const r = entry.review;
   const entryTime = useEntryTime();
   const when = (t: number) => entryTime(entry, t);
+  const notesEditor = (
+    <div>
+      <div className="section-title">
+        <h3>Notes</h3>
+        <div className="spacer" />
+        <span className="small muted">{saved ? 'Saved' : 'Saving…'}</span>
+      </div>
+      <label className="field" style={{ maxWidth: 260, marginBottom: 10 }}>
+        <span>Tag</span>
+        <input
+          type="text"
+          value={tag}
+          placeholder="e.g. ORB, pullback, VWAP reclaim"
+          onChange={(e) => {
+            setTag(e.target.value);
+            setSaved(false);
+          }}
+        />
+      </label>
+      <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' }}>
+        {NOTE_FIELDS.map((f) => (
+          <label key={f.key} className="field">
+            <span>{f.label}</span>
+            <textarea
+              rows={3}
+              value={notes[f.key]}
+              onChange={(e) => {
+                setNotes({ ...notes, [f.key]: e.target.value });
+                setSaved(false);
+              }}
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+  if (notesOnly) return <div className="stack">{notesEditor}</div>;
   return (
     <div className="stack" style={{ gap: 14 }}>
       <div className="row wrap">
@@ -148,40 +195,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
 
       {showReview && r && <ReviewView review={r} hasStop={entry.stopLoss !== undefined} />}
 
-      <div>
-        <div className="section-title">
-          <h3>Notes</h3>
-          <div className="spacer" />
-          <span className="small muted">{saved ? 'Saved' : 'Saving…'}</span>
-        </div>
-        <label className="field" style={{ maxWidth: 260, marginBottom: 10 }}>
-          <span>Tag</span>
-          <input
-            type="text"
-            value={tag}
-            placeholder="e.g. ORB, pullback, VWAP reclaim"
-            onChange={(e) => {
-              setTag(e.target.value);
-              setSaved(false);
-            }}
-          />
-        </label>
-        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' }}>
-          {NOTE_FIELDS.map((f) => (
-            <label key={f.key} className="field">
-              <span>{f.label}</span>
-              <textarea
-                rows={3}
-                value={notes[f.key]}
-                onChange={(e) => {
-                  setNotes({ ...notes, [f.key]: e.target.value });
-                  setSaved(false);
-                }}
-              />
-            </label>
-          ))}
-        </div>
-      </div>
+      {notesEditor}
     </div>
   );
 }

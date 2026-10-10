@@ -91,7 +91,7 @@ export function App() {
             onOpenSettings={openAppearance}
             active={view === "trade"}
           />
-          <RightPanel />
+          <RightPanel onNewSession={(mode) => setSetup({ mode })} />
           <BottomPanel
             onOpenJournal={(id) => {
               // The terminal hides; the journal takes focus on that trade's row.

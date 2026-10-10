@@ -1,16 +1,24 @@
-/** Bottom dock: positions, working orders, fills, closed trades, simulated news and the broker log. */
-import { useEffect, useId, useRef, useState } from 'react';
-import { blindDayLabel, cancelAllOrders, cancelOrder, closePosition, modifyOrder, setActiveSymbol, useTrading } from '../state/tradingStore';
+/**
+ * Bottom dock: positions, working orders, fills, closed trades, this session's journal, simulated
+ * news and the broker log. It can be collapsed to its tabs and resized from its top edge.
+ */
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { blindDayLabel, cancelAllOrders, cancelOrder, modifyOrder, setActiveSymbol, useTrading } from '../state/tradingStore';
 import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
+import type { JournalEntry } from '../../core/journal';
 import { EVENT_LABELS } from '../../core/sim/SimMarket';
 import { useJournal } from '../state/journalStore';
 import { EmptyState, modalOpen, rowAction, useFocusRescue } from './common';
+import { JournalEntryDetail } from './JournalEntryDetail';
+import { closeFromList } from './PositionList';
+import { DOCK_MIN, dockMax, useBottomDock } from './useBottomDock';
+import { useEntryTime } from './useEntryTime';
 import { dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { formatDuration, formatExchangeTime } from '../../core/time';
 import { toast } from '../state/toasts';
 
-type Tab = 'positions' | 'orders' | 'history' | 'trades' | 'news' | 'log';
+type Tab = 'positions' | 'orders' | 'history' | 'trades' | 'journal' | 'news' | 'log';
 
 function useTimeLabel(): (t: number) => string {
   const blind = useTrading((s) => s.session?.blind ?? false);
@@ -23,13 +31,24 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
   // closed) hands focus to the open tab rather than dropping it on the page body, without scrolling:
   // on a phone the chart the user is watching stays in view. A control that takes focus back itself
   // (the order price) wins.
-  const panelRef = useFocusRescue<HTMLDivElement>((root) => root.querySelector<HTMLElement>('.tabs button.on'));
+  const rescueRef = useFocusRescue<HTMLDivElement>((root) => root.querySelector<HTMLElement>('.tabs button.on'));
+  const panelEl = useRef<HTMLDivElement | null>(null);
+  const panelRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      panelEl.current = el;
+      return rescueRef(el);
+    },
+    [rescueRef],
+  );
+  const dock = useBottomDock();
+  const bodyId = useId();
   const positions = useTrading((s) => s.positions);
   const orders = useTrading((s) => s.orders);
   const fills = useTrading((s) => s.fills);
   const trips = useTrading((s) => s.trips);
   const session = useTrading((s) => s.session);
   const simEvents = useTrading((s) => s.simEvents);
+  const journaled = useJournal((s) => (session ? s.entries.filter((e) => e.sessionId === session.id).length : 0));
   const working = orders.filter(isOpen);
   const closed = trips.filter((t) => t.closed);
 
@@ -38,26 +57,118 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
     { id: 'orders', label: 'Orders', count: working.length },
     { id: 'history', label: 'Fills', count: fills.length },
     { id: 'trades', label: 'Closed trades', count: closed.length },
+    { id: 'journal', label: 'Journal', count: journaled },
     { id: 'news', label: 'News (simulated)', count: simEvents.length, hide: session?.mode !== 'sim' },
     { id: 'log', label: 'Activity log' },
   ];
   // A tab that went away (News, when a replay replaces the simulated market) falls back to Positions.
   const shown: Tab = tabs.some((t) => t.id === tab && !t.hide) ? tab : 'positions';
+  const collapsed = dock.collapsed;
+
+  // The panel's height as laid out, for the resize handle (styles.css sizes it until the user does).
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    const el = panelEl.current;
+    if (!el || collapsed || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setHeight(Math.round(el.getBoundingClientRect().height)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [collapsed]);
+  /** The height while the handle is dragged: saved when it is let go. */
+  const [dragged, setDragged] = useState<number | null>(null);
+  const drag = useRef<{ y: number; h: number; to: number } | null>(null);
+  const shownHeight = dragged ?? dock.height;
+  const fit = (h: number) => Math.round(Math.min(dockMax(), Math.max(DOCK_MIN, h)));
+
+  const onResizeKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const now = panelEl.current?.getBoundingClientRect().height ?? height;
+    const step = e.shiftKey ? 64 : 16;
+    const to: Record<string, number> = { ArrowUp: now + step, ArrowDown: now - step, PageUp: now + 64, PageDown: now - 64, Home: DOCK_MIN, End: dockMax() };
+    if (!(e.key in to)) return;
+    e.preventDefault();
+    dock.setHeight(to[e.key]);
+  };
+  const onResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !panelEl.current) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const h = panelEl.current.getBoundingClientRect().height;
+    drag.current = { y: e.clientY, h, to: fit(h) };
+    setDragged(drag.current.to);
+  };
+  const onResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    d.to = fit(d.h + d.y - e.clientY);
+    setDragged(d.to);
+  };
+  const onResizeEnd = () => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    dock.setHeight(d.to);
+    setDragged(null);
+  };
 
   return (
-    <div className="panel area-bottom" ref={panelRef}>
+    <div className={`panel area-bottom${collapsed ? ' collapsed' : ''}`} ref={panelRef} style={!collapsed && shownHeight !== undefined ? ({ '--bottom-h': `${shownHeight}px` } as CSSProperties) : undefined}>
+      {/* The top edge resizes the panel: drag it, or Tab to it and use the arrow keys (Home and End for the smallest and largest). */}
+      {!collapsed && dock.resizable && (
+        <div
+          className="dock-resize"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize the trading activity panel"
+          aria-controls={bodyId}
+          aria-valuenow={height || undefined}
+          aria-valuemin={DOCK_MIN}
+          aria-valuemax={dockMax()}
+          aria-valuetext={height ? `${height} pixels tall` : undefined}
+          tabIndex={0}
+          title="Drag to resize"
+          onKeyDown={onResizeKey}
+          onPointerDown={onResizeStart}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeEnd}
+          onPointerCancel={onResizeEnd}
+          onLostPointerCapture={onResizeEnd}
+        />
+      )}
       <div className="tabs">
         {tabs
           .filter((t) => !t.hide)
           .map((t) => (
-            <button key={t.id} className={shown === t.id ? 'on' : ''} aria-pressed={shown === t.id} onClick={() => setTab(t.id)}>
+            <button
+              key={t.id}
+              className={shown === t.id ? 'on' : ''}
+              // Collapsed, no tab's contents show.
+              aria-pressed={!collapsed && shown === t.id}
+              onClick={() => {
+                setTab(t.id);
+                // A tab picked while the panel is collapsed opens it on that tab.
+                if (collapsed) dock.setCollapsed(false);
+              }}
+            >
               {t.label}
               {t.count ? <span className="count">{t.count}</span> : null}
             </button>
           ))}
+        <button
+          type="button"
+          className="dock-toggle"
+          aria-expanded={!collapsed}
+          aria-controls={bodyId}
+          aria-label="Trading activity panel"
+          title={collapsed ? 'Show the panel' : 'Hide the panel (more room for the chart)'}
+          onClick={() => dock.setCollapsed(!collapsed)}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d={collapsed ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4'} />
+          </svg>
+        </button>
       </div>
-      <div className="panel-body">
-        {!session ? (
+      <div className="panel-body" id={bodyId} hidden={collapsed}>
+        {collapsed ? null : !session ? (
           <EmptyState title="No active session">Start a replay or the simulated market to trade.</EmptyState>
         ) : shown === 'positions' ? (
           <PositionsTab />
@@ -67,6 +178,8 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
           <FillsTab />
         ) : shown === 'trades' ? (
           <TradesTab onOpenJournal={onOpenJournal} />
+        ) : shown === 'journal' ? (
+          <JournalTab onOpenJournal={onOpenJournal} />
         ) : shown === 'news' ? (
           <NewsTab />
         ) : (
@@ -127,10 +240,7 @@ function PositionsTab() {
                   className="btn sm"
                   onClick={(e) => {
                     e.stopPropagation();
-                    const r = closePosition(p.symbol);
-                    if (!r.ok) toast('error', r.error ?? 'Could not close position');
-                    else if (r.order?.status === 'pending') toast('info', r.warnings[r.warnings.length - 1] ?? 'Close order queued until the market is open.');
-                    for (const n of r.notes ?? []) toast('info', n, 6000);
+                    closeFromList(p.symbol);
                   }}
                 >
                   Close
@@ -470,6 +580,61 @@ function TradesTab({ onOpenJournal }: { onOpenJournal: (id: string) => void }) {
         })}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * This session's journal entries, newest first, with the chosen one's tag and notes editable in
+ * place, so they can be written while the chart plays on. The full entry (snapshot, review) is on
+ * the Journal page.
+ */
+function JournalTab({ onOpenJournal }: { onOpenJournal: (id: string) => void }) {
+  const session = useTrading((s) => s.session);
+  const entries = useJournal((s) => s.entries);
+  const entryTime = useEntryTime();
+  const [selected, setSelected] = useState<string | null>(null);
+  const list = entries.filter((e) => e.sessionId === session?.id);
+  const current = list.find((e) => e.id === selected) ?? list[0];
+  // Pin the entry shown by default, so a trade that closes while notes are being typed lists itself
+  // without taking the editor away.
+  useEffect(() => {
+    if (current && current.id !== selected) setSelected(current.id);
+  }, [current, selected]);
+  if (!current) return <EmptyState title="No journal entries in this session yet">Each trade you close is journaled here, and you can write its notes while the replay plays.</EmptyState>;
+  const hasNotes = (e: JournalEntry) => Object.values(e.notes).some((n) => typeof n === 'string' && n.trim() !== '');
+  return (
+    <div className="dock-journal">
+      <table className="grid dock-journal-list">
+        <tbody>
+          {list.map((e) => (
+            // Enter picks a trade; Space plays and pauses, as everywhere on the trade screen.
+            <tr key={e.id} className="clickable" {...rowAction(() => setSelected(e.id), false)} aria-current={e.id === current.id ? 'true' : undefined}>
+              <td>
+                <b>{e.symbol}</b> <span className={e.direction === 'long' ? 'pos' : 'neg'}>{e.direction === 'long' ? 'Long' : 'Short'}</span>
+                <div className="small muted">{entryTime(e, e.exitTime)}</div>
+              </td>
+              <td className={`num ${pnlClass(e.pnl)}`}>
+                {signedMoney(e.pnl)}
+                <div className="small muted">{hasNotes(e) ? 'Notes' : 'No notes yet'}</div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="dock-journal-notes">
+        <div className="row wrap" style={{ marginBottom: 8 }}>
+          <b>
+            {current.direction === 'long' ? 'Long' : 'Short'} {current.symbol}
+          </b>
+          <span className={`mono ${pnlClass(current.pnl)}`}>{signedMoney(current.pnl)}</span>
+          <div className="spacer" />
+          <button className="btn sm ghost" onClick={() => onOpenJournal(current.id)}>
+            Open in Journal
+          </button>
+        </div>
+        <JournalEntryDetail key={current.id} entry={current} notesOnly />
+      </div>
+    </div>
   );
 }
 

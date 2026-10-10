@@ -1,11 +1,17 @@
-/** Right column: account summary, active challenge progress and the order ticket. */
+/** Right column: account summary, active challenge progress, open positions and the order ticket. */
 import { useMemo } from 'react';
 import { useTrading } from '../state/tradingStore';
 import { useChallenges } from '../state/challengeStore';
 import { CHALLENGES } from '../../core/challenges/challenges';
 import { OrderTicket } from './OrderTicket';
-import { money, pnlClass, signedMoney } from '../services/format';
+import { PositionList } from './PositionList';
+import { EmptyState, useFocusRescue } from './common';
+import { money, pct, pnlClass, signedMoney } from '../services/format';
 
+/**
+ * The account at a glance, in little room so the ticket below stays in view. Account value and day
+ * P/L are always in the top bar, so they are not repeated here; the starting balance is only here.
+ */
 function AccountBox() {
   const account = useTrading((s) => s.account);
   const trips = useTrading((s) => s.trips);
@@ -16,27 +22,23 @@ function AccountBox() {
   }, [trips]);
   if (!account) return null;
   const total = account.equity - account.startingBalance;
-  return (
-    <div className="kv" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
-      <span className="k">Total value</span>
-      <span className="num">{money(account.equity)}</span>
-      <span className="k">Cash</span>
-      <span className="num">{money(account.cash)}</span>
-      <span className="k">Buying power</span>
-      <span className="num">{money(account.buyingPower)}</span>
-      <span className="k">Unrealized P/L</span>
-      <span className={`num ${pnlClass(account.unrealizedPnl)}`}>{signedMoney(account.unrealizedPnl)}</span>
-      <span className="k">Realized P/L</span>
-      <span className={`num ${pnlClass(account.realizedPnl)}`}>{signedMoney(account.realizedPnl)}</span>
-      <span className="k">Day P/L</span>
-      <span className={`num ${pnlClass(account.dayPnl)}`}>{signedMoney(account.dayPnl)}</span>
-      <span className="k">Session P/L</span>
-      <span className={`num ${pnlClass(total)}`}>{signedMoney(total)}</span>
-      <span className="k">Trades · win rate</span>
-      <span className="num">
-        {stats.n} · {stats.winRate === null ? '—' : `${stats.winRate.toFixed(0)}%`}
-      </span>
+  const item = (k: string, v: string, cls = '', title?: string) => (
+    <div title={title}>
+      <dt>{k}</dt>
+      <dd className={`num ${cls}`}>{v}</dd>
     </div>
+  );
+  return (
+    <dl className="acct">
+      {item('Starting balance', money(account.startingBalance))}
+      {item('Cash', money(account.cash))}
+      {item('Buying power', money(account.buyingPower))}
+      {item('Session P/L', signedMoney(total), pnlClass(total), account.startingBalance > 0 ? `${pct((total / account.startingBalance) * 100, 2, true)} since the session started` : undefined)}
+      {item('Unrealized P/L', signedMoney(account.unrealizedPnl), pnlClass(account.unrealizedPnl))}
+      {item('Realized P/L', signedMoney(account.realizedPnl), pnlClass(account.realizedPnl))}
+      {item('Closed trades', String(stats.n))}
+      {item('Win rate', stats.winRate === null ? '—' : `${stats.winRate.toFixed(0)}%`)}
+    </dl>
   );
 }
 
@@ -46,7 +48,7 @@ function ChallengeWidget() {
   const def = CHALLENGES.find((c) => c.id === active.challengeId);
   const r = active.result;
   return (
-    <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
+    <div className="right-section">
       <div className="row">
         <b className="small">Challenge</b>
         <div className="spacer" />
@@ -65,18 +67,44 @@ function ChallengeWidget() {
   );
 }
 
-export function RightPanel() {
-  const session = useTrading((s) => s.session);
+/** Before any session: what this column is for, and how to start. */
+function NoSession({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
   return (
-    <div className="panel area-right">
+    <EmptyState title="No session running">
+      <p className="small" style={{ margin: '0 0 12px' }}>
+        Start a replay of a past trading day or the simulated market. Your paper account, open positions and the order ticket appear here.
+      </p>
+      <div className="stack">
+        <button className="btn primary" onClick={() => onNewSession('replay')}>
+          Start a historical replay
+        </button>
+        <button className="btn" onClick={() => onNewSession('sim')}>
+          Start the simulated market
+        </button>
+      </div>
+    </EmptyState>
+  );
+}
+
+export function RightPanel({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
+  const session = useTrading((s) => s.session);
+  // Closing a position from the list removes its row: focus goes to the first position left, else to
+  // the ticket's order side, rather than dropping to the page. (The ticket rescues its own controls.)
+  const panelRef = useFocusRescue<HTMLDivElement>(
+    (root) => root.querySelector<HTMLElement>('.pos-mini-pick') ?? root.querySelector<HTMLElement>('[aria-label="Order side"] button[aria-pressed="true"]'),
+  );
+  return (
+    <div className="panel area-right" ref={panelRef}>
       <div className="panel-head">
         <b>Order ticket</b>
         <div className="spacer" />
         {session && <span className="muted small">Paper trading</span>}
       </div>
-      <div className="panel-body">
+      <div className="panel-body right-body">
+        {!session && <NoSession onNewSession={onNewSession} />}
         <AccountBox />
         <ChallengeWidget />
+        <PositionList />
         <OrderTicket />
       </div>
     </div>
