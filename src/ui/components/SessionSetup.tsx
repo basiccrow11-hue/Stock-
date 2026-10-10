@@ -133,7 +133,8 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const extraSymbols = includeWatchlist ? settings.watchlist.filter((s) => s !== symbol.toUpperCase() && (providerId !== 'demo' && providerId !== 'csv' ? true : symbols.some((x) => x.symbol === s))) : [];
 
   const submit = async () => {
-    if (validation || starting.current) return;
+    // Also while a start from an earlier form (closed while it loaded) is still under way.
+    if (validation || starting.current || useTrading.getState().loading) return;
     starting.current = true;
     setError(null);
     // A blind replay's dates are not saved as the next default: the next form, here or in another

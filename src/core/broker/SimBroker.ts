@@ -182,7 +182,7 @@ export class SimBroker {
    * this bar began, which leaves out other symbols' bars processed before it at the same time; and `low`,
    * the lowest equity Strict's daily limit has seen inside this bar. Undefined otherwise.
    */
-  private bar?: { symbol: string; offset: number; low?: number };
+  private bar?: { symbol: string; time: UnixSeconds; offset: number; low?: number };
 
   private liveOrders(): Order[] {
     const list = this.s.orders;
@@ -407,8 +407,9 @@ export class SimBroker {
    * The stop loss and target a working entry's unfilled shares will get once it fills at `px` (by
    * default its own price): once it has started filling, those of its live bracket, which take its
    * later shares wherever they have been moved, else its own. A bracket stop that has fired, or sits at
-   * or past `px` (moved to breakeven), closes the held shares before price can reach the entry again,
-   * and the later shares then get the entry's own.
+   * or past `px` (moved to breakeven), fills before the later shares can (exits go first; price crosses
+   * it on the way to `px`), and that cancels the rest of the entry (manageBrackets). Those shares are
+   * still counted, with the entry's own stop, so the measure errs high.
    */
   private bracketLevels(o: Order, px = this.entryPrice(o)): { stopLoss?: number; takeProfit?: number } {
     let { stopLoss, takeProfit } = o;
@@ -1070,6 +1071,11 @@ export class SimBroker {
       else if (o.action === adding && (o.type === 'market' || o.filledQty > 0)) {
         notes.push(`Cancelled the unfilled ${o.quantity - o.filledQty} of ${describe(o)}, so it cannot add to the position after the close.`);
         this.cancel(o.id, 'Position closed manually');
+      } else if (o.action === adding && this.cfg.strictRisk.enabled) {
+        // Strict cancels it once the trade closes (updateRoundTrip); a close that waits for the open
+        // must not leave it to fill first and keep the position open.
+        notes.push(`Strict Mode: cancelled ${describe(o)}, measured as part of the ${o.symbol} trade you closed. Place it again to check it as a new trade.`);
+        this.cancel(o.id, 'Position closed manually');
       }
     }
     const r = this.submit({ symbol, action: pos.quantity > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(pos.quantity), tif: 'day' });
@@ -1258,7 +1264,7 @@ export class SimBroker {
       this.s.stepStart = { time: end, equity };
       this.s.dayLowEquity = low;
     }
-    this.bar = { symbol, offset: this.s.stepStart.equity - equity };
+    this.bar = { symbol, time: bar.time, offset: this.s.stepStart.equity - equity };
     const session = marketSession(bar.time);
     // Pending orders become working once their session arrives.
     for (const o of this.liveOrders()) {
@@ -1500,6 +1506,8 @@ export class SimBroker {
     // With the bar's volume cap used up nothing more trades in it, but a stop the path crosses still
     // fires: a stop is a market order from then on, a stop-limit a limit, filled from the next bar.
     if (capacity <= 0) {
+      // The bar walked now, or for one placed or changed between bars, the last one, whose volume it shares.
+      if ((o.type === 'stop' || o.type === 'stop_limit') && !o.triggered) o.noRoomBar = this.bar?.time ?? this.s.lastBar[o.symbol]?.time;
       if (o.type === 'stop_limit' && !o.triggered) return this.fireStopLimit(o, x, time);
       if (o.type === 'stop' && !o.triggered) this.fireStop(o, time);
       skip.add(o.id);
@@ -1665,7 +1673,7 @@ export class SimBroker {
     this.log(o.status === 'filled' ? 'filled' : 'partial', `${o.action.toUpperCase()} ${qty} ${symbol} @ ${price.toFixed(2)}${o.status === 'partially_filled' ? ` (partial ${o.filledQty}/${o.quantity})` : ''}`, o.id);
 
     this.updateRoundTrip(o, fill, opening);
-    this.manageBrackets(o, qty);
+    this.manageBrackets(o, qty, time);
     this.s.lastPrice[symbol] = this.s.lastPrice[symbol] ?? price;
   }
 
@@ -1781,7 +1789,7 @@ export class SimBroker {
   }
 
   /** Creates/updates bracket exits when an entry fills; maintains OCO between exits. */
-  private manageBrackets(o: Order, qty: number): void {
+  private manageBrackets(o: Order, qty: number, time: UnixSeconds): void {
     if (isOpeningAction(o.action) && (o.stopLoss || o.takeProfit)) {
       const exitAction: OrderAction = o.action === 'buy' ? 'sell' : 'cover';
       const children = this.liveOrders().filter((c) => c.parentId === o.id && isOpen(c));
@@ -1816,6 +1824,20 @@ export class SimBroker {
         for (const c of children) c.quantity += qty;
       }
       return;
+    }
+    // The entry this exit came with, still filling (capped by a thin stock's volume) while other shares
+    // keep the trade open: the rest would be bought past this exit and get a bracket already through the
+    // market, to be sold again. It is cancelled, as when the trade closes (updateRoundTrip).
+    const parent = o.parentId ? this.openOrderById(o.parentId) : undefined;
+    if (parent && parent.filledQty > 0) {
+      const kind = o.type === 'limit' ? 'take profit' : 'stop loss';
+      const level = o.type === 'limit' ? o.limitPrice : o.stopPrice;
+      this.autoCancel(
+        parent,
+        time,
+        `Its ${kind}${level !== undefined ? ` at ${formatTick(level)}` : ''} filled while it was still filling, so the rest was cancelled rather than ${parent.action === 'buy' ? 'bought' : 'sold short'} past it.`,
+        `its ${kind} filled while it was still filling`,
+      );
     }
     if (o.ocoGroup) {
       for (const sib of this.liveOrders()) {

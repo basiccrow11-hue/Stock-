@@ -89,6 +89,8 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   triggered: boolean;
   /** When the stop fired. One that fired after its bar's volume cap was used fills from the next bar. Unset on orders saved before this was recorded. */
   triggeredAt?: UnixSeconds;
+  /** The start of the bar where the stop fired with no room left under its volume cap, so none of it filled there. */
+  noRoomBar?: UnixSeconds;
   /** Bracket children reference their parent entry. */
   parentId?: string;
   /** One-cancels-other group id for bracket exits. */

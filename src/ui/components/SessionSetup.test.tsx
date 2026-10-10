@@ -108,3 +108,29 @@ describe('a replay that fails to start', () => {
     act(() => form.root.unmount());
   });
 });
+
+describe('starts that overlap', () => {
+  it('ignores Start while another start is still loading', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    const store = await import('../state/tradingStore');
+    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'SPY', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
+    const form = await open();
+    act(() => store.useTrading.setState({ loading: true })); // a start from a form closed while it loaded
+    const start = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Loading data…')!;
+    expect(start.getAttribute('aria-disabled')).toBe('true');
+    await act(async () => start.click());
+    expect(store.useTrading.getState().session).toBeNull();
+    act(() => form.root.unmount());
+    store.useTrading.setState({ loading: false });
+  });
+
+  it('drops a replay still loading when a newer session starts', async () => {
+    const store = await import('../state/tradingStore');
+    const replay = store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: [], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 0, timeframe: '1m', speed: 60, blind: false });
+    store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 });
+    expect(await replay).toBe(false);
+    expect(store.useTrading.getState().session?.mode).toBe('sim');
+    expect(store.useTrading.getState().loading).toBe(false);
+    await store.endSession();
+  });
+});

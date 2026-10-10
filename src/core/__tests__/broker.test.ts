@@ -668,7 +668,8 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
     expect(broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 100.5, quantity: 400, stopLoss: 99.5 }).ok).toBe(true);
     const id = broker.state.orders[0].id;
     next(100.6, 100.6, 100.4, 100.5, 400);
-    next(99.4, 99.4, 99.3, 99.3, 4);
+    // Too thin to trade at all: its bracket stop fires but sells nothing (a fill would cancel the entry's rest).
+    next(99.4, 99.4, 99.3, 99.3, 3);
     const entry = broker.state.orders[0];
     expect(entry).toMatchObject({ triggered: true, status: 'partially_filled' });
     // Price is below the 99.50 stop loss, so the order cannot grow, but it can be cut back.
@@ -1736,5 +1737,46 @@ describe('a bar whose volume cap is used up, an entry cancelled as a conflict, a
       expect(entry).toMatchObject({ status: 'filled', filledQty: 1000 });
       expect(next.ok).toBe(true);
     }
+  });
+});
+
+describe('an add still filling when its own stop loss or take profit fills, and a Strict close that waits for the open', () => {
+  it('cancels the rest of the add rather than buying past its own exit while other shares keep the trade open', () => {
+    const cases = [
+      { exit: { stopLoss: 19.9 }, open: 19.85, why: 'Its stop loss at 19.90 filled while it was still filling, so the rest was cancelled rather than bought past it.' },
+      { exit: { stopLoss: 19.5, takeProfit: 20.1 }, open: 20.15, why: 'Its take profit at 20.10 filled while it was still filling, so the rest was cancelled rather than bought past it.' },
+    ];
+    for (const c of cases) {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 } });
+      const t0 = et('2025-01-15', '10:00');
+      broker.onBar(S, bar(t0, 20, 20, 20, 20, 1_000_000));
+      broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 19, tif: 'gtc' });
+      broker.onBar(S, bar(t0 + 60, 20, 20, 20, 20, 1000)); // thin from here: the cap is 250 shares
+      const add = broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, ...c.exit, tif: 'gtc' }).order!;
+      expect(add.filledQty).toBe(250);
+      // The next bars open past the add's own exit; the first entry's stop at 19 holds the trade open.
+      for (let i = 2; i < 6; i++) broker.onBar(S, bar(t0 + 60 * i, c.open, c.open + 0.03, c.open - 0.03, c.open, 1000));
+      const after = broker.state.orders.find((o) => o.id === add.id)!;
+      expect(after).toMatchObject({ status: 'cancelled', conflict: true, filledQty: 250, rejectReason: c.why });
+      expect(broker.state.fills.filter((f) => f.orderId === add.id)).toHaveLength(1);
+      expect(broker.position(S).quantity).toBe(100);
+    }
+  });
+
+  it('cancels a resting add at once under Strict when Close position waits for the open', () => {
+    const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 1, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...DEFAULT_EXECUTION_CONFIG, strictRisk } });
+    broker.onBar('AAA', bar(et('2025-01-14', '15:58'), 50, 50, 50, 50));
+    expect(broker.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 100, stopLoss: 49, tif: 'gtc' }).ok).toBe(true);
+    broker.onBar('AAA', bar(et('2025-01-15', '07:00'), 50, 50.05, 49.95, 50));
+    const add = broker.submit({ symbol: 'AAA', action: 'buy', type: 'limit', limitPrice: 49.8, quantity: 100, stopLoss: 49, tif: 'gtc', extendedHours: true }).order!;
+    const close = broker.closePosition('AAA');
+    expect(close.order!.status).toBe('pending');
+    expect(close.notes).toEqual(['Strict Mode: cancelled BUY 100 AAA LMT 49.80, measured as part of the AAA trade you closed. Place it again to check it as a new trade.']);
+    expect(broker.state.orders.find((o) => o.id === add.id)!.status).toBe('cancelled');
+    broker.onBar('AAA', bar(et('2025-01-15', '07:01'), 50, 50, 49.7, 49.75)); // would have filled the add
+    broker.onBar('AAA', bar(et('2025-01-15', '09:30'), 49.9, 50, 49.85, 49.95));
+    expect(broker.position('AAA').quantity).toBe(0);
+    expect(broker.state.roundTrips.every((t) => t.closed)).toBe(true);
   });
 });

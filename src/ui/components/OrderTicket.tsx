@@ -155,6 +155,21 @@ export function OrderTicket() {
     [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
   );
   const bracketId = useId();
+  // Screen readers hear a blocking bracket error once typing has settled, and again only when it changes
+  // kind: not while a half-typed price is briefly on the wrong side, nor at each new quote while playing.
+  const [bracketSaid, setBracketSaid] = useState('');
+  const bracketText = useRef('');
+  bracketText.current = bracket.join(' ');
+  const bracketKind = bracket.map((e) => e.replace(/\d+(\.\d+)?/g, '#')).join(' ');
+  const saidKind = useRef('');
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (bracketKind === saidKind.current) return;
+      saidKind.current = bracketKind;
+      setBracketSaid(bracketText.current);
+    }, 1000);
+    return () => clearTimeout(id);
+  }, [bracketKind]);
 
   if (!session) return null;
 
@@ -377,14 +392,14 @@ export function OrderTicket() {
         <span className="muted">Est. commission</span>
         <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
       </div>
-      {bracket.map((e) => (
-        <div key={e} className="alert error" aria-hidden="true">
+      {/* Why the order can't be placed: read with the button, and announced (below) once typing settles. */}
+      {bracket.map((e, i) => (
+        <div key={e} id={`${bracketId}-${i}`} className="alert error" aria-hidden="true">
           {e}
         </div>
       ))}
-      {/* Screen readers hear why the order can't be placed as soon as it can't, and again on the button. */}
-      <div id={bracketId} className="sr-only" role="status">
-        {bracket.join(' ')}
+      <div className="sr-only" role="status">
+        {bracketSaid}
       </div>
       {risk?.warnings.map((w) => (
         <div key={w} className="alert warn">
@@ -396,7 +411,7 @@ export function OrderTicket() {
           Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
-      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracketId : undefined}>
+      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracket.map((_, i) => `${bracketId}-${i}`).join(' ') : undefined}>
         {label}
       </button>
       {result && (

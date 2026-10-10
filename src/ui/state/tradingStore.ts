@@ -572,8 +572,13 @@ function resetEngines(): void {
   eng.prevClose = {};
 }
 
+/** Counts session starts and ends: a replay still loading when a newer one starts (or the session ends) is dropped. */
+let loadSeq = 0;
+
 export async function startReplay(setup: ReplaySetup & { providerId: string; timeframe: Timeframe; speed: number; blind: boolean; challengeId?: string }): Promise<boolean> {
+  const seq = ++loadSeq;
   if (useChallenges.getState().active) await useChallenges.getState().finishActive();
+  if (seq !== loadSeq) return false;
   resetEngines();
   useTrading.setState({ ...EMPTY, loading: true, activeSymbol: setup.symbol.toUpperCase(), timeframe: setup.timeframe, speed: setup.speed });
   const provider = getProvider(setup.providerId);
@@ -585,6 +590,7 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
   const id = newId('replay');
   try {
     const loaded = await ReplaySession.load(provider, setup, getSettings().execution, id);
+    if (seq !== loadSeq) return false;
     const session = loaded.session;
     // Blind mode hides the date, and a skipped symbol's message can carry it (ours or the vendor's).
     const warnings = setup.blind ? loaded.warnings.map(withoutDates) : loaded.warnings;
@@ -618,13 +624,14 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
     for (const w of warnings) toast('warning', w, 6000);
     return true;
   } catch (e) {
-    if ((e as Error).name === 'AbortError') return false;
+    if ((e as Error).name === 'AbortError' || seq !== loadSeq) return false;
     useTrading.setState({ loading: false, error: (e as Error).message });
     return false;
   }
 }
 
 export function startSim(opts: { config: Partial<SimConfig>; startingBalance: number; speed: number; challengeId?: string }): void {
+  loadSeq++;
   if (useChallenges.getState().active) void useChallenges.getState().finishActive();
   resetEngines();
   const today = new Date().toISOString().slice(0, 10);
@@ -656,6 +663,7 @@ export function startSim(opts: { config: Partial<SimConfig>; startingBalance: nu
 }
 
 export async function endSession(): Promise<void> {
+  loadSeq++;
   if (useChallenges.getState().active) await useChallenges.getState().finishActive();
   resetEngines();
   useTrading.setState({ ...EMPTY });

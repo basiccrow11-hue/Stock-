@@ -241,6 +241,27 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   // How that order came to fill past its own stop or target: a gap at a bar's open (also older trades,
   // which did not record it), the spread and slippage, a limit through the market, or price moving past
   // both before the order could fill (an order placed while a daily bar was still hidden).
+  /** Index of the revealed bar holding time `t`, or -1. */
+  const barAt = (t: number) => {
+    const bars = input.revealedBars;
+    let lo = 0;
+    let hi = bars.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (bars[mid].time <= t) {
+        found = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return found;
+  };
+  /** Where an order that fired with no room left in the bar starting at `noRoom` first filled, at `filled`: the next bar's open, or a later one's. */
+  const openAfter = (noRoom: number, filled: number) => {
+    const a = barAt(noRoom);
+    const b = barAt(filled);
+    return a >= 0 && b >= 0 && b - a <= 1 ? "the next bar's open" : "a later bar's open";
+  };
   const entryPast = (order: Order | undefined, planned: number | undefined, price: number, what: 'stop' | 'target', level: number): { text: string; gap: boolean } => {
     const fill = order && tripFills.find((f) => f?.orderId === order.id);
     const market = order?.type === 'market';
@@ -256,11 +277,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         text: `Your ${name}${at} filled in ${parts} parts, each capped at a share of a bar's volume (Data & Settings), and the later parts filled past your ${what} at ${formatTick(level)}, for an average of ${formatTick(price)}.`,
       };
     }
-    // A stop entry that fired after earlier fills had used its bar's volume cap waited for the next bar.
-    if (fill && order?.type === 'stop' && order.triggeredAt !== undefined && fill.time > order.triggeredAt) {
+    // A stop or stop-limit entry that fired with no room left under its bar's volume cap filled from a later bar.
+    if (fill && order?.noRoomBar !== undefined && fill.at === 'open') {
       return {
         gap: true,
-        text: `Your ${name}${at} fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so it filled from the next bar's open, at ${formatTick(fill.price)}, already past your ${what} at ${formatTick(level)}${parts > 1 ? `, for an average of ${formatTick(price)}` : ''}.`,
+        text: `Your ${name}${at} fired on a bar whose volume cap (Data & Settings) left no room for it, so it filled from ${openAfter(order.noRoomBar, fill.time)}, at ${formatTick(fill.price)}, already past your ${what} at ${formatTick(level)}${parts > 1 ? `, for an average of ${formatTick(price)}` : ''}.`,
       };
     }
     if (!fill?.at || fill.at === 'open') {
@@ -435,8 +456,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     // rest filled over the next bars, here after price had come back past the stop.
     const stopParts = main!.order.type === 'stop' ? input.fills.filter((f) => f.orderId === main!.order.id) : [];
     const first = stopParts[0];
-    // It fired after earlier fills had used its bar's volume cap, so none of it filled on that bar.
-    const noneThere = first !== undefined && main!.order.triggeredAt !== undefined && first.time > main!.order.triggeredAt;
+    // It fired with no room left under its bar's volume cap, so none of it filled on that bar.
+    const noRoom = main!.order.noRoomBar;
+    const noneThere = first !== undefined && noRoom !== undefined;
     if (!pastStop && (stopParts.length > 1 || noneThere) && (exitPx - stopAt) * dir > 0) {
       const Stop = `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)}`;
       const after = `That helped this time; had price kept going, ${noneThere ? 'they' : 'the rest'} would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`;
@@ -444,7 +466,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         tone: 'neutral',
         title: noneThere ? 'Your stop fired, and it filled after price came back' : 'Your stop fired, and the rest filled after price came back',
         detail: noneThere
-          ? `${Stop} fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so none of its ${main!.qty} shares could ${long ? 'sell' : 'be bought back'} there. A stop that has fired is a market order, so ${stopParts.length > 1 ? `they ${long ? 'sold' : 'were bought back'} over the next bars as price came back, the first ${first.quantity} at ${formatTick(first.price)}, for an average of ${formatTick(exitPx)}` : `they ${long ? 'sold' : 'were bought back'} at the next bar's open, ${formatTick(exitPx)}, after price had come back`}. ${after}`
+          ? `${Stop} fired on a bar whose volume cap (Data & Settings) left no room for it, so none of its ${main!.qty} shares could ${long ? 'sell' : 'be bought back'} there. A stop that has fired is a market order, so ${stopParts.length > 1 ? `they ${long ? 'sold' : 'were bought back'} over later bars as price came back, the first ${first.quantity} at ${openAfter(noRoom!, first.time)}, ${formatTick(first.price)}, for an average of ${formatTick(exitPx)}` : `they ${long ? 'sold' : 'were bought back'} at ${openAfter(noRoom!, first.time)}, ${formatTick(exitPx)}, after price had come back`}. ${after}`
           : `${Stop} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${formatTick(first.price)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. ${after}`,
       });
     }
