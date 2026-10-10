@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChartLegend, type LegendModel, type LegendSource } from './ChartLegend';
-import { indicatorName } from './ChartView';
+import { indicatorName } from './chartParts';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

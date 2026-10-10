@@ -387,11 +387,15 @@ function sceneAtClose(trip: RoundTrip, timeframe: Timeframe, session: SessionMet
     bars = all.filter((b) => b.time <= trip.exitTime!);
     later = all.length > bars.length;
   }
+  // The history from before the replay's loaded bars that the chart shows on this timeframe, if any
+  // has loaded (it is all from before the start).
+  const history = eng.replay?.chartHistory(trip.symbol, timeframe);
   const scene: ChartScene = {
     symbol: trip.symbol,
     timeframe,
     baseTimeframe: getBaseTimeframe(trip.symbol),
     bars,
+    history: history?.bars.length ? { bars: history.bars, timeframe: history.timeframe } : undefined,
     fills: st.fills.filter((f) => f.symbol === trip.symbol && (f.knownAt ?? f.time) <= at),
     news: getSimEventsFor(trip.symbol).filter((e) => e.time <= at),
     entryTime: trip.entryTime,

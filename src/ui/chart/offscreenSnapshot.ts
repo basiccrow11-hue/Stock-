@@ -11,20 +11,18 @@
  * drawings, and instead of the screen's scroll and zoom it shows the trade from shortly before its
  * entry to the close.
  */
-import { HistogramSeries, LineSeries, LineStyle, PriceScaleMode, TickMarkType, createChart, createSeriesMarkers, createTextWatermark, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
+import { PriceScaleMode, createChart, createSeriesMarkers, createTextWatermark, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
 import type { Bar, DataSourceKind, Fill, Timeframe, UnixSeconds } from '../../core/types';
 import type { SimEvent } from '../../core/sim/SimMarket';
 import { aggregateBars, bucketFor, ownCandles } from '../../core/data/aggregate';
-import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
-import { exchangeDate } from '../../core/time';
+import { indicatorStream } from '../../core/indicators/indicators';
 import { lastIndexAtOrBefore } from '../../core/util/math';
-import { getSettings, type IndicatorConfig } from '../state/settingsStore';
+import { getSettings } from '../state/settingsStore';
 import { blindDayLabel } from '../state/tradingStore';
 import { resolved } from '../theme/useTheme';
-import { onChart, type ChartPalette } from '../theme/themes';
-import { chartLabelFill } from '../theme/color';
-import { CHART_LOCALE, price as fmtPrice } from '../services/format';
+import { CHART_LOCALE } from '../services/format';
 import { addMainSeries, chartOptions, mainPoint, mainPriceFormat, priceScaleMode, valueDecimals, valueFormat } from './chartTheme';
+import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, fillMarker, indicatorPoint, indicatorSpec, newsMarker, timeLabels, toJpeg, volumePoint, watermarkLines, withHistory } from './chartParts';
 import { blindChartShift, fromChartTime, toChartTime } from './ChartView';
 
 /** Everything the picture shows, taken when the trade closed: later changes to the session do not reach it. */
@@ -36,6 +34,8 @@ export interface ChartScene {
   baseTimeframe: Timeframe;
   /** The symbol's bars shown by the moment the exit became known, oldest first. */
   bars: Bar[];
+  /** The chart's history from before those bars (see ChartHistory), when it had loaded any. */
+  history?: { bars: readonly Bar[]; timeframe: Timeframe };
   /** The symbol's fills known by then (the chart's buy and sell markers). */
   fills: Fill[];
   /** Simulated news on the symbol or the whole market by then. */
@@ -56,50 +56,6 @@ const MIN_CANDLES = 100;
 /** Empty space after the last candle, as on screen. */
 const RIGHT_OFFSET = 8;
 
-const OSCILLATORS = new Set(['rsi', 'macd', 'atr']);
-
-/** Line colour per series of an indicator (null for the MACD histogram, coloured per bar), as on screen. */
-function indicatorColors(cfg: IndicatorConfig, p: ChartPalette): (string | null)[] {
-  if (cfg.type === 'macd') return [null, p.accent, p.warn];
-  const c = onChart(cfg.color, p.background);
-  return cfg.type === 'bb' ? [c, c, c] : [c];
-}
-
-/** An indicator's values on every candle, one array per series, with the chart's default periods. */
-function indicatorValues(cfg: IndicatorConfig, candles: Bar[]): number[][] {
-  const closes = candles.map((c) => c.close);
-  switch (cfg.type) {
-    case 'sma':
-      return [sma(closes, cfg.period ?? 20)];
-    case 'ema':
-      return [ema(closes, cfg.period ?? 20)];
-    case 'vwap':
-      return [vwap(candles)];
-    case 'bb': {
-      const b = bollinger(closes, cfg.period ?? 20, cfg.mult ?? 2);
-      return [b.upper, b.middle, b.lower];
-    }
-    case 'rsi':
-      return [rsi(closes, cfg.period ?? 14)];
-    case 'macd': {
-      const m = macd(closes, cfg.fast ?? 12, cfg.slow ?? 26, cfg.signal ?? 9);
-      return [m.histogram, m.macd, m.signal];
-    }
-    case 'atr':
-      return [atr(candles, cfg.period ?? 14)];
-    case 'volume':
-      return [];
-  }
-}
-
-/** The data-source line of the watermark, as on screen. */
-const SOURCE_WATERMARK: Record<DataSourceKind, string> = {
-  DEMO: 'DEMO DATA · SYNTHETIC',
-  SIMULATED: 'SIMULATED MARKET · FICTIONAL',
-  HISTORICAL: 'HISTORICAL DATA · REPLAY',
-  LIVE: 'LIVE',
-};
-
 /**
  * Draws `scene` on a chart outside the page and returns it as a JPEG data URL, or null when there is
  * nothing to draw. The chart and its element are removed again before it returns.
@@ -116,19 +72,14 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
   const candleStart = (t: number) => (own ? (scene.bars[lastIndexAtOrBefore(scene.bars, t, (b) => b.time)]?.time ?? t) : bucketFor(t, timeframe).start);
   // Shown from a little before the entry to the close. The chart is handed only those candles; the
   // earlier ones count for the indicators, which are worked out on every candle as on screen.
-  const all = aggregateBars(scene.bars, timeframe, baseTimeframe);
+  const all = withHistory(aggregateBars(scene.bars, timeframe, baseTimeframe), scene.history, timeframe).candles;
   const entryIndex = Math.max(0, lastIndexAtOrBefore(all, candleStart(scene.entryTime), (c) => c.time));
   const first = Math.max(0, Math.min(entryIndex - BEFORE_ENTRY, all.length - 1 - MIN_CANDLES));
   const candles = all.slice(first);
 
   const base = chartOptions(pal);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const parts = (shifted: number) => {
-    const d = new Date(shifted * 1000);
-    return { date: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`, hm: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` };
-  };
   // In a blind session no calendar date may appear: day boundaries read "Day N", as on screen.
-  const dayLabel = (shifted: number) => blindDayLabel(fromChartTime(shifted, shift), blind!.startDate);
+  const { tickMarkFormatter } = timeLabels(timeframe, blind ? (t) => blindDayLabel(fromChartTime(t, shift), blind.startDate) : null);
 
   // Laid out (so the chart can size itself) but out of sight and out of the accessibility tree.
   const host = document.createElement('div');
@@ -151,14 +102,7 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
         secondsVisible: false,
         rightOffset: RIGHT_OFFSET,
         allowBoldLabels: !blind,
-        tickMarkFormatter: (t: Time, type: TickMarkType) => {
-          const p = parts(t as number);
-          if (type === TickMarkType.Time || type === TickMarkType.TimeWithSeconds) return p.hm;
-          if (blind) return dayLabel(t as number);
-          if (type === TickMarkType.Year) return p.date.slice(0, 4);
-          if (type === TickMarkType.Month) return p.date.slice(0, 7);
-          return p.date.slice(5);
-        },
+        tickMarkFormatter,
       },
       localization: { locale: CHART_LOCALE },
     });
@@ -182,60 +126,20 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     let nextPane = 1;
     for (const cfg of settings.indicators.filter((i) => i.enabled)) {
       if (cfg.type === 'volume') {
-        const v = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
-        chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-        v.setData(candles.map((c) => ({ time: ct(c.time), value: c.volume, color: c.close >= c.open ? pal.volumeUp : pal.volumeDown })));
+        addVolumeSeries(chart).setData(candles.map((c) => volumePoint(c, ct(c.time), pal)));
         continue;
       }
-      const values = indicatorValues(cfg, all).map((vals) => vals.slice(first));
+      const spec = indicatorSpec(cfg);
+      if (!spec) continue;
+      // Worked out on every candle, as on screen; the chart is handed those from `first`.
+      const stream = indicatorStream(spec);
+      stream.update(all, 0);
       const pane = OSCILLATORS.has(cfg.type) ? nextPane++ : 0;
       let maxAbs = 0;
-      if (pane > 0) for (const vals of values) for (const v of vals) if (Number.isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
+      if (pane > 0) for (const vals of stream.lines) for (let i = first; i < vals.length; i++) if (Number.isFinite(vals[i])) maxAbs = Math.max(maxAbs, Math.abs(vals[i]));
       const priceFormat = pane === 0 ? overlayFormat : valueFormat(valueDecimals(maxAbs));
-      const colors = indicatorColors(cfg, pal);
-      const line = (k: number, width: 1 | 2 = 1, style = LineStyle.Solid) =>
-        chart.addSeries(
-          LineSeries,
-          {
-            color: colors[k] ?? undefined,
-            priceLineColor: colors[k] ? chartLabelFill(colors[k]) : undefined,
-            lineWidth: width,
-            lineStyle: style,
-            priceLineVisible: false,
-            lastValueVisible: true,
-            crosshairMarkerVisible: false,
-            priceFormat,
-          },
-          pane,
-        );
-      const lines =
-        cfg.type === 'bb'
-          ? [line(0, 1, LineStyle.Dashed), line(1, 1), line(2, 1, LineStyle.Dashed)]
-          : cfg.type === 'macd'
-            ? [chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat }, pane), line(1, 2), line(2, 1)]
-            : [line(0, cfg.type === 'vwap' ? 2 : 1)];
-      if (cfg.type === 'rsi') {
-        lines[0].createPriceLine({ price: 70, color: pal.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
-        lines[0].createPriceLine({ price: 30, color: pal.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
-      }
-      lines.forEach((s, k) => {
-        const vals = values[k];
-        if (!vals) return;
-        const hist = cfg.type === 'macd' && k === 0;
-        // VWAP restarts each session: the last point of a session is transparent, so no line jumps to the next.
-        const endsSession = (i: number) => cfg.type === 'vwap' && timeframe !== '1D' && i + 1 < candles.length && exchangeDate(candles[i + 1].time) !== exchangeDate(candles[i].time);
-        s.setData(
-          candles.map((c, i) =>
-            Number.isNaN(vals[i])
-              ? { time: ct(c.time) }
-              : hist
-                ? { time: ct(c.time), value: vals[i], color: vals[i] >= 0 ? pal.histUp : pal.histDown }
-                : endsSession(i)
-                  ? { time: ct(c.time), value: vals[i], color: 'rgba(0,0,0,0)' }
-                  : { time: ct(c.time), value: vals[i] },
-          ) as never,
-        );
-      });
+      const { series: lines } = addIndicatorSeries(chart, cfg, pane, priceFormat, pal);
+      lines.forEach((s, k) => s.setData(candles.map((c, i) => indicatorPoint(cfg, k, stream.lines[k][first + i], ct(c.time), all, first + i, timeframe, pal)) as never));
       if (pane > 0) {
         chart.panes()[pane]?.setStretchFactor(0.35);
         chart.priceScale('right', pane).applyOptions({ mode: PriceScaleMode.Normal });
@@ -244,25 +148,8 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     chart.panes()[0].setStretchFactor(1);
 
     const markers: SeriesMarker<Time>[] = [];
-    for (const f of scene.fills) {
-      const buy = f.side === 'buy';
-      markers.push({
-        time: ct(candleStart(f.time)),
-        position: buy ? 'belowBar' : 'aboveBar',
-        shape: buy ? 'arrowUp' : 'arrowDown',
-        color: buy ? pal.markerBuy : pal.markerSell,
-        text: `${f.action.toUpperCase()} ${f.quantity} @ ${fmtPrice(f.price)}`,
-      });
-    }
-    for (const ev of scene.news) {
-      markers.push({
-        time: ct(candleStart(ev.time)),
-        position: 'aboveBar',
-        shape: 'circle',
-        color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,
-        text: `SIM NEWS: ${ev.headline.replace('[SIMULATED] ', '').slice(0, 40)}`,
-      });
-    }
+    for (const f of scene.fills) markers.push(fillMarker(f, ct(candleStart(f.time)), pal));
+    for (const ev of scene.news) markers.push(newsMarker(ev, ct(candleStart(ev.time)), pal));
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     createSeriesMarkers(series, markers);
 
@@ -271,10 +158,7 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     createTextWatermark(chart.panes()[0], {
       horzAlign: 'center',
       vertAlign: 'center',
-      lines: [
-        { text: `${scene.symbol} · ${timeframe}`, color: pal.watermark, fontSize: 42, fontStyle: 'bold' },
-        { text: SOURCE_WATERMARK[scene.source] ?? '', color: pal.watermarkSub, fontSize: 16 },
-      ],
+      lines: watermarkLines(scene.symbol, timeframe, scene.source, pal),
     });
 
     return toJpeg(chart.takeScreenshot(true, false));
@@ -282,15 +166,4 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     chart.remove();
     host.remove();
   }
-}
-
-/** A chart picture as a JPEG data URL, at most 1200 pixels wide (the chart's own snapshots are saved so too). */
-function toJpeg(canvas: HTMLCanvasElement): string {
-  const maxW = 1200;
-  if (canvas.width <= maxW) return canvas.toDataURL('image/jpeg', 0.82);
-  const c2 = document.createElement('canvas');
-  c2.width = maxW;
-  c2.height = Math.round((canvas.height * maxW) / canvas.width);
-  c2.getContext('2d')?.drawImage(canvas, 0, 0, c2.width, c2.height);
-  return c2.toDataURL('image/jpeg', 0.82);
 }

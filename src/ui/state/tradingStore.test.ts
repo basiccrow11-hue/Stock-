@@ -346,6 +346,26 @@ describe('journal snapshots', () => {
     await store.endSession();
   });
 
+  it('draws a daily chart off screen with the history the chart had loaded, all from before the replay', async () => {
+    const store = await import('./tradingStore');
+    store.registerSnapshotProvider(vi.fn(async () => 'data:image/jpeg;base64,AA=='));
+    expect(await store.startReplay({ ...replay, symbol: 'SPY', extraSymbols: ['QQQ'], timeframe: '1D', blind: false })).toBe(true);
+    const { mine } = await begin();
+    // The chart asks for QQQ's history as the user looks at it on 1D.
+    store.getChartHistory('QQQ', '1D');
+    await vi.waitFor(() => expect(store.getChartHistory('QQQ', '1D')?.status).toBe('ready'), { timeout: 10_000 });
+    const px = store.lastPrice('QQQ')!;
+    expect(store.submitOrder({ symbol: 'QQQ', action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.3), takeProfit: at(px + 0.3) }).ok).toBe(true);
+    store.jumpTo(exchangeTimeToUnix('2024-03-12', 15 * 60));
+    await vi.waitFor(() => expect(mine()).toHaveLength(1));
+    const scene = pictures.drawn[0];
+    expect(scene.history!.timeframe).toBe('30m');
+    expect(scene.history!.bars.length).toBeGreaterThan(150 * 13);
+    expect(scene.history!.bars[scene.history!.bars.length - 1].time).toBeLessThan(scene.bars[0].time);
+    store.registerSnapshotProvider(null);
+    await store.endSession();
+  });
+
   it('takes the chart on screen when it shows the close, and draws one off screen when it gives none or has moved on', async () => {
     const store = await import('./tradingStore');
     let screen: string | null = 'data:image/jpeg;base64,AA==';

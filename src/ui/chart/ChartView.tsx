@@ -12,8 +12,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import {
-  HistogramSeries,
-  LineSeries,
   LineStyle,
   PriceScaleMode,
   createChart,
@@ -27,12 +25,11 @@ import {
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
-  TickMarkType,
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
 import { lastIndexAtOrBefore, roundToTick } from '../../core/util/math';
 import { aggregateBars, candleFor, mergeBars, ownCandles } from '../../core/data/aggregate';
-import { indicatorStream, type IndicatorSpec, type IndicatorStream } from '../../core/indicators/indicators';
+import { indicatorStream, type IndicatorStream } from '../../core/indicators/indicators';
 import type { ChartHistory } from '../../core/replay/ReplaySession';
 import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
@@ -42,9 +39,9 @@ import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { ChartLegend, type LegendEntry, type LegendModel, type LegendSource } from './ChartLegend';
 import { useDrawings } from './drawings';
+import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, endsSession, fillMarker, indicatorColors, indicatorName, indicatorPoint as indicatorPointOf, indicatorSpec, newsMarker, timeLabels, toJpeg, volumePoint as volumePointOf, watermarkLines, withHistory } from './chartParts';
 import { addMainSeries, chartOptions, lastPriceColor, lastVisibleIndex, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, valueDecimals, valueFormat, type MainSeries } from './chartTheme';
 import { useTheme } from '../theme/useTheme';
-import { onChart, type ChartPalette } from '../theme/themes';
 import { chartLabelFill, chartLabelText, readable } from '../theme/color';
 
 /** lightweight-charts renders UTC; shift to exchange time so axes read in ET. `shift` moves a blind session's times (blindChartShift). */
@@ -96,50 +93,6 @@ interface IndicatorSeries {
   /** Its values on every candle, kept up to date at the newest ones (null for volume). */
   stream: IndicatorStream | null;
 }
-
-/** Line colour per series of an indicator (null for the MACD histogram, coloured per bar). */
-function indicatorColors(cfg: IndicatorConfig, p: ChartPalette): (string | null)[] {
-  if (cfg.type === 'macd') return [null, p.accent, p.warn];
-  const c = onChart(cfg.color, p.background);
-  return cfg.type === 'bb' ? [c, c, c] : [c];
-}
-
-/** What to compute for an indicator; its lines come in the order of its series. */
-function indicatorSpec(cfg: IndicatorConfig): IndicatorSpec | null {
-  switch (cfg.type) {
-    case 'sma':
-    case 'ema':
-      return { type: cfg.type, period: cfg.period ?? 20 };
-    case 'rsi':
-    case 'atr':
-      return { type: cfg.type, period: cfg.period ?? 14 };
-    case 'vwap':
-      return { type: 'vwap' };
-    case 'bb':
-      return { type: 'bb', period: cfg.period ?? 20, mult: cfg.mult ?? 2 };
-    case 'macd':
-      return { type: 'macd', fast: cfg.fast ?? 12, slow: cfg.slow ?? 26, signal: cfg.signal ?? 9 };
-    case 'volume':
-      return null;
-  }
-}
-
-/** An indicator's name with its parameters, as the legend shows it ("EMA 9", "MACD 12 26 9"). */
-export function indicatorName(cfg: IndicatorConfig): string {
-  const spec = indicatorSpec(cfg);
-  if (!spec) return cfg.type === 'volume' ? 'Volume' : String(cfg.type).toUpperCase();
-  const params = spec.type === 'bb' ? [spec.period, spec.mult] : spec.type === 'macd' ? [spec.fast, spec.slow, spec.signal] : spec.type === 'vwap' ? [] : [spec.period];
-  return [spec.type.toUpperCase(), ...params].join(' ');
-}
-
-/** The names on an indicator's value labels on the price axis, per series (none for the MACD histogram). */
-function seriesTitles(cfg: IndicatorConfig): string[] {
-  if (cfg.type === 'bb') return ['BB upper', 'BB basis', 'BB lower'];
-  if (cfg.type === 'macd') return ['', 'MACD', 'Signal'];
-  return [indicatorName(cfg)];
-}
-
-const OSCILLATORS = new Set(['rsi', 'macd', 'atr']);
 
 export interface ChartViewProps {
   symbol: string;
@@ -383,30 +336,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const parts = (shifted: number) => {
-      const d = new Date(shifted * 1000);
-      return { date: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`, hm: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` };
-    };
     const real = (shifted: number) => fromChartTime(shifted, shift);
+    const { timeFormatter, tickMarkFormatter } = timeLabels(timeframe, blind ? (t) => blindDayLabel(real(t)) : null);
     chart.applyOptions({
-      localization: {
-        locale: CHART_LOCALE,
-        timeFormatter: (t: Time) => {
-          const p = parts(t as number);
-          const label = blind ? blindDayLabel(real(t as number)) : p.date;
-          return timeframe === '1D' ? label : `${label} ${p.hm}`;
-        },
-      },
+      localization: { locale: CHART_LOCALE, timeFormatter },
       timeScale: {
-        tickMarkFormatter: (t: Time, type: TickMarkType) => {
-          const p = parts(t as number);
-          if (type === TickMarkType.Time || type === TickMarkType.TimeWithSeconds) return p.hm;
-          if (blind) return blindDayLabel(real(t as number));
-          if (type === TickMarkType.Year) return p.date.slice(0, 4);
-          if (type === TickMarkType.Month) return p.date.slice(0, 7);
-          return p.date.slice(5);
-        },
+        tickMarkFormatter,
         // Labels on calendar boundaries are bold; in blind mode no label stands out.
         allowBoldLabels: !blind,
       },
@@ -427,17 +362,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const chart = chartRef.current;
     if (!chart) return;
     watermarkRef.current?.detach();
-    const label = !session ? '' : session.source === 'DEMO' ? 'DEMO DATA · SYNTHETIC' : session.source === 'SIMULATED' ? 'SIMULATED MARKET · FICTIONAL' : session.source === 'HISTORICAL' ? 'HISTORICAL DATA · REPLAY' : 'LIVE';
     watermarkRef.current = createTextWatermark(chart.panes()[0], {
       horzAlign: 'center',
       vertAlign: 'center',
-      lines: session
-        ? [
-            { text: `${symbol} · ${timeframe}`, color: pal.watermark, fontSize: 42, fontStyle: 'bold' },
-            { text: label, color: pal.watermarkSub, fontSize: 16 },
-          ]
-        : [],
+      lines: session ? watermarkLines(symbol, timeframe, session.source, pal) : [],
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, symbol, timeframe, pal.watermark, pal.watermarkSub]);
 
   // ---------------------------------------------------------------- indicator series setup
@@ -467,45 +397,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     let nextPane = 1;
     for (const cfg of enabled) {
       if (cfg.type === 'volume') {
-        const v = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
-        chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-        volumeRef.current = v;
+        volumeRef.current = addVolumeSeries(chart);
         continue;
       }
       const pane = OSCILLATORS.has(cfg.type) ? nextPane++ : 0;
       // Overlays share the price pane's labels (percent included); oscillators get their own precision.
       const priceFormat = pane === 0 ? overlayFormat : valueFormat(2);
-      const p = palRef.current;
-      const colors = indicatorColors(cfg, p);
-      const titles = seriesTitles(cfg);
-      const line = (k: number, width: 1 | 2 = 1, style = LineStyle.Solid) =>
-        chart.addSeries(
-          LineSeries,
-          {
-            color: colors[k] ?? undefined,
-            // Only the value label uses this colour (the line itself is hidden): adjusted for its text.
-            priceLineColor: colors[k] ? chartLabelFill(colors[k]) : undefined,
-            lineWidth: width,
-            lineStyle: style,
-            priceLineVisible: false,
-            lastValueVisible: true,
-            // Names the value label on the price axis, as in TradingView.
-            title: titles[k] ?? '',
-            crosshairMarkerVisible: false,
-            priceFormat,
-          },
-          pane,
-        );
-      let series: ISeriesApi<'Line' | 'Histogram'>[] = [];
-      if (cfg.type === 'bb') series = [line(0, 1, LineStyle.Dashed), line(1, 1), line(2, 1, LineStyle.Dashed)];
-      else if (cfg.type === 'macd') {
-        series = [chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat }, pane), line(1, 2), line(2, 1)];
-      } else series = [line(0, cfg.type === 'vwap' ? 2 : 1)];
-      const bands: IPriceLine[] = [];
-      if (cfg.type === 'rsi') {
-        bands.push(series[0].createPriceLine({ price: 70, color: p.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
-        bands.push(series[0].createPriceLine({ price: 30, color: p.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
-      }
+      const { series, bands } = addIndicatorSeries(chart, cfg, pane, priceFormat, palRef.current);
       const spec = indicatorSpec(cfg);
       indicatorsRef.current.push({ cfg, series, pane, bands, decimals: 2, maxAbs: 0, stream: spec ? indicatorStream(spec) : null });
     }
@@ -706,24 +604,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
   }
 
-  /**
-   * VWAP resets each session. lightweight-charts colours the segment from point i to i+1 with point
-   * i's colour (whitespace does not break a line), so the last point of a session gets a transparent
-   * colour to avoid drawing a jump into the next session.
-   */
-  function endsSession(ind: IndicatorSeries, i: number): boolean {
-    const candles = candlesRef.current;
-    return ind.cfg.type === 'vwap' && timeframeRef.current !== '1D' && i + 1 < candles.length && exchangeDate(candles[i + 1].time) !== exchangeDate(candles[i].time);
-  }
-
   /** The point of an indicator's series `k` on candle `i`. */
   function indicatorPoint(ind: IndicatorSeries, k: number, i: number) {
-    const time = ct(candlesRef.current[i].time);
-    const v = ind.stream!.lines[k][i];
-    if (Number.isNaN(v)) return { time };
-    if (ind.cfg.type === 'macd' && k === 0) return { time, value: v, color: v >= 0 ? palRef.current.histUp : palRef.current.histDown };
-    if (endsSession(ind, i)) return { time, value: v, color: 'rgba(0,0,0,0)' };
-    return { time, value: v };
+    const candles = candlesRef.current;
+    return indicatorPointOf(ind.cfg, k, ind.stream!.lines[k][i], ct(candles[i].time), candles, i, timeframeRef.current, palRef.current);
   }
 
   /** Hand an indicator's series their values on the window's candles. */
@@ -777,7 +661,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   function volumePoint(c: Bar) {
-    return { time: ct(c.time), value: c.volume, color: c.close >= c.open ? palRef.current.volumeUp : palRef.current.volumeDown };
+    return volumePointOf(c, ct(c.time), palRef.current);
   }
 
   function candlePoint(c: Bar) {
@@ -806,10 +690,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /** Put the history's candles before `candles` (those of the revealed bars) and hand the chart the newest. */
   function drawCandles(candles: Bar[], history: ChartHistory | null): void {
     historyRef.current = history;
-    const earlier = history?.bars.length ? aggregateBars(history.bars, timeframe, history.timeframe) : [];
-    // The history ends where the revealed bars begin; should a candle of it overlap them, it is left out.
-    let n = earlier.length;
-    while (n > 0 && candles.length && earlier[n - 1].time >= candles[0].time) n--;
+    const merged = withHistory(candles, history, timeframe);
     // Redrawing the same chart (new bars after a jump, history arriving) keeps the view where it is,
     // counted from the newest candle: the window keeps as many candles as reach back to the oldest on screen.
     const key = `${symbol}|${timeframe}|${useTrading.getState().session?.id ?? ''}`;
@@ -817,8 +698,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const onScreen = range ? candlesRef.current.length - windowStartRef.current - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN : 0;
     const shown = key === windowKeyRef.current ? Math.max(WINDOW, onScreen) : WINDOW;
     windowKeyRef.current = key;
-    candlesRef.current = n ? earlier.slice(0, n).concat(candles) : candles;
-    historyCountRef.current = n;
+    candlesRef.current = merged.candles;
+    historyCountRef.current = merged.fromHistory;
     windowStartRef.current = Math.max(0, candlesRef.current.length - shown);
     hoverRef.current = null;
     computeIndicators(0);
@@ -856,7 +737,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (!ind.stream) continue;
       ind.series.forEach((s, k) => {
         // A candle starting a new session changes how the one before it is drawn: update that in place.
-        if (first >= before && first > windowStartRef.current && endsSession(ind, first - 1)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
+        if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
         for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
       });
     }
@@ -901,25 +782,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (f.symbol !== symbol) continue;
       const time = candleStartFor(symbol, f.time, timeframe);
       if (time < oldest) continue;
-      const buy = f.side === 'buy';
-      markers.push({
-        time: ct(time),
-        position: buy ? 'belowBar' : 'aboveBar',
-        shape: buy ? 'arrowUp' : 'arrowDown',
-        color: buy ? pal.markerBuy : pal.markerSell,
-        text: `${f.action.toUpperCase()} ${f.quantity} @ ${fmtPrice(f.price)}`,
-      });
+      markers.push(fillMarker(f, ct(time), pal));
     }
     for (const ev of getSimEventsFor(symbol)) {
       const time = candleStartFor(symbol, ev.time, timeframe);
       if (time < oldest) continue;
-      markers.push({
-        time: ct(time),
-        position: 'aboveBar',
-        shape: 'circle',
-        color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,
-        text: `SIM NEWS: ${ev.headline.replace('[SIMULATED] ', '').slice(0, 40)}`,
-      });
+      markers.push(newsMarker(ev, ct(time), pal));
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     m.setMarkers(markers);
@@ -1060,13 +928,5 @@ async function snapshot(chart: IChartApi, container: HTMLElement): Promise<strin
       URL.revokeObjectURL(url);
     }
   }
-  const maxW = 1200;
-  if (canvas.width > maxW) {
-    const c2 = document.createElement('canvas');
-    c2.width = maxW;
-    c2.height = Math.round((canvas.height * maxW) / canvas.width);
-    c2.getContext('2d')?.drawImage(canvas, 0, 0, c2.width, c2.height);
-    return c2.toDataURL('image/jpeg', 0.82);
-  }
-  return canvas.toDataURL('image/jpeg', 0.82);
+  return toJpeg(canvas);
 }
