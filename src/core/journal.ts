@@ -36,6 +36,14 @@ export interface JournalEntry {
   notes: JournalNotes;
   /** Key of the chart snapshot image in storage, if one was captured. */
   snapshotKey?: string;
+  /**
+   * The snapshot was drawn off screen from the bars shown up to the close, because the chart on
+   * screen was not showing that moment (it was on another symbol, or the replay had already moved
+   * past the close); it has none of the chart's drawings. Absent on older entries.
+   */
+  snapshotOffscreen?: boolean;
+  /** Why there is no snapshot: 'off', snapshots were turned off; 'failed', it could not be drawn or saved. Absent on older entries. */
+  snapshotMissing?: 'off' | 'failed';
   review?: TradeReview;
   /** The session had been rewound when this trade closed (not a blind result). */
   rewound: boolean;

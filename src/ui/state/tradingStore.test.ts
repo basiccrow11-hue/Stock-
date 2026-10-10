@@ -3,11 +3,29 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Bar } from '../../core/types';
 import { exchangeTimeToUnix } from '../../core/time';
 import { mergeBars } from '../../core/data/aggregate';
+import type { ChartScene } from '../chart/offscreenSnapshot';
+
+/**
+ * Snapshots saved, and the scenes given to the off-screen chart. A real one needs a canvas, so a
+ * stand-in draws them (`draw`, when a test sets it, decides what it gives back).
+ */
+const pictures = vi.hoisted(() => ({
+  saved: new Map<string, unknown>(),
+  drawn: [] as ChartScene[],
+  draw: null as ((scene: ChartScene) => Promise<string | null>) | null,
+}));
+
+vi.mock('../chart/offscreenSnapshot', () => ({
+  offscreenSnapshot: (scene: ChartScene) => {
+    pictures.drawn.push(scene);
+    return pictures.draw ? pictures.draw(scene) : Promise.resolve('data:image/jpeg;base64,BB==');
+  },
+}));
 
 vi.mock('../services/idb', () => ({
   idb: {
     all: async () => [],
-    set: async () => undefined,
+    set: async (store: string, key: string, value: unknown) => void (store === 'snapshots' && pictures.saved.set(key, value)),
     delete: async () => undefined,
     get: async () => undefined,
     modify: async (_s: string, _k: string, fn: (v: unknown) => unknown) => fn(undefined),
@@ -187,8 +205,9 @@ describe('Learning Mode', () => {
     const { useJournal } = await import('./journalStore');
     const { getSettings } = await import('./settingsStore');
     expect([getSettings().learningMode, getSettings().autoSnapshot]).toEqual([true, true]);
-    // A chart picture that takes a while, as a real one can.
+    // Chart pictures that take a while, as real ones can.
     store.registerSnapshotProvider(() => new Promise((resolve) => setTimeout(() => resolve('data:image/jpeg;base64,AA=='), 30)));
+    pictures.draw = () => new Promise((resolve) => setTimeout(() => resolve('data:image/jpeg;base64,BB=='), 30));
     expect(
       await store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: ['QQQ'], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false }),
     ).toBe(true);
@@ -209,11 +228,13 @@ describe('Learning Mode', () => {
     expect(byExit[0].trip.exitTime).toBeLessThan(byExit[1].trip.exitTime!);
     expect(store.useTrading.getState().reviewId).toBe(byExit[0].id);
     expect(store.useTrading.getState().reviewQueue).toEqual([byExit[1].id]);
-    // The picture is of the chart on screen: the active symbol's trade gets it.
-    expect(byExit.map((e) => [e.symbol, !!e.snapshotKey]).sort()).toEqual([
-      ['QQQ', false],
-      ['SPY', true],
+    // Both get a picture. The jump went past both closes, so the chart on screen (on SPY) shows
+    // neither moment: each is drawn off screen from what its symbol showed when it closed.
+    expect(byExit.map((e) => [e.symbol, e.snapshotKey, e.snapshotOffscreen]).sort()).toEqual([
+      ['QQQ', `snap:${sessionId}:${byExit.find((e) => e.symbol === 'QQQ')!.trip.id}`, true],
+      ['SPY', `snap:${sessionId}:${byExit.find((e) => e.symbol === 'SPY')!.trip.id}`, true],
     ]);
+    pictures.draw = null;
     store.registerSnapshotProvider(null);
     await store.endSession();
   });
@@ -244,6 +265,161 @@ describe('Learning Mode', () => {
     await vi.waitFor(() => expect(mine()[0].review!.afterExitUntil).toBeUndefined());
     expect(risked()).toEqual(atClose);
     useSettings.getState().updateRules({ maxRiskPctPerTrade: rule });
+    await store.endSession();
+  });
+});
+
+describe('journal snapshots', () => {
+  const at = (v: number) => Math.round(v * 100) / 100;
+  const replay = { providerId: 'demo', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1, speed: 1 } as const;
+
+  /** The store, the journal entries of the session that has just started, and a fresh record of pictures. */
+  async function begin() {
+    const store = await import('./tradingStore');
+    const { useJournal } = await import('./journalStore');
+    pictures.saved.clear();
+    pictures.drawn.length = 0;
+    pictures.draw = null;
+    const sessionId = store.useTrading.getState().session!.id;
+    return { store, mine: () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId) };
+  }
+
+  it('draws a trade on a symbol the chart is not showing off screen, from the bars shown up to its close and none after', async () => {
+    const store = await import('./tradingStore');
+    const onScreen = vi.fn(async () => 'data:image/jpeg;base64,AA==');
+    store.registerSnapshotProvider(onScreen);
+    expect(await store.startReplay({ ...replay, symbol: 'SPY', extraSymbols: ['QQQ'], timeframe: '5m', blind: false })).toBe(true);
+    const { mine } = await begin();
+    const px = store.lastPrice('QQQ')!;
+    expect(store.submitOrder({ symbol: 'QQQ', action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.3), takeProfit: at(px + 0.3) }).ok).toBe(true);
+    store.jumpTo(exchangeTimeToUnix('2024-03-12', 15 * 60));
+    await vi.waitFor(() => expect(mine()).toHaveLength(1));
+    const entry = mine()[0];
+    expect(entry).toMatchObject({ symbol: 'QQQ', snapshotKey: `snap:${entry.id}`, snapshotOffscreen: true });
+    expect(entry.snapshotMissing).toBeUndefined();
+    expect(pictures.saved.get(entry.snapshotKey!)).toBe('data:image/jpeg;base64,BB==');
+    expect(onScreen).not.toHaveBeenCalled();
+    expect(pictures.drawn).toHaveLength(1);
+    const scene = pictures.drawn[0];
+    expect(scene).toMatchObject({ symbol: 'QQQ', timeframe: '5m', baseTimeframe: '1m', source: 'DEMO', entryTime: entry.entryTime, blind: null });
+    // The exit became known as its 1-minute bar ended: that bar is the last one drawn.
+    const exit = store.useTrading.getState().fills.find((f) => f.id === entry.trip.fills[entry.trip.fills.length - 1])!;
+    const last = scene.bars[scene.bars.length - 1];
+    expect(last.time + 60).toBe(exit.knownAt);
+    expect(last.time <= entry.exitTime && entry.exitTime < last.time + 60).toBe(true);
+    // The jump showed more of QQQ after the close: none of it is in the picture.
+    const now = store.getBaseBars('QQQ');
+    expect(now.length).toBeGreaterThan(scene.bars.length);
+    expect(scene.bars).toEqual(now.slice(0, scene.bars.length));
+    expect(scene.fills.map((f) => f.id)).toEqual(entry.trip.fills);
+    store.registerSnapshotProvider(null);
+    await store.endSession();
+  });
+
+  it('takes the chart on screen when it shows the close, and draws one off screen when it gives none or has moved on', async () => {
+    const store = await import('./tradingStore');
+    let screen: string | null = 'data:image/jpeg;base64,AA==';
+    const onScreen = vi.fn(async () => screen);
+    store.registerSnapshotProvider(onScreen);
+    expect(await store.startReplay({ ...replay, symbol: 'SPY', timeframe: '1m', blind: false })).toBe(true);
+    const { mine } = await begin();
+    /** Opens a trade on SPY and steps one bar at a time until it closes (Learning Mode then counts its review as pending). */
+    const trade = async (n: number) => {
+      const px = store.lastPrice('SPY')!;
+      expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.2), takeProfit: at(px + 0.2) }).ok).toBe(true);
+      for (let i = 0; i < 300 && store.useTrading.getState().reviewsPending === 0; i++) store.stepForward();
+      await vi.waitFor(() => expect(mine()).toHaveLength(n));
+      return [...mine()].sort((a, b) => b.exitTime - a.exitTime)[0];
+    };
+    // The step that closed it revealed nothing after it: the chart on screen is the picture.
+    const first = await trade(1);
+    expect(onScreen).toHaveBeenCalledTimes(1);
+    expect(first.snapshotOffscreen).toBeUndefined();
+    expect(pictures.saved.get(first.snapshotKey!)).toBe('data:image/jpeg;base64,AA==');
+    expect(pictures.drawn).toEqual([]);
+    // A chart that is not laid out gives no picture: it is drawn off screen instead.
+    screen = null;
+    const second = await trade(2);
+    expect(onScreen).toHaveBeenCalledTimes(2);
+    expect(second).toMatchObject({ snapshotOffscreen: true, snapshotKey: `snap:${second.id}` });
+    expect(pictures.drawn.map((s) => s.symbol)).toEqual(['SPY']);
+    store.registerSnapshotProvider(null);
+    await store.endSession();
+  });
+
+  it('says why an entry has no picture: snapshots turned off, or one that could not be drawn', async () => {
+    const store = await import('./tradingStore');
+    const { useSettings } = await import('./settingsStore');
+    expect(await store.startReplay({ ...replay, symbol: 'SPY', timeframe: '1m', blind: false })).toBe(true);
+    const { mine } = await begin();
+    const closeOne = async (n: number) => {
+      const px = store.lastPrice('SPY')!;
+      expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.2), takeProfit: at(px + 0.2) }).ok).toBe(true);
+      store.jumpTo(store.useTrading.getState().now + 3 * 3600);
+      await vi.waitFor(() => expect(mine()).toHaveLength(n));
+      return [...mine()].sort((a, b) => b.exitTime - a.exitTime)[0];
+    };
+    useSettings.getState().update({ autoSnapshot: false });
+    try {
+      const off = await closeOne(1);
+      expect(off.snapshotMissing).toBe('off');
+      expect(off.snapshotKey).toBeUndefined();
+      expect(pictures.drawn).toEqual([]);
+    } finally {
+      useSettings.getState().update({ autoSnapshot: true });
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    pictures.draw = async () => {
+      throw new Error('no canvas');
+    };
+    try {
+      const failed = await closeOne(2);
+      expect(failed.snapshotMissing).toBe('failed');
+      expect(failed.snapshotKey).toBeUndefined();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      pictures.draw = null;
+    }
+    await store.endSession();
+  });
+
+  it('keeps a blind replay blind in a picture drawn off screen', async () => {
+    const store = await import('./tradingStore');
+    expect(await store.startReplay({ ...replay, symbol: 'SPY', timeframe: '1m', blind: true })).toBe(true);
+    const { mine } = await begin();
+    const px = store.lastPrice('SPY')!;
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10, stopLoss: at(px - 0.3), takeProfit: at(px + 0.3) }).ok).toBe(true);
+    store.jumpTo(exchangeTimeToUnix('2024-03-12', 15 * 60));
+    await vi.waitFor(() => expect(mine()).toHaveLength(1));
+    const session = store.useTrading.getState().session!;
+    expect(session.blind).toBe(true);
+    expect(pictures.drawn.map((s) => s.blind)).toEqual([{ sessionId: session.id, startDate: '2024-03-12' }]);
+    await store.endSession();
+  });
+
+  it('draws a simulated-market trade on another symbol from the minutes up to its close', async () => {
+    const store = await import('./tradingStore');
+    expect(await store.startSim({ config: { seed: 11 }, startingBalance: 100_000, speed: 10 })).toBe(true);
+    const { mine } = await begin();
+    const symbols = store.useTrading.getState().session!.symbols;
+    const symbol = symbols[1];
+    expect(store.useTrading.getState().activeSymbol).not.toBe(symbol);
+    const px = store.lastPrice(symbol)!;
+    expect(store.submitOrder({ symbol, action: 'buy', type: 'market', quantity: 10, stopLoss: at(px * 0.998), takeProfit: at(px * 1.002) }).ok).toBe(true);
+    for (let i = 0; i < 300 && store.useTrading.getState().reviewsPending === 0; i++) store.stepForward();
+    await vi.waitFor(() => expect(mine()).toHaveLength(1));
+    const entry = mine()[0];
+    expect(entry).toMatchObject({ symbol, snapshotOffscreen: true, snapshotKey: `snap:${entry.id}` });
+    const scene = pictures.drawn[0];
+    expect(scene).toMatchObject({ symbol, source: 'SIMULATED', baseTimeframe: '1m', blind: null });
+    // The minute holding the exit is the last one drawn.
+    const last = scene.bars[scene.bars.length - 1];
+    expect(last.time <= entry.exitTime && entry.exitTime < last.time + 60).toBe(true);
+    expect(scene.bars).toEqual(store.getBaseBars(symbol).filter((b) => b.time <= entry.exitTime));
+    const exit = store.useTrading.getState().fills.find((f) => f.id === entry.trip.fills[entry.trip.fills.length - 1])!;
+    expect(scene.fills.every((f) => f.symbol === symbol && f.knownAt! <= exit.knownAt!)).toBe(true);
+    expect(scene.news.every((n) => n.time <= exit.knownAt!)).toBe(true);
     await store.endSession();
   });
 });
