@@ -62,4 +62,26 @@ describe('the order ticket', () => {
     vi.useRealTimers();
     await store.endSession();
   });
+
+  it('heads the ticket with its symbol and the modelled bid and ask beside the last price', async () => {
+    const store = await import('../state/tradingStore');
+    const { OrderTicket } = await import('./OrderTicket');
+    const { modelledQuote } = await import('../services/modelledQuote');
+    const { useSettings } = await import('../state/settingsStore');
+    const { marketSession } = await import('../../core/time');
+    const { price } = await import('../services/format');
+    await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 1 });
+    const { activeSymbol, quotes, now } = store.useTrading.getState();
+    const last = quotes[activeSymbol]!.last;
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(OrderTicket)));
+    const { bid, ask } = modelledQuote(useSettings.getState().execution, last, marketSession(now) !== 'regular');
+    expect(bid).toBeLessThan(ask);
+    expect(host.querySelector('.ticket-head h3')!.textContent).toBe(activeSymbol);
+    expect(host.querySelector('.ticket-head')!.textContent).toContain(`Bid ${price(bid)} Ask ${price(ask)}Last ${price(last)}`);
+    act(() => root.unmount());
+    await store.endSession();
+  });
 });

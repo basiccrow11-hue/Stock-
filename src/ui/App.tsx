@@ -93,7 +93,7 @@ export function App() {
             />
           </ErrorBoundary>
           <ErrorBoundary what="The order ticket" layout="panel" className="panel area-right">
-            <RightPanel />
+            <RightPanel onNewSession={(mode) => setSetup({ mode })} />
           </ErrorBoundary>
           <ErrorBoundary what="The positions and orders panel" layout="panel" className="panel area-bottom">
             <BottomPanel

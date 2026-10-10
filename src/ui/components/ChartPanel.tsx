@@ -18,11 +18,12 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   const { tool, setTool, color, setColor, clear, drawings } = useDrawings();
   const isSim = session?.mode === 'sim';
   // Clear all drawings disables itself once they are gone: focus goes to the drawing tools.
-  const toolbarRef = useFocusRescue<HTMLDivElement>((bar) => bar.querySelector<HTMLElement>('[aria-label="Drawing tools"] button.on'));
+  const toolsRef = useFocusRescue<HTMLDivElement>((bar) => bar.querySelector<HTMLElement>('[aria-label="Drawing tools"] button.on'));
 
   return (
     <section className="panel area-chart">
-      <div className="chart-toolbar" ref={toolbarRef}>
+      {/* One row on a laptop: the drawing tools have their own column along the chart's left edge. */}
+      <div className="chart-toolbar">
         <strong style={{ marginRight: 4 }}>{symbol}</strong>
         <div className="seg" role="group" aria-label="Timeframe">
           {TIMEFRAMES.map((tf) => (
@@ -33,22 +34,6 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         </div>
         <IndicatorMenu />
         <ChartSettingsMenu onOpenSettings={onOpenSettings} />
-        <div className="seg" role="group" aria-label="Drawing tools">
-          {(Object.keys(TOOL_LABELS) as DrawingTool[]).map((t) => (
-            <button key={t} className={tool === t ? 'on' : ''} aria-pressed={tool === t} aria-label={TOOL_LABELS[t]} onClick={() => setTool(t)} title={TOOL_LABELS[t]}>
-              <span aria-hidden="true">{TOOL_ICONS[t]}</span>
-            </button>
-          ))}
-        </div>
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Drawing color" aria-label="Drawing color" style={{ width: 26, height: 24, padding: 0, border: 0, background: 'none' }} />
-        {/* Always there (disabled when empty): a button that comes and goes would re-wrap the
-            toolbar and move the chart under the pointer. Deleting the selected drawing is a button
-            on the chart itself (ChartView). */}
-        <button className="btn sm ghost icon-btn" disabled={!drawings.length} onClick={() => window.confirm('Remove all drawings on this symbol?') && clear()} aria-label="Clear all drawings" title="Clear all drawings on this symbol">
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-            <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5" />
-          </svg>
-        </button>
         <div className="spacer" />
         <button className="btn sm" onClick={() => onNewSession('replay')}>
           New replay
@@ -58,6 +43,26 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         </button>
       </div>
       <div className="chart-host">
+        {/* Only with a session: before one, the start panel covers the chart and the tools would be hidden under it. */}
+        {session && (
+          <div className="draw-tools" ref={toolsRef}>
+            <div className="seg" role="group" aria-label="Drawing tools">
+              {(Object.keys(TOOL_LABELS) as DrawingTool[]).map((t) => (
+                <button key={t} className={tool === t ? 'on' : ''} aria-pressed={tool === t} aria-label={TOOL_LABELS[t]} onClick={() => setTool(t)} title={TOOL_LABELS[t]}>
+                  <span aria-hidden="true">{TOOL_ICONS[t]}</span>
+                </button>
+              ))}
+            </div>
+            <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Drawing color" aria-label="Drawing color" />
+            {/* Always there (disabled when empty): a button that comes and goes would move the
+                others. Deleting the selected drawing is a button on the chart itself (ChartView). */}
+            <button className="btn sm ghost icon-btn" disabled={!drawings.length} onClick={() => window.confirm('Remove all drawings on this symbol?') && clear()} aria-label="Clear all drawings" title="Clear all drawings on this symbol">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+                <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5" />
+              </svg>
+            </button>
+          </div>
+        )}
         <ChartView symbol={symbol} timeframe={timeframe} />
         {!session && (
           <div className="chart-empty">

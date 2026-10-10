@@ -19,6 +19,7 @@ import {
 import { exchangeDate, exchangeTimeToUnix, formatExchangeTime, parseHHMM } from '../../core/time';
 import { price, speedLabel } from '../services/format';
 import { modalOpen, useFocusRescue } from './common';
+import { usePopover } from './usePopover';
 
 /** Warns before a rewind to `target` (or Restart) and says what it undoes; false when cancelled. */
 function confirmRewind(target: number | null, restart = false): boolean {
@@ -55,6 +56,70 @@ function isReplayShortcut(e: KeyboardEvent): boolean {
   return true;
 }
 
+/**
+ * Jump to a date and time, from a small menu so the replay controls fit on one row. Its fields show
+ * the replay clock until edited; a jump or a new session clears the edits. Enter in a field jumps.
+ */
+function JumpMenu() {
+  const session = useTrading((s) => s.session);
+  const now = useTrading((s) => s.now);
+  const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
+  const [edited, setEdited] = useState<{ session?: string; date?: string; time?: string }>({});
+  const edits = edited.session === session?.id ? edited : {};
+  // Blind mode has no date field: the date is always the replay's current day.
+  const jumpDate = (!session?.blind && edits.date) || (now ? exchangeDate(now) : '');
+  const jumpTime = edits.time ?? (now ? formatExchangeTime(now) : '');
+  const edit = (field: 'date' | 'time', value: string) => setEdited({ ...edits, session: session?.id, [field]: value });
+  if (!session) return null;
+
+  const doJump = () => {
+    if (!jumpDate || !jumpTime) return;
+    const t = exchangeTimeToUnix(jumpDate, parseHHMM(jumpTime));
+    if (t < now && !confirmRewind(t)) return;
+    setEdited({});
+    jumpTo(t);
+    close();
+  };
+
+  return (
+    <div ref={boxRef} style={{ position: 'relative' }}>
+      <button ref={triggerRef} className={`btn sm${open ? ' active' : ''}`} onClick={toggle} aria-expanded={open} title="Jump to a date and time">
+        Jump to…
+      </button>
+      {open && (
+        <div ref={popRef} className="card popover jump-pop" role="dialog" aria-label="Jump to a time">
+          <form
+            className="stack"
+            onSubmit={(e) => {
+              e.preventDefault();
+              doJump();
+            }}
+          >
+            <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+              {!session.blind && (
+                <label className="field">
+                  Date
+                  <input type="date" value={jumpDate} onChange={(e) => edit('date', e.target.value)} style={{ width: 140 }} />
+                </label>
+              )}
+              <label className="field">
+                Time (ET)
+                <input type="time" value={jumpTime} onChange={(e) => edit('time', e.target.value)} />
+              </label>
+              <button type="submit" className="btn sm primary">
+                Jump
+              </button>
+            </div>
+            <p className="muted small" style={{ margin: 0 }}>
+              Forward jumps process every skipped bar, so your orders still fill. Jumping back rewinds the session.
+            </p>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ReplayControls({ active = true }: { active?: boolean }) {
   const session = useTrading((s) => s.session);
   const playing = useTrading((s) => s.playing);
@@ -66,13 +131,10 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const timeframe = useTrading((s) => s.timeframe);
   // Restart also clears orders placed at the start, so it stays available there once there are any.
   const ordered = useTrading((s) => s.orders.length > 0);
-  // The jump fields show the replay clock until the user edits them; a jump or a new session clears the edits.
-  const [edited, setEdited] = useState<{ session?: string; date?: string; time?: string }>({});
   // Set when Space was used for play/pause, so its keyup cannot press the focused button either
   // (some browsers press buttons on keyup). A ref, so it survives the listeners being re-registered.
   const spaceTaken = useRef(false);
   const isReplay = session?.mode === 'replay';
-  const edits = edited.session === session?.id ? edited : {};
   // Restart and Step back disable themselves at the start, Play and the steps at the end: focus then
   // goes to Play, else Step back, else the speed.
   const barRef = useFocusRescue<HTMLDivElement>(
@@ -81,10 +143,6 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       bar.querySelector<HTMLElement>('[data-home="back"]:not(:disabled)') ??
       bar.querySelector<HTMLElement>('select'),
   );
-  // Blind mode has no date field: the date is always the replay's current day.
-  const jumpDate = (!session?.blind && edits.date) || (now ? exchangeDate(now) : '');
-  const jumpTime = edits.time ?? (now ? formatExchangeTime(now) : '');
-  const edit = (field: 'date' | 'time', value: string) => setEdited({ ...edits, session: session?.id, [field]: value });
 
   useEffect(() => {
     if (!active) return;
@@ -119,14 +177,6 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   if (!session) return null;
   const progress = session.end ? Math.min(1, Math.max(0, (now - session.start) / (session.end - session.start))) : 0;
   const speeds = isReplay ? REPLAY_SPEEDS : SIM_SPEEDS;
-
-  const doJump = () => {
-    if (!jumpDate || !jumpTime) return;
-    const t = exchangeTimeToUnix(jumpDate, parseHHMM(jumpTime));
-    if (t < now && !confirmRewind(t)) return;
-    setEdited({});
-    jumpTo(t);
-  };
 
   return (
     <div className="replay-bar" ref={barRef}>
@@ -163,8 +213,9 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       <span className="clock" title="Simulated time (exchange time, ET)">
         {session.blind ? blindDayLabel(now) : exchangeDate(now)} {formatExchangeTime(now, true)}
       </span>
+      {/* Also on the ticket and the price scale, so it gives way first on narrower screens. */}
       {quote && (
-        <span className="mono" title="Last traded price">
+        <span className="mono replay-last" title="Last traded price">
           {price(quote.last)}
         </span>
       )}
@@ -172,16 +223,12 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       {finished && <span className="badge neutral">END OF REPLAY</span>}
       {isReplay && (
         <>
+          <div className="spacer" />
+          <JumpMenu />
+          {/* A line along the bar's top edge, so it takes no room in the row. */}
           <div className="progress" title={`${(progress * 100).toFixed(0)}% of the session window`}>
             <div style={{ width: `${progress * 100}%` }} />
           </div>
-          <span className="row" style={{ gap: 4 }}>
-            {!session.blind && <input type="date" value={jumpDate} onChange={(e) => edit('date', e.target.value)} aria-label="Jump to date" title="Jump to date" style={{ width: 130 }} />}
-            <input type="time" value={jumpTime} onChange={(e) => edit('time', e.target.value)} aria-label="Jump to time (ET)" title="Jump to time (ET)" style={{ width: 'auto' }} />
-            <button className="btn sm" onClick={doJump} title="Jump to time. Forward jumps process every skipped bar, so your orders still fill.">
-              Jump
-            </button>
-          </span>
         </>
       )}
     </div>
