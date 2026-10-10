@@ -320,3 +320,117 @@ describe('the chart during a long replay', () => {
     act(() => store.pause());
   }, 60_000);
 });
+
+describe('the chart during fast play with the pointer on it', () => {
+  it('hands many new candles over in one setData per series, and draws what a fresh chart draws', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings, DEFAULT_INDICATORS } = await import('../state/settingsStore');
+    const { ChartView } = await import('./ChartView');
+    const { exchangeDate } = await import('../../core/time');
+    // VWAP's line breaks between sessions, and MACD colours each histogram bar: both on.
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false, indicators: DEFAULT_INDICATORS.map((i) => (i.type === 'macd' ? { ...i, enabled: true } : i)) });
+    const ok = await store.startReplay({
+      providerId: 'demo',
+      symbol: 'MSFT',
+      date: '2025-01-06',
+      endDate: '2025-01-17',
+      startTime: '09:30',
+      endTime: '16:00',
+      startingBalance: 100_000,
+      lookbackDays: 5,
+      timeframe: '1m',
+      speed: 23_400,
+      blind: false,
+    });
+    expect(ok).toBe(true);
+    const render = async () => {
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const r = createRoot(host);
+      await act(async () => r.render(createElement(ChartView, { symbol: 'MSFT', timeframe: '1m' })));
+      return { chart: lw.charts.at(-1)!, root: r };
+    };
+    const a = await render();
+    const chart = a.chart;
+    const main = chart.series[0];
+    expect(chart.series.length).toBeGreaterThanOrEqual(8);
+    const calls = { update: 0, setData: 0 };
+    for (const s of chart.series) {
+      const update = s.update.bind(s);
+      const setData = s.setData.bind(s);
+      Object.assign(s, {
+        update: (...args: Parameters<typeof update>) => (calls.update++, update(...args)),
+        setData: (...args: Parameters<typeof setData>) => (calls.setData++, setData(...args)),
+      });
+    }
+    const pointer = (on: boolean) => {
+      const k = main.points.length - 20;
+      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 } } : {})));
+    };
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const second = () =>
+      act(() => {
+        clock += 1000;
+        vi.advanceTimersByTime(50);
+      });
+    const count = () => store.getBaseBars('MSFT').length;
+
+    // Pointer on the chart: a second of play brings a day of candles, in a few setData calls per series, not one update per candle.
+    pointer(true);
+    act(() => store.play());
+    let n = count();
+    second();
+    expect(count() - n).toBeGreaterThan(300);
+    expect(calls.update).toBeLessThan(3 * chart.series.length);
+    expect(calls.setData).toBeGreaterThanOrEqual(chart.series.length);
+
+    // Pointer off the chart: updates, which cost little then.
+    pointer(false);
+    calls.update = calls.setData = 0;
+    n = count();
+    second();
+    const added = count() - n;
+    expect(added).toBeGreaterThan(100);
+    expect(calls.setData).toBe(0);
+    expect(calls.update).toBeGreaterThanOrEqual(added * chart.series.length);
+
+    // Pointer on again, one candle at a time, into the next session (where VWAP's line breaks): still updates.
+    act(() => store.pause());
+    pointer(true);
+    calls.update = calls.setData = 0;
+    n = main.points.length;
+    const day = () => exchangeDate(store.getBaseBars('MSFT').at(-1)!.time);
+    const startDay = day();
+    let steps = 0;
+    while (day() === startDay && steps < 400) {
+      act(() => store.stepForward());
+      steps++;
+    }
+    for (let i = 0; i < 2; i++, steps++) act(() => store.stepForward());
+    expect(day()).not.toBe(startDay);
+    await vi.waitFor(() => expect(main.points.length).toBe(n + steps));
+    expect(calls.setData).toBe(0);
+    expect(calls.update).toBeGreaterThanOrEqual(steps * chart.series.length);
+
+    /** Every series holds what a chart drawn afresh holds, on the candles that one holds. */
+    const matchesFresh = async () => {
+      const b = await render();
+      expect(b.chart.series.length).toBe(chart.series.length);
+      chart.series.forEach((s, j) => {
+        const fresh = b.chart.series[j].points;
+        expect(fresh.length).toBe(2000);
+        expect(s.points.slice(-fresh.length)).toEqual(fresh);
+      });
+      act(() => b.root.unmount());
+    };
+    await matchesFresh();
+    // And after one more fast second with the pointer on it.
+    act(() => store.play());
+    second();
+    act(() => store.pause());
+    await matchesFresh();
+    act(() => a.root.unmount());
+  }, 60_000);
+});

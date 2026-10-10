@@ -78,6 +78,8 @@ const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height:
 const WINDOW = 2000;
 /** Scrolling to within this many candles of the oldest one handed over brings older ones. */
 const WINDOW_MARGIN = 300;
+/** With the pointer on the chart, more new or changed candles than this in one event go over with setData (see rebuildTail). */
+const BATCH_CANDLES = 2;
 /** Height of a legend row in pixels: past LEGEND_SHARE of the price pane, the legend flows compactly. */
 const LEGEND_ROW = 17;
 const LEGEND_SHARE = 0.4;
@@ -142,6 +144,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   timeframeRef.current = timeframe;
   /** Index in candlesRef of the candle under the crosshair, or null: the legend then shows the newest. */
   const hoverRef = useRef<number | null>(null);
+  /** The pointer is on the chart, so the crosshair is shown: see rebuildTail. */
+  const pointerOnRef = useRef(false);
   /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
   const paneTopsRef = useRef<number[]>([]);
   const priceHeightRef = useRef(0);
@@ -197,6 +201,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
     // The legend follows the crosshair on its own: moving it never re-renders the chart.
     chart.subscribeCrosshairMove((param) => {
+      pointerOnRef.current = param.point !== undefined;
       const candles = candlesRef.current;
       let i = -1;
       if (param.time !== undefined && param.logical !== undefined) {
@@ -753,17 +758,23 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     for (const c of aggregateBars(base.slice(start), timeframe, baseTfRef.current)) candles.push(c);
     computeIndicators(firstChanged);
     const first = Math.max(firstChanged, windowStartRef.current);
-    for (let i = first; i < candles.length; i++) {
-      series.update(candlePoint(candles[i]) as never);
-      volumeRef.current?.update(volumePoint(candles[i]));
-    }
-    for (const ind of indicatorsRef.current) {
-      if (!ind.stream) continue;
-      ind.series.forEach((s, k) => {
-        // A candle starting a new session changes how the one before it is drawn: update that in place.
-        if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
-        for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
-      });
+    // While the pointer is on the chart, every series.update re-runs the crosshair, with a hit test
+    // over every point of every series: once per candle and series, fast play froze. Many candles at
+    // once (fast play) then go over in one setData per series. Otherwise update is the cheaper way.
+    if (pointerOnRef.current && candles.length - first > BATCH_CANDLES) setWindowData();
+    else {
+      for (let i = first; i < candles.length; i++) {
+        series.update(candlePoint(candles[i]) as never);
+        volumeRef.current?.update(volumePoint(candles[i]));
+      }
+      for (const ind of indicatorsRef.current) {
+        if (!ind.stream) continue;
+        ind.series.forEach((s, k) => {
+          // A candle starting a new session changes how the one before it is drawn: update that in place.
+          if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
+          for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
+        });
+      }
     }
     slideWindow();
     syncLastDirection();

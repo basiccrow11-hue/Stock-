@@ -2,6 +2,7 @@
  * Performance statistics computed from closed round-trip trades and an equity curve.
  */
 import type { EquityPoint, Fill, RoundTrip } from '../types';
+import { sameAtTick } from '../util/math';
 
 export interface PerformanceStats {
   totalTrades: number;
@@ -46,14 +47,18 @@ export interface PerformanceStats {
  * it, the add filled past it, or shares added after it moved the average): R is never measured from an add.
  * None either when its average sat at or past a stop placed on its own after entry (a breakeven stop, one
  * locking in a gain, or one that shares added after it moved the average past): that stop came with no
- * entry, so the first entry's price and plan say nothing about it.
+ * entry, so the first entry's price and plan say nothing about it. Such a stop, or one an add brought,
+ * counts as at the average when the average written to the stop's tick is the stop's price: an average
+ * of fills at different prices can sit a fraction of a cent from a breakeven stop, and R from that
+ * sliver would be hundreds.
  */
 export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;
   const dir = t.direction === 'long' ? 1 : -1;
   const avgRisk = (t.avgEntry - t.initialStop) * dir;
-  if (avgRisk > 0) return { entry: t.avgEntry, risk: avgRisk, from: 'average' };
-  if (t.stopFromAdd || t.stopPlacedAt !== undefined) return null;
+  const ownEntry = !t.stopFromAdd && t.stopPlacedAt === undefined;
+  if (avgRisk > 0 && (ownEntry || !sameAtTick(t.avgEntry, t.initialStop))) return { entry: t.avgEntry, risk: avgRisk, from: 'average' };
+  if (!ownEntry) return null;
   const candidates: Array<[number | undefined, 'first' | 'planned']> = [
     [t.bracketEntry, 'first'],
     [t.plannedEntry, 'planned'],

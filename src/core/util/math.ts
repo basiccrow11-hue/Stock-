@@ -13,6 +13,12 @@ export function formatTick(price: number): string {
   return price >= 1 ? price.toFixed(2) : price.toFixed(4);
 }
 
+/** True when `price` written to the tick of `at` (an on-tick price, like a stop) shows as `at`. */
+export function sameAtTick(price: number, at: number): boolean {
+  const decimals = at >= 1 ? 2 : 4;
+  return price.toFixed(decimals) === at.toFixed(decimals);
+}
+
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }

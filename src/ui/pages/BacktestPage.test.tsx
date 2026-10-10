@@ -140,13 +140,23 @@ describe('the backtest page', () => {
     useSettings.getState().update({ execution: { ...ex, commission: { ...ex.commission, perOrder: 1, minimumPerOrder: 2.5 } } });
     try {
       await open();
-      expect(document.body.textContent).toContain('a commission of $1.00 per order (at least $2.50) on top of the per-share one');
+      expect(document.body.textContent).toContain('a commission of $1.00 per order on top of the per-share one, a minimum of $2.50 on any order that pays commission, the minimum spread,');
+      expect(document.body.textContent).toContain('Market orders here always fill at the next bar’s open, in regular hours only, whatever Data & Settings says, and Strict Mode is off.');
       await runAndWait();
       expect(runs[0].config.commission).toMatchObject({ perOrder: 1, minimumPerOrder: 2.5 });
       expect(runs[0].config.strictRisk.enabled).toBe(false);
     } finally {
       useSettings.getState().update({ execution: saved });
     }
+  });
+
+  it('names no per-order commission when none is set, and no setting a backtest ignores', async () => {
+    await open();
+    const text = document.body.textContent!;
+    expect(text).toContain('Also from the Execution model in Data & Settings: the per-order commission (none set), the minimum spread, market impact,');
+    expect(text).not.toContain('at least');
+    expect(text).not.toContain('extended-hours spread');
+    expect(text).not.toContain('how market and limit orders fill');
   });
 
   it('explains next to the option that the flatten before the close does not apply to the 1D signal timeframe', async () => {

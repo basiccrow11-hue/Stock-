@@ -11,7 +11,7 @@ import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, equityBeforeEntry, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
 import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, formatDuration, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
-import { formatTick } from '../util/math';
+import { formatTick, sameAtTick } from '../util/math';
 import { pctAgainst } from '../risk/risk';
 
 /** Moved to analytics, where the broker's Strict Mode measures a trade's risk against it too. */
@@ -432,8 +432,15 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const entries = tripFills.filter((f): f is Fill => f?.action === 'buy' || f?.action === 'short');
 
   /**
-   * Why the stop a later add brought sat past the trade's average entry: the shares bought before it were
-   * already past it (it locked in a gain), the add itself filled past it, or later adds moved the average.
+   * What a stop at the average entry (written to the stop's tick, riskBasis) risked before costs: nothing
+   * when the average was the stop's price or past it, a fraction of a tick when it was just short of it.
+   */
+  const sliver = (S: number) => ((trip.avgEntry - S) * (long ? 1 : -1) > 1e-9 ? (S >= 1 ? 'less than half a cent a share' : 'less than $0.00005 a share') : 'nothing');
+
+  /**
+   * Why the stop a later add brought sat at or past the trade's average entry: the average was the stop's
+   * price, the shares bought before it were already past it (it locked in a gain), the add itself filled
+   * past it, or later adds moved the average.
    */
   const stopPastAverage = (S: number): string => {
     const at = entries.findIndex((f) => f.orderId === stopOrder?.id);
@@ -442,6 +449,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const sign = long ? 1 : -1;
     const lead = `Your stop at ${formatTick(S)} came with a later add`;
     const end = "so the trade's risk cannot be measured in R.";
+    if (sameAtTick(trip.avgEntry, S)) {
+      return `${lead}, and your average entry came to the stop's own price: it risked ${sliver(S)} before costs, ${end}`;
+    }
     if (before !== undefined && (before - S) * sign < -1e-9) {
       return `${lead}, and it sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain on your earlier shares rather than capping a loss, ${end}`;
     }
@@ -460,14 +470,14 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const sign = long ? 1 : -1;
     const placed = formatDuration(placedAt - trip.entryTime);
     const end = "so the trade's risk cannot be measured in R.";
-    const atAverage = formatTick(S) === formatTick(trip.avgEntry);
+    const atAverage = sameAtTick(trip.avgEntry, S);
     // The average of the shares held when it was placed: the entries known by then.
     const then = avgOf(entries.filter((f) => (f.knownAt ?? f.time) <= placedAt));
-    if (then !== undefined && (then - S) * sign > 0 && formatTick(then) !== formatTick(S)) {
+    if (then !== undefined && (then - S) * sign > 0 && !sameAtTick(then, S)) {
       return `Your stop at ${formatTick(S)} was placed ${placed} after you entered, ${long ? 'below' : 'above'} your average entry of ${formatTick(then)} then, but shares added after it took your average entry to ${formatTick(trip.avgEntry)}, ${atAverage ? "the stop's own price" : 'past that stop'}, ${end}`;
     }
     return atAverage
-      ? `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was at your average entry: it risked nothing before costs, ${end}`
+      ? `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was at your average entry: it risked ${sliver(S)} before costs, ${end}`
       : `Your stop at ${formatTick(S)}, placed ${placed} after you entered, sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain rather than capping a loss, ${end}`;
   };
 
