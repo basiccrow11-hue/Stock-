@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -84,5 +87,29 @@ describe('analytics over several data sources', () => {
     expect([...v.rows()!.querySelectorAll('th')].map((th) => th.textContent)).toContain('Breakeven');
     expect([...v.rows()!.querySelectorAll('tbody tr')].map((tr) => tr.querySelectorAll('td')[4].textContent)).toEqual(['1', '0']);
     v.done();
+  });
+
+  it('lets a section heading wrap, so the current session’s source badge stays inside its card on a narrow phone', async () => {
+    // The badge never breaks its words: on a 320px phone the heading, the session's name and the badge
+    // only fit on two lines. jsdom has no layout, so this checks the rule that allows the second line.
+    const style = document.createElement('style');
+    style.textContent = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../styles.css'), 'utf8');
+    document.head.appendChild(style);
+    const store = await import('../state/tradingStore');
+    await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 1 });
+    const v = await mount([]);
+    try {
+      const badge = v.host.querySelector('.section-title .badge.SIMULATED')!;
+      expect(badge.closest('.section-title')!.textContent).toContain('Current session');
+      expect(getComputedStyle(badge).whiteSpace).toBe('nowrap');
+      // The page's other heading wraps too: one rule serves every section heading, the journal's as well.
+      const titles = [...v.host.querySelectorAll('.section-title')];
+      expect(titles).toHaveLength(2);
+      for (const title of titles) expect(getComputedStyle(title).flexWrap).toBe('wrap');
+    } finally {
+      v.done();
+      await store.endSession();
+      style.remove();
+    }
   });
 });
