@@ -1,6 +1,10 @@
 import { useTrading, setActiveSymbol } from '../state/tradingStore';
 import { pct, price } from '../services/format';
 import { EmptyState } from './common';
+import { SIM_STOCKS } from '../../core/sim/SimMarket';
+
+/** The simulated market's companies by ticker: the watchlist names each one's kind of stock. */
+const SIM_PROFILES = new Map(SIM_STOCKS.map((p) => [p.symbol, p]));
 
 export function Watchlist() {
   const session = useTrading((s) => s.session);
@@ -20,12 +24,15 @@ export function Watchlist() {
         {session?.symbols.map((sym) => {
           const q = quotes[sym];
           const pos = positions.find((p) => p.symbol === sym);
+          const profile = session.mode === 'sim' ? SIM_PROFILES.get(sym) : undefined;
           return (
             // A button, so the symbol can be switched from the keyboard (Enter; Space plays and pauses,
             // as on every button of the trade screen).
             <button key={sym} type="button" className={`watch-row${sym === active ? ' on' : ''}`} aria-pressed={sym === active} onClick={() => setActiveSymbol(sym)}>
               <span className="sym">
                 {sym} {pos && <span className={`badge ${pos.quantity > 0 ? 'pos' : 'neg'}`} style={{ padding: '0 5px' }}>{pos.quantity > 0 ? 'L' : 'S'} {Math.abs(pos.quantity)}</span>}
+                {/* Its kind of stock ("Growth stock", "Blue chip"), which sets how it moves. */}
+                {profile && <span className="nm" title={`${profile.name}: ${profile.description}`}>{profile.description.split(':')[0]}</span>}
               </span>
               <span className="px">
                 <span>{q ? price(q.last) : '—'}</span>

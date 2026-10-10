@@ -133,6 +133,22 @@ describe('the backtest page', () => {
     expect(document.body.textContent).toContain('Custom rules based on MACD signal-line cross · SPY');
   });
 
+  it('names the per-order commission and its minimum it takes from the settings, and charges them', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    const ex = useSettings.getState().execution;
+    const saved = ex;
+    useSettings.getState().update({ execution: { ...ex, commission: { ...ex.commission, perOrder: 1, minimumPerOrder: 2.5 } } });
+    try {
+      await open();
+      expect(document.body.textContent).toContain('a commission of $1.00 per order (at least $2.50) on top of the per-share one');
+      await runAndWait();
+      expect(runs[0].config.commission).toMatchObject({ perOrder: 1, minimumPerOrder: 2.5 });
+      expect(runs[0].config.strictRisk.enabled).toBe(false);
+    } finally {
+      useSettings.getState().update({ execution: saved });
+    }
+  });
+
   it('explains next to the option that the flatten before the close does not apply to the 1D signal timeframe', async () => {
     await open();
     const flatten = [...document.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find((c) => c.closest('label')?.textContent?.includes('Flatten before the close'))!;

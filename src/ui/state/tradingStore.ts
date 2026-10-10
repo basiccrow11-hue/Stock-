@@ -130,6 +130,12 @@ interface Engines {
   simCarry: number;
   /** Previous session close per symbol for % change. */
   prevClose: Record<string, number>;
+  /** The stream's headlines so far that are toasted or held for a toast (those before the session started are not). */
+  newsSeen: number;
+  /** Headlines waiting for the next news toast, when it last showed (performance.now()) and the timer that shows it. */
+  newsHeld: number;
+  newsToastAt: number;
+  newsTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const eng: Engines = {
@@ -146,6 +152,10 @@ const eng: Engines = {
   lastPublish: 0,
   simCarry: 0,
   prevClose: {},
+  newsSeen: 0,
+  newsHeld: 0,
+  newsToastAt: -Infinity,
+  newsTimer: null,
 };
 
 // The top speed plays one regular session (6.5 hours) per second, which suits daily bars.
@@ -683,7 +693,38 @@ function showStream(reset: boolean): void {
   if (reset) emitChart({ type: 'reset' });
   else for (const [symbol, bars] of touched) emitChart({ type: 'tick', symbol, bars: [...bars.values()] });
   publish(reset);
+  announceNews();
   void processClosedTrips();
+}
+
+/** The shortest time between news toasts, so high speeds do not flood the screen (every headline is in the News tab). */
+const NEWS_TOAST_GAP_MS = 4000;
+
+/**
+ * Toasts the stream's newest headline, wherever it is, so news on a stock you are not charting is not
+ * missed: one toast at most every few seconds, naming how many others came with it.
+ */
+function announceNews(): void {
+  if (!eng.stream) return;
+  const all = eng.stream.events();
+  if (all.length > eng.newsSeen) {
+    eng.newsHeld += all.length - eng.newsSeen;
+    eng.newsSeen = all.length;
+  }
+  if (!eng.newsHeld || eng.newsTimer) return;
+  const wait = eng.newsToastAt + NEWS_TOAST_GAP_MS - performance.now();
+  if (wait > 0) {
+    eng.newsTimer = setTimeout(() => {
+      eng.newsTimer = null;
+      announceNews();
+    }, wait);
+    return;
+  }
+  const ev = all[all.length - 1];
+  const more = eng.newsHeld - 1;
+  eng.newsHeld = 0;
+  eng.newsToastAt = performance.now();
+  toast('info', `Simulated news, ${ev.symbol === 'MARKET' ? 'whole market' : ev.symbol}: ${ev.headline.replace('[SIMULATED] ', '')}${more > 0 ? ` (and ${more} more in the News tab)` : ''}`);
 }
 
 function startTimer(): void {
@@ -714,6 +755,10 @@ function resetEngines(): void {
   eng.noticedConflicts = new Set();
   eng.simCarry = 0;
   eng.prevClose = {};
+  if (eng.newsTimer) clearTimeout(eng.newsTimer);
+  eng.newsTimer = null;
+  eng.newsSeen = 0;
+  eng.newsHeld = 0;
 }
 
 /** Counts session starts and ends: a replay still loading when a newer one starts (or the session ends) is dropped. */
@@ -830,6 +875,8 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
     if (last) eng.simBroker.onBar(symbol, last, 60);
   }
   eng.unsubscribe = stream.subscribe(stream.symbols, onStreamUpdate);
+  // Headlines from the warm-up history are in the News tab; only those from here on are toasted.
+  eng.newsSeen = stream.events().length;
   const symbols = [...stream.symbols];
   useTrading.setState({
     ...EMPTY,

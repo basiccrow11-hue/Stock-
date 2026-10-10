@@ -153,6 +153,63 @@ describe('the simulated market on the chart', () => {
   });
 });
 
+describe('simulated news', () => {
+  it('toasts each new headline, wherever it is, at most one toast every few seconds', async () => {
+    const store = await import('./tradingStore');
+    const { useToasts } = await import('./toasts');
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    // Every news toast shown, including those that have since timed out.
+    const shown = new Map<number, string>();
+    const unwatch = useToasts.subscribe((st) => st.toasts.forEach((t) => t.text.startsWith('Simulated news') && shown.set(t.id, t.text)));
+    const news = () => [...shown.values()];
+    const headlines = () => store.useTrading.getState().simEvents;
+    /** Steps the market a minute at a time until `n` more headlines have come. */
+    const stepUntil = (n: number) => {
+      const target = headlines().length + n;
+      for (let i = 0; i < 20_000 && headlines().length < target; i++) store.stepForward();
+      expect(headlines().length).toBeGreaterThanOrEqual(target);
+    };
+    try {
+      useToasts.setState({ toasts: [] });
+      expect(await store.startSim({ config: { seed: 3, eventFrequency: 3 }, startingBalance: 25_000, speed: 60 })).toBe(true);
+      // The warm-up history's headlines are in the News tab, not toasted.
+      expect(headlines().length).toBeGreaterThan(0);
+      expect(news()).toEqual([]);
+
+      stepUntil(1);
+      const first = headlines()[headlines().length - 1];
+      expect(news()).toEqual([`Simulated news, ${first.symbol === 'MARKET' ? 'whole market' : first.symbol}: ${first.headline.replace('[SIMULATED] ', '')}`]);
+
+      // Two more within the next few seconds of real time wait, then come as one toast naming the other.
+      const before = headlines().length;
+      stepUntil(2);
+      const held = headlines().length - before;
+      expect(news()).toHaveLength(1);
+      clock += 4000;
+      vi.advanceTimersByTime(4000);
+      const latest = headlines()[headlines().length - 1];
+      expect(news()).toHaveLength(2);
+      expect(news()[1]).toContain(latest.headline.replace('[SIMULATED] ', ''));
+      expect(news()[1]).toContain(`(and ${held - 1} more in the News tab)`);
+
+      // A headline still waiting when the session ends is dropped with it.
+      clock += 1000;
+      stepUntil(1);
+      await store.endSession();
+      clock += 10_000;
+      vi.advanceTimersByTime(10_000);
+      expect(news()).toHaveLength(2);
+    } finally {
+      unwatch();
+      vi.useRealTimers();
+      now.mockRestore();
+      await store.endSession();
+    }
+  });
+});
+
 describe('blind replays', () => {
   it('hide the date in every open tab while running and give it back at the end', async () => {
     const store = await import('./tradingStore');

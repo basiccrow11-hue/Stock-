@@ -663,6 +663,10 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
             <NumberField label="Slippage" suffix="bps" value={slippage} step={0.5} min={0} onChange={setSlippage} />
             <NumberField label="Spread" suffix="bps" value={spread} step={0.5} min={0} onChange={setSpread} />
           </div>
+          <p className="small muted">
+            Everything else about fills comes from the Execution model in Data &amp; Settings: a commission of {money(settings.execution.commission.perOrder)} per order
+            {settings.execution.commission.minimumPerOrder > 0 ? ` (at least ${money(settings.execution.commission.minimumPerOrder)})` : ''} on top of the per-share one, market impact, the share of each bar&rsquo;s volume an order can take, the extended-hours spread, how market and limit orders fill, the path inside a bar, shorting and margin. Strict Mode is off in backtests.
+          </p>
           <div className="row wrap">
             <SourceBadge source={provider.source} />
             {providerId === 'demo' && <span className="small muted">Synthetic data: results show how the rules behave, not how they would have done on the real ticker.</span>}
