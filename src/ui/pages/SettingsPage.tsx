@@ -501,9 +501,10 @@ function RiskCard() {
         <div className="stack">
           <h3>Strict mode</h3>
           <p className="muted small">
-            Off by default: the ticket warns but lets you place any trade. When on, orders that would break these limits are refused. A trade&apos;s risk is measured the way the trade review and the
-            challenges measure it: every share from the trade&apos;s first stop loss, against the equity the trade started with, so raising your stop does not make room for bigger adds. Keep this
-            limit at or below your rule&apos;s. Entries waiting on a stock you don&apos;t hold yet must share one stop loss, and a stop can be tightened but never moved past
+            Off by default: the ticket warns but lets you place any trade. When on, orders that would break these limits are refused. A trade&apos;s risk is its planned risk, counted the way the trade review and the
+            challenges count it: every share from the trade&apos;s first stop loss, against the equity the trade started with, so raising your stop does not make room for bigger adds. Keep this
+            limit at or below your rule&apos;s. The review and the challenges also count risk a trade took on later, which this cannot refuse in advance: an open loss before its first
+            stop was placed, or shares left without a stop after one was cancelled. Entries waiting on a stock you don&apos;t hold yet must share one stop loss, and a stop can be tightened but never moved past
             the trade&apos;s first stop. When a trade closes, its other entries that way are cancelled. Once the day&apos;s loss reaches its limit, open trades included (at a bar close, or inside a bar when one of your orders fills or is reached), no new entries or adds until the next session, even if those trades recover. Cancelling orders and closing positions are always allowed.
           </p>
           <label className="check">
@@ -520,7 +521,10 @@ function RiskCard() {
         </div>
         <div className="stack">
           <h3>My trading rules</h3>
-          <p className="muted small">Used by Learning Mode reviews and the &ldquo;follow your rules&rdquo; challenge. They never block orders.</p>
+          <p className="muted small">
+            Used by Learning Mode reviews and the &ldquo;follow your rules&rdquo; challenge. They never block orders. During a challenge, trades are reviewed against the rules as they were
+            when it started.
+          </p>
           <div className="form-grid">
             <NumberField label="Max risk per trade" suffix="%" value={rules.maxRiskPctPerTrade} step={0.05} min={0.1} onChange={num((v) => updateRules({ maxRiskPctPerTrade: v }))} />
             <NumberField label="Min reward:risk" suffix=":1" value={rules.minRewardRisk} step={0.25} min={0} onChange={num((v) => updateRules({ minRewardRisk: v }))} />
@@ -531,7 +535,97 @@ function RiskCard() {
           <label className="check">
             <input type="checkbox" checked={rules.requireStopLoss} onChange={(e) => updateRules({ requireStopLoss: e.target.checked })} /> Every trade needs a stop loss
           </label>
+          <OwnRules rules={rules.custom ?? []} onChange={(custom) => updateRules({ custom })} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+const MAX_OWN_RULES = 10;
+
+/** Your own rules, in your words: each trade's review asks whether you followed them. */
+function OwnRules({ rules, onChange }: { rules: string[]; onChange: (rules: string[]) => void }) {
+  const [draft, setDraft] = useState('');
+  const input = useRef<HTMLInputElement>(null);
+  const list = useRef<HTMLUListElement>(null);
+  /** Where a removed rule was, so focus goes to the next one's Remove button (or the field when none are left), not the page. */
+  const removedAt = useRef<number | null>(null);
+  useEffect(() => {
+    const i = removedAt.current;
+    if (i === null) return;
+    removedAt.current = null;
+    const buttons = list.current?.querySelectorAll('button');
+    (buttons?.length ? buttons[Math.min(i, buttons.length - 1)] : input.current)?.focus();
+  }, [rules]);
+  /** What screen readers hear after a change (numbered, so the same words twice are heard twice). */
+  const [said, setSaid] = useState<{ text: string; n: number } | null>(null);
+  const say = (t: string) => setSaid((p) => ({ text: t, n: (p?.n ?? 0) + 1 }));
+  const text = draft.trim().replace(/\s+/g, ' ');
+  const dup = text !== '' && rules.some((r) => r.toLowerCase() === text.toLowerCase());
+  const full = rules.length >= MAX_OWN_RULES;
+  const add = () => {
+    if (dup) say('You already have that rule.');
+    else if (full && text) say(`You have ${MAX_OWN_RULES} rules, the most there can be. Remove one to add another.`);
+    if (!text || dup || full) return;
+    onChange([...rules, text]);
+    setDraft('');
+    say(`Added your rule: ${text}.`);
+    // Ready for the next one (the Add button, if that was used, is disabled until something is typed).
+    input.current?.focus();
+  };
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <h4>Your own rules</h4>
+      <p className="muted small">
+        Rules in your own words, such as &ldquo;Only trade in the direction of the daily trend&rdquo;. The app can&apos;t check them, so each trade&apos;s review asks whether you followed them.
+        One you mark broken counts against the &ldquo;follow your rules&rdquo; challenge.
+      </p>
+      {rules.length > 0 && (
+        <ul className="own-rules" ref={list}>
+          {rules.map((r, i) => (
+            <li key={r}>
+              <span>{r}</span>
+              <button
+                className="btn sm ghost"
+                aria-label={`Remove your rule “${r}”`}
+                onClick={() => {
+                  removedAt.current = i;
+                  onChange(rules.filter((x) => x !== r));
+                  say(`Removed your rule: ${r}.`);
+                }}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="row">
+        <input
+          ref={input}
+          type="text"
+          value={draft}
+          maxLength={140}
+          placeholder="Add a rule"
+          aria-label="New rule"
+          style={{ flex: 1, minWidth: 0 }}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add();
+            }
+          }}
+        />
+        <button className="btn sm" onClick={add} disabled={!text || dup || full}>
+          Add rule
+        </button>
+      </div>
+      {dup && <span className="small warn">You already have that rule.</span>}
+      {full && <span className="small muted">Up to {MAX_OWN_RULES} rules.</span>}
+      <div className="sr-only" role="status">
+        {said && <span key={said.n}>{said.text}</span>}
       </div>
     </div>
   );

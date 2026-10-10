@@ -25,6 +25,8 @@ export interface TradingRules {
   /** No new trades in the first N minutes after the open (0 = off). */
   noTradesFirstMinutes: number;
   maxDailyLossPct: number;
+  /** Your own rules, in your words ("Only trade with the trend"): you say on each trade's review whether you followed them. */
+  custom?: string[];
 }
 
 export const DEFAULT_TRADING_RULES: TradingRules = {
@@ -34,6 +36,7 @@ export const DEFAULT_TRADING_RULES: TradingRules = {
   maxTradesPerDay: 5,
   noTradesFirstMinutes: 0,
   maxDailyLossPct: 3,
+  custom: [],
 };
 
 export type ExitReason = 'stop_loss' | 'take_profit' | 'manual' | 'session_end' | 'other';
@@ -55,6 +58,8 @@ export interface RuleCheck {
   rule: string;
   passed: boolean | null;
   detail: string;
+  /** One of your own rules: the app cannot check it, so you say whether you followed it (JournalEntry.ruleChecks). */
+  own?: boolean;
 }
 
 export interface TradeReview {
@@ -792,6 +797,7 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
     const pct = dayStart > 0 ? (-dayPnl / dayStart) * 100 : 0;
     out.push({ rule: `Stop trading after −${rules.maxDailyLossPct}% on the day`, passed: pct < rules.maxDailyLossPct, detail: dayPnl < 0 ? `Down ${pct.toFixed(2)}% on the day at entry` : 'Not down on the day at entry' });
   }
+  for (const rule of rules.custom ?? []) out.push({ rule, passed: null, detail: 'Your own rule: say whether you followed it', own: true });
   return out;
 }
 

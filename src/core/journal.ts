@@ -44,6 +44,8 @@ export interface JournalEntry {
   /** Full round trip, kept for analytics. */
   trip: RoundTrip;
   createdAt: number;
+  /** Whether you followed each of your own rules on this trade (by the rule's text), as you marked it on the review. */
+  ruleChecks?: Record<string, boolean>;
   /** Local day (YYYY-MM-DD) the trade's first notes were written: the day it counts as reviewed. */
   reviewedOn?: string;
 }

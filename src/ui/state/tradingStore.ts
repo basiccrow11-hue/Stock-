@@ -360,13 +360,14 @@ function processClosedTrips(ended = false): Promise<void> {
   // Claimed, reviewed and pictured now, as they closed. Learning Mode stops playback before anything
   // is awaited, so the replay does not run on while the journal is written.
   const settings = getSettings();
+  const rules = reviewRules(session.id);
   const timeframe = useTrading.getState().timeframe;
   let picture: Promise<string | null> | null = null;
   const batch = closed.map((trip) => {
     eng.processedTrips.add(trip.id);
     const entry: JournalEntry = journalEntryFromTrip(trip, { sessionId: session.id, mode: session.mode, rewound: (eng.replay?.rewinds ?? 0) > 0, blind: session.blind });
     try {
-      entry.review = reviewOf(trip, timeframe, ended, settings.rules);
+      entry.review = reviewOf(trip, timeframe, ended, rules);
     } catch (e) {
       console.error('Review failed', e);
     }
@@ -402,7 +403,7 @@ function processClosedTrips(ended = false): Promise<void> {
           }
           await useJournal.getState().add(entry);
           // Only once the entry is in the journal: settling looks it up there.
-          if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, { timeframe, rules: settings.rules });
+          if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, { timeframe, rules });
           recordTradeClosed();
           const tone = trip.pnl >= 0 ? 'success' : 'error';
           toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
@@ -473,10 +474,27 @@ function settleWatchedReviews(ended = false): void {
   }
 }
 
+/** How you marked your own rules on the reviews of this session's trades, by trade id. */
+function ownRuleMarks(sessionId: string): Map<string, Record<string, boolean>> {
+  const out = new Map<string, Record<string, boolean>>();
+  for (const e of useJournal.getState().entries) if (e.sessionId === sessionId && e.ruleChecks) out.set(e.trip.id, e.ruleChecks);
+  return out;
+}
+
+/**
+ * The rules this session's trades are reviewed against: during a challenge, the rules as they were when
+ * it started, which it is scored on, so a review lists the rules the challenge checks; else Settings'.
+ */
+function reviewRules(sessionId: string): TradingRules {
+  const active = useChallenges.getState().active;
+  return active?.sessionId === sessionId && active.rules ? active.rules : getSettings().rules;
+}
+
 function evaluateActiveChallenge(): void {
   const active = useChallenges.getState().active;
   const b = broker();
-  if (!active || !b) return;
+  // Scored only on its own session's trades (a journal change can come at any moment, even mid-switch).
+  if (!active || !b || active.sessionId !== useTrading.getState().session?.id) return;
   const def = CHALLENGES.find((c) => c.id === active.challengeId);
   if (!def) return;
   const st = b.state;
@@ -491,6 +509,7 @@ function evaluateActiveChallenge(): void {
       sessionFinished: eng.replay?.finished ?? false,
       rewound: (eng.replay?.rewinds ?? 0) > 0,
       rules: active.rules ?? getSettings().rules,
+      ownRuleMarks: ownRuleMarks(active.sessionId),
     });
   } catch (e) {
     // Scoring a challenge must never stop trading or journaling: its last result stays until the next try.
@@ -894,6 +913,11 @@ function applyExecutionConfig(): void {
 // settings page, a reset, another tab).
 useSettings.subscribe((s, prev) => {
   if (s.execution !== prev.execution) applyExecutionConfig();
+});
+// Your own rules marked on a trade's review count toward a rules challenge at once, even while
+// playback is paused for the review.
+useJournal.subscribe((s, prev) => {
+  if (s.entries !== prev.entries) evaluateActiveChallenge();
 });
 
 export function setPickTarget(t: TradingSnapshot['pickTarget']): void {

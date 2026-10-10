@@ -21,6 +21,8 @@ export interface ChallengeContext {
   rewound: boolean;
   /** The trading rules as they were when the attempt started, so editing Settings mid-challenge does not re-score it. */
   rules: TradingRules;
+  /** How you marked your own rules on each trade's review (followed or broken, by the rule's text), by trade id. */
+  ownRuleMarks?: ReadonlyMap<string, Readonly<Record<string, boolean>>>;
 }
 
 export type ChallengeStatus = 'in_progress' | 'passed' | 'failed';
@@ -168,23 +170,31 @@ export const CHALLENGES: ChallengeDefinition[] = [
     id: 'rules-20',
     title: 'Complete 20 trades while following your rules',
     description:
-      'Uses your trading rules from Settings (risk limit, stop required, minimum R:R, trades per day, daily loss limit) as they were when the challenge started. Breaking any rule on any trade fails it.',
+      'Uses your trading rules from Settings (risk limit, stop required, minimum R:R, trades per day, daily loss limit, and your own rules) as they were when the challenge started. The app checks its rules; you say on each trade\'s review whether you followed your own, and a trade counts once you have. Breaking any rule on any trade fails it.',
     setup: { startingBalance: 25_000, mode: 'replay', multiDay: true },
     evaluate(ctx) {
       const closed = ctx.trips.filter((t) => t.closed);
+      const own = ctx.rules.custom ?? [];
+      // Trades whose review still asks whether you followed your own rules: they count once you answer.
+      let unmarked = 0;
       for (const t of closed) {
         const checks = checkRules(
           { trip: t, fills: ctx.fills, orders: [], revealedBars: [], timeframe: '1m', equityCurve: ctx.equityCurve, startingBalance: ctx.startingBalance, allTrips: ctx.trips, rules: ctx.rules },
           riskPct(t, ctx),
           plannedRR(t),
         );
-        if (!followedAllRules(checks)) {
-          const broken = checks.filter((c) => c.passed === false).map((c) => c.rule).join(', ');
+        const marks = ctx.ownRuleMarks?.get(t.id);
+        const brokeOwn = own.filter((rule) => marks?.[rule] === false);
+        if (!followedAllRules(checks) || brokeOwn.length) {
+          const broken = [...checks.filter((c) => c.passed === false).map((c) => c.rule), ...brokeOwn].join(', ');
           return { status: 'failed', progress: 0, detail: `Rule broken on a ${t.symbol} trade: ${broken}.` };
         }
+        if (own.some((rule) => marks?.[rule] === undefined)) unmarked++;
       }
-      if (closed.length >= 20) return { status: 'passed', progress: 1, detail: '20 trades, every rule followed.' };
-      return { status: 'in_progress', progress: closed.length / 20, detail: `${closed.length}/20 trades, all rules followed so far.` };
+      const counted = closed.length - unmarked;
+      if (counted >= 20) return { status: 'passed', progress: 1, detail: '20 trades, every rule followed.' };
+      const waiting = unmarked ? ` ${unmarked} more ${unmarked === 1 ? 'trade counts' : 'trades count'} once you mark your own rules on ${unmarked === 1 ? 'its review' : 'their reviews'} (in the Journal).` : '';
+      return { status: 'in_progress', progress: counted / 20, detail: `${counted}/20 trades, all rules followed so far.${waiting}` };
     },
   },
   {

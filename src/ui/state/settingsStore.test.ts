@@ -48,3 +48,24 @@ describe('settings in several open tabs', () => {
     expect(reloaded.useSettings.getState().indicators).toEqual([]);
   });
 });
+
+describe('your own rules in saved settings', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.resetModules();
+  });
+
+  it('start empty on settings saved before they existed, and keep only usable text from a damaged save', async () => {
+    localStorage.setItem(KEY, JSON.stringify({ state: { rules: { maxRiskPctPerTrade: 2 } }, version: 1 }));
+    const first = await import('./settingsStore');
+    expect(first.useSettings.getState().rules).toMatchObject({ maxRiskPctPerTrade: 2, custom: [] });
+    vi.resetModules();
+    localStorage.setItem(KEY, JSON.stringify({ state: { rules: { custom: ['Trade with the trend', 3, '  ', null] } }, version: 1 }));
+    const second = await import('./settingsStore');
+    expect(second.useSettings.getState().rules.custom).toEqual(['Trade with the trend']);
+    vi.resetModules();
+    localStorage.setItem(KEY, JSON.stringify({ state: { rules: { custom: 'Trade with the trend' } }, version: 1 }));
+    const third = await import('./settingsStore');
+    expect(third.useSettings.getState().rules.custom).toEqual([]);
+  });
+});

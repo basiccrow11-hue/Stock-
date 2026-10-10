@@ -118,3 +118,62 @@ describe('journal entry editor', () => {
     m.done();
   });
 });
+
+describe('your own rules on a trade review', () => {
+  it('are marked followed or broken, saved for that rule only, and cleared by pressing the same answer again', async () => {
+    const { reviewTrade, DEFAULT_TRADING_RULES } = await import('../../core/learning/review');
+    const t = 1_700_000_000;
+    const trip = {
+      ...{ id: 'r1', symbol: 'AAPL', direction: 'long' as const, entryTime: t, exitTime: t + 600, maxQuantity: 10, avgEntry: 100, avgExit: 101, entryQtyTotal: 10, exitQtyTotal: 10 },
+      ...{ pnl: 10, commission: 0, initialStop: 99, initialTarget: 102, highWhileOpen: 101, lowWhileOpen: 99.5, fills: [], closed: true, source: 'DEMO' as const },
+    };
+    const rules = { ...DEFAULT_TRADING_RULES, custom: ['Trade with the trend', 'No revenge trades'] };
+    const review = reviewTrade({ trip, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 25_000, allTrips: [trip], rules });
+    db.set('r1', {
+      ...{ id: 'r1', sessionId: 's1', mode: 'replay', source: 'DEMO', symbol: 'AAPL', direction: 'long', entryTime: t, exitTime: t + 600, stopLoss: 99, takeProfit: 102 },
+      ...{ avgEntry: 100, avgExit: 101, quantity: 10, pnl: 10, returnPct: 1, holdingSeconds: 600, commission: 0, rewound: false, createdAt: 1 },
+      ...{ tag: '', notes: { ...EMPTY_NOTES }, trip, review, ruleChecks: { 'No revenge trades': true } },
+    });
+    vi.resetModules();
+    const { JournalEntryDetail } = await import('./JournalEntryDetail');
+    const { useJournal } = await import('../state/journalStore');
+    await useJournal.getState().load();
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const render = () => root.render(createElement(JournalEntryDetail, { entry: useJournal.getState().entries[0] }));
+    act(render);
+    const unsub = useJournal.subscribe(() => act(render));
+    const group = (rule: string) => host.querySelector<HTMLElement>(`[role="group"][aria-label="Did you follow your rule “${rule}”?"]`)!;
+    const button = (rule: string, label: 'Followed' | 'Broke') => [...group(rule).querySelectorAll('button')].find((b) => b.textContent === label)!;
+    const mark = (rule: string) => group(rule).closest('.rule-row')!.firstElementChild!.textContent;
+    const stored = () => (db.get('r1') as JournalEntry).ruleChecks;
+
+    // The app's own checks show their detail; yours ask, and show what you said before.
+    expect(host.textContent).toContain('Use a stop lossStop at 99.00');
+    expect(button('No revenge trades', 'Followed').getAttribute('aria-pressed')).toBe('true');
+    expect(mark('No revenge trades')).toBe('✓');
+    expect(button('Trade with the trend', 'Followed').getAttribute('aria-pressed')).toBe('false');
+    expect(button('Trade with the trend', 'Broke').getAttribute('aria-pressed')).toBe('false');
+    expect(mark('Trade with the trend')).toBe('–');
+
+    act(() => button('Trade with the trend', 'Broke').click());
+    expect(mark('Trade with the trend')).toBe('✗');
+    await settle();
+    expect(stored()).toEqual({ 'No revenge trades': true, 'Trade with the trend': false });
+
+    // Another tab changed the other rule meanwhile: this answer leaves it alone.
+    db.set('r1', { ...(db.get('r1') as JournalEntry), ruleChecks: { 'No revenge trades': false, 'Trade with the trend': false } });
+    act(() => button('Trade with the trend', 'Followed').click());
+    await settle();
+    expect(stored()).toEqual({ 'No revenge trades': false, 'Trade with the trend': true });
+    expect(button('Trade with the trend', 'Followed').getAttribute('aria-pressed')).toBe('true');
+
+    act(() => button('Trade with the trend', 'Followed').click());
+    await settle();
+    expect(stored()).toEqual({ 'No revenge trades': false });
+    expect(mark('Trade with the trend')).toBe('–');
+    unsub();
+    act(() => root.unmount());
+  });
+});

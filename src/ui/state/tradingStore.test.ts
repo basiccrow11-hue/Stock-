@@ -328,4 +328,39 @@ describe('a challenge attempt', () => {
     useSettings.getState().update({ rules });
     await store.endSession();
   });
+
+  it('reviews trades against the own rules it started with, and fails as soon as you mark one broken', async () => {
+    const store = await import('./tradingStore');
+    const { useChallenges } = await import('./challengeStore');
+    const { useSettings } = await import('./settingsStore');
+    const { useJournal } = await import('./journalStore');
+    const rules = useSettings.getState().rules;
+    useSettings.getState().update({ rules: { ...rules, custom: ['Trade with the trend'] } });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'rules-20' })).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    // Removed in Settings mid-challenge: the challenge still checks it, so the review still asks.
+    useSettings.getState().update({ rules: { ...rules, custom: [] } });
+    store.stepForward();
+    const price = store.lastPrice('SPY')!;
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1, stopLoss: price - 1, takeProfit: price + 2 }).ok).toBe(true);
+    store.stepForward();
+    expect(store.closePosition('SPY').ok).toBe(true);
+    store.stepForward();
+    await vi.waitFor(() => expect(useJournal.getState().entries.filter((e) => e.sessionId === sessionId)).toHaveLength(1));
+    const entry = useJournal.getState().entries.find((e) => e.sessionId === sessionId)!;
+    expect(entry.review!.rules.filter((c) => c.own).map((c) => c.rule)).toEqual(['Trade with the trend']);
+    expect(useChallenges.getState().active?.result).toMatchObject({
+      status: 'in_progress',
+      detail: '0/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal).',
+    });
+    await useJournal.getState().updateRuleCheck(entry.id, 'Trade with the trend', true);
+    expect(useChallenges.getState().active?.result).toMatchObject({ status: 'in_progress', detail: '1/20 trades, all rules followed so far.' });
+    // Marked broken while the review is open: the challenge ends at once.
+    const attempt = useChallenges.getState().active!.id;
+    await useJournal.getState().updateRuleCheck(entry.id, 'Trade with the trend', false);
+    await vi.waitFor(() => expect(useChallenges.getState().active).toBeNull());
+    expect(useChallenges.getState().attempts.find((a) => a.id === attempt)?.result).toMatchObject({ status: 'failed', detail: 'Rule broken on a SPY trade: Trade with the trend.' });
+    useSettings.getState().update({ rules });
+    await store.endSession();
+  });
 });

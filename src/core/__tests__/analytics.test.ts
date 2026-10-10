@@ -1455,3 +1455,51 @@ describe('stops placed after entry, and the risk over a trade’s life', () => {
     expect(evaluateChallenge(ach, ctx([trip({ pnl: 50 })]))).toMatchObject({ status: 'failed', detail: 'A trade on T had no stop its risk could be measured from, so its R is unknown.' });
   });
 });
+
+describe('your own rules', () => {
+  const own = ['Trade with the daily trend', 'No revenge trades'];
+  const rules = { ...DEFAULT_TRADING_RULES, maxTradesPerDay: 100, custom: own };
+  const rulesChallenge = CHALLENGES.find((c) => c.id === 'rules-20')!;
+  const ctx = (trips: RoundTrip[], marks?: Map<string, Record<string, boolean>>): ChallengeContext => ({
+    ...{ trips, fills: [], equityCurve: [], startingBalance: 25_000, equity: 25_000, sessionFinished: false, rewound: false },
+    ...{ rules, ownRuleMarks: marks },
+  });
+  // Twenty trades that keep every rule the app checks: 0.2% risk, 4:1 planned.
+  const trips = Array.from({ length: 20 }, () => trip({ initialStop: 99.5, initialTarget: 102 }));
+  const followed = Object.fromEntries(own.map((r) => [r, true]));
+
+  it('are listed on every review after the rules the app checks, for you to mark', () => {
+    const t = trips[0];
+    const review = reviewTrade({ trip: t, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 25_000, allTrips: [t], rules });
+    expect(review.rules.slice(-2)).toEqual(own.map((rule) => ({ rule, passed: null, detail: 'Your own rule: say whether you followed it', own: true })));
+    expect(review.rules.slice(0, -2).every((c) => !c.own)).toBe(true);
+  });
+
+  it('count toward the rules challenge once marked: unmarked trades wait, a broken one fails it', () => {
+    expect(evaluateChallenge(rulesChallenge, ctx(trips))).toMatchObject({
+      status: 'in_progress',
+      progress: 0,
+      detail: '0/20 trades, all rules followed so far. 20 more trades count once you mark your own rules on their reviews (in the Journal).',
+    });
+    // One rule left unmarked on the last trade.
+    const marks = new Map(trips.map((t) => [t.id, followed]));
+    marks.set(trips[19].id, { [own[0]]: true });
+    expect(evaluateChallenge(rulesChallenge, ctx(trips, marks))).toMatchObject({
+      status: 'in_progress',
+      progress: 0.95,
+      detail: '19/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal).',
+    });
+    marks.set(trips[19].id, followed);
+    expect(evaluateChallenge(rulesChallenge, ctx(trips, marks))).toMatchObject({ status: 'passed', detail: '20 trades, every rule followed.' });
+    marks.set(trips[4].id, { ...followed, [own[1]]: false });
+    expect(evaluateChallenge(rulesChallenge, ctx(trips, marks))).toMatchObject({ status: 'failed', detail: 'Rule broken on a T trade: No revenge trades.' });
+  });
+
+  it('are the ones the challenge started with: a mark on a rule added since does not count', () => {
+    const marks = new Map(trips.map((t) => [t.id, { ...followed, 'Added later': false }]));
+    expect(evaluateChallenge(rulesChallenge, ctx(trips, marks)).status).toBe('passed');
+    // Without own rules, nothing waits for a mark.
+    expect(evaluateChallenge(rulesChallenge, { ...ctx(trips), rules: { ...rules, custom: [] } }).status).toBe('passed');
+    expect(evaluateChallenge(rulesChallenge, { ...ctx(trips), rules: { ...rules, custom: undefined } }).status).toBe('passed');
+  });
+});

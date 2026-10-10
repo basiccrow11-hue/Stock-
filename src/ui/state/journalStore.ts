@@ -167,6 +167,8 @@ interface JournalStore {
   removeWhere: (pred: (e: JournalEntry) => boolean) => Promise<number>;
   /** Replace the trade review (the notes and everything else stay as stored). */
   updateReview: (id: string, review: TradeReview) => Promise<void>;
+  /** Mark one of your own rules followed or broken on a trade (null clears the mark). */
+  updateRuleCheck: (id: string, rule: string, followed: boolean | null) => Promise<void>;
 }
 
 export const useJournal = create<JournalStore>()((set, get) => ({
@@ -237,6 +239,18 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     const entry = get().entries.find((e) => e.id === id);
     if (!entry) return;
     await write(id, entry, { ...entry, review }, (stored) => ({ ...stored, review }));
+  },
+  updateRuleCheck: async (id, rule, followed) => {
+    const entry = get().entries.find((e) => e.id === id);
+    if (!entry) return;
+    // Only this rule's mark: another tab may have marked the others.
+    const mark = (e: JournalEntry): JournalEntry => {
+      const checks = { ...e.ruleChecks };
+      if (followed === null) delete checks[rule];
+      else checks[rule] = followed;
+      return { ...e, ruleChecks: checks };
+    };
+    await write(id, entry, mark(entry), mark);
   },
 }));
 

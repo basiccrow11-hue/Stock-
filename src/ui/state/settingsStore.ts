@@ -179,7 +179,11 @@ export const useSettings = create<SettingsStore>()(
           ...current,
           ...p,
           execution: { ...current.execution, ...p.execution, strictRisk: { ...current.execution.strictRisk, ...p.execution?.strictRisk } },
-          rules: { ...current.rules, ...p.rules },
+          rules: {
+            ...current.rules,
+            ...p.rules,
+            custom: Array.isArray(p.rules?.custom) ? p.rules.custom.filter((r): r is string => typeof r === 'string' && r.trim() !== '') : current.rules.custom,
+          },
           replay: { ...current.replay, ...p.replay },
           sim: { ...current.sim, ...p.sim },
           // An empty list is a choice (a price-only chart), not a missing value.

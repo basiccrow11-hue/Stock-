@@ -148,7 +148,9 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
 
       {snapshot && <img className="snapshot-img" src={snapshot} alt={`Chart when the ${entry.symbol} trade closed`} />}
 
-      {showReview && r && <ReviewView review={r} hasStop={entry.stopLoss !== undefined} />}
+      {showReview && r && (
+        <ReviewView review={r} hasStop={entry.stopLoss !== undefined} checks={entry.ruleChecks} onCheck={(rule, followed) => void useJournal.getState().updateRuleCheck(entry.id, rule, followed)} />
+      )}
 
       <div>
         <div className="section-title">
@@ -188,7 +190,18 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   );
 }
 
-function ReviewView({ review: r, hasStop }: { review: TradeReview; hasStop: boolean }) {
+function ReviewView({
+  review: r,
+  hasStop,
+  checks,
+  onCheck,
+}: {
+  review: TradeReview;
+  hasStop: boolean;
+  /** How you marked your own rules on this trade. */
+  checks?: Record<string, boolean>;
+  onCheck: (rule: string, followed: boolean | null) => void;
+}) {
   return (
     <div className="stack" style={{ gap: 10 }}>
       <div className="section-title">
@@ -227,13 +240,27 @@ function ReviewView({ review: r, hasStop }: { review: TradeReview; hasStop: bool
       {r.rules.length > 0 && (
         <div>
           <h4 style={{ marginBottom: 6 }}>Your rules</h4>
-          {r.rules.map((c, i) => (
-            <div key={i} className="rule-row">
-              <span className={c.passed === null ? 'muted' : c.passed ? 'success' : 'error'}>{c.passed === null ? '–' : c.passed ? '✓' : '✗'}</span>
-              <b className="small">{c.rule}</b>
-              <span className="small muted">{c.detail}</span>
-            </div>
-          ))}
+          {r.rules.map((c, i) => {
+            // Your own rules: the app cannot check them, so you say whether you followed them.
+            const passed = c.own ? (checks?.[c.rule] ?? null) : c.passed;
+            return (
+              <div key={i} className="rule-row">
+                <span className={passed === null ? 'muted' : passed ? 'success' : 'error'}>{passed === null ? '–' : passed ? '✓' : '✗'}</span>
+                <b className="small">{c.rule}</b>
+                {c.own ? (
+                  <span className="seg own-rule" role="group" aria-label={`Did you follow your rule “${c.rule}”?`}>
+                    {([true, false] as const).map((v) => (
+                      <button key={String(v)} className={passed === v ? 'on' : ''} aria-pressed={passed === v} onClick={() => onCheck(c.rule, passed === v ? null : v)}>
+                        {v ? 'Followed' : 'Broke'}
+                      </button>
+                    ))}
+                  </span>
+                ) : (
+                  <span className="small muted">{c.detail}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
