@@ -207,6 +207,25 @@ export function newsMarker(ev: SimEvent, time: Time, p: ChartPalette): SeriesMar
   };
 }
 
+/**
+ * The fill and simulated news markers of a chart whose first candle starts at `oldest`, oldest first,
+ * each on the candle holding its time (`candleStart`; `ct` gives its chart time). lightweight-charts
+ * puts a marker on the nearest candle it has, so those from before `oldest` are left out rather than
+ * piled onto the first candle.
+ */
+export function chartMarkers(fills: readonly Fill[], news: readonly SimEvent[], candleStart: (t: number) => number, oldest: number, ct: (t: number) => Time, p: ChartPalette): SeriesMarker<Time>[] {
+  const markers: SeriesMarker<Time>[] = [];
+  for (const f of fills) {
+    const time = candleStart(f.time);
+    if (time >= oldest) markers.push(fillMarker(f, ct(time), p));
+  }
+  for (const ev of news) {
+    const time = candleStart(ev.time);
+    if (time >= oldest) markers.push(newsMarker(ev, ct(time), p));
+  }
+  return markers.sort((a, b) => (a.time as number) - (b.time as number));
+}
+
 /** A chart picture as a JPEG data URL, at most 1200 pixels wide, as journal snapshots are saved. */
 export function toJpeg(canvas: HTMLCanvasElement): string {
   const maxW = 1200;

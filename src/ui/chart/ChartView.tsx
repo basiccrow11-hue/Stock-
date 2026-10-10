@@ -7,7 +7,8 @@
  * candles with the causal streams in core/indicators, which only compute the candles that changed.
  *
  * A long session has hundreds of thousands of candles: the chart is handed the newest few thousand,
- * and older ones as the user scrolls back to them (the window), so redraws stay quick.
+ * and older ones as the user scrolls back to them (the window). While play adds candles and the
+ * newest are on screen, the oldest are let go again, so redraws and play stay quick.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
@@ -22,7 +23,6 @@ import {
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type ITextWatermarkPluginApi,
-  type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
@@ -39,7 +39,7 @@ import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { ChartLegend, type LegendEntry, type LegendModel, type LegendSource } from './ChartLegend';
 import { useDrawings } from './drawings';
-import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, endsSession, fillMarker, indicatorColors, indicatorName, indicatorPoint as indicatorPointOf, indicatorSpec, newsMarker, timeLabels, toJpeg, volumePoint as volumePointOf, watermarkLines, withHistory } from './chartParts';
+import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, chartMarkers, endsSession, indicatorColors, indicatorName, indicatorPoint as indicatorPointOf, indicatorSpec, timeLabels, toJpeg, volumePoint as volumePointOf, watermarkLines, withHistory } from './chartParts';
 import { addMainSeries, chartOptions, lastPriceColor, lastVisibleIndex, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, valueDecimals, valueFormat, type MainSeries } from './chartTheme';
 import { useTheme } from '../theme/useTheme';
 import { chartLabelFill, chartLabelText, readable } from '../theme/color';
@@ -71,7 +71,10 @@ export function blindChartShift(sessionId: string): number {
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
-/** Candles handed to the chart at first; older ones follow as the user scrolls back to them. */
+/**
+ * Candles handed to the chart at first; older ones follow as the user scrolls back to them. Play adds
+ * up to as many again before the oldest are let go (slideWindow).
+ */
 const WINDOW = 2000;
 /** Scrolling to within this many candles of the oldest one handed over brings older ones. */
 const WINDOW_MARGIN = 300;
@@ -643,6 +646,27 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     setGeometryVersion((v) => v + 1);
   }
 
+  /**
+   * Lets go of the oldest candles handed to the chart while play adds new ones, so the series does not
+   * grow without limit: once it holds WINDOW more than it needs (WINDOW, or from a margin before the
+   * first candle on screen), which spreads the cost to once per WINDOW new candles. Only while the
+   * newest candle is on screen: scrolled back, the window grows until the user comes back.
+   */
+  function slideWindow(): void {
+    const candles = candlesRef.current;
+    const held = candles.length - windowStartRef.current;
+    if (held < 2 * WINDOW) return;
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    if (!range || range.to < held - 1) return;
+    const keep = Math.max(WINDOW, held - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN);
+    if (held - keep < WINDOW) return;
+    windowStartRef.current = candles.length - keep;
+    // As in extendWindow, the chart keeps its place counted from the newest candle: the view does not move.
+    setWindowData();
+    syncWindowVersion();
+    setGeometryVersion((v) => v + 1);
+  }
+
   function syncWindowVersion(): void {
     const oldest = candlesRef.current[windowStartRef.current]?.time ?? null;
     if (oldest === windowOldestRef.current) return;
@@ -741,6 +765,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
       });
     }
+    slideWindow();
     syncLastDirection();
     syncPercentBase();
     emitLegend();
@@ -775,22 +800,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   useEffect(() => {
     const m = markersRef.current;
     if (!m) return;
-    const markers: SeriesMarker<Time>[] = [];
-    // lightweight-charts puts a marker on the nearest candle it has: leave out those before the window.
+    // Those before the window are left out (see chartMarkers).
     const oldest = candlesRef.current[windowStartRef.current]?.time ?? Infinity;
-    for (const f of fills) {
-      if (f.symbol !== symbol) continue;
-      const time = candleStartFor(symbol, f.time, timeframe);
-      if (time < oldest) continue;
-      markers.push(fillMarker(f, ct(time), pal));
-    }
-    for (const ev of getSimEventsFor(symbol)) {
-      const time = candleStartFor(symbol, ev.time, timeframe);
-      if (time < oldest) continue;
-      markers.push(newsMarker(ev, ct(time), pal));
-    }
-    markers.sort((a, b) => (a.time as number) - (b.time as number));
-    m.setMarkers(markers);
+    const own = fills.filter((f) => f.symbol === symbol);
+    m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), (t) => candleStartFor(symbol, t, timeframe), oldest, ct, pal));
   }, [fills, symbol, timeframe, simEventCount, seriesVersion, windowVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
