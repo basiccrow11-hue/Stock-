@@ -72,6 +72,8 @@ export function blindChartShift(sessionId: string): number {
 
 /** What the legend reads from a crosshair move. */
 type CrosshairParam = Pick<MouseEventParams<Time>, 'time' | 'logical' | 'point' | 'paneIndex'>;
+/** The pointer resting on the chart: in its pane's coordinates, and in the window's (clientX, clientY). */
+type Pointer = { x: number; y: number; pane: number; clientX: number; clientY: number };
 
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
@@ -147,8 +149,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   timeframeRef.current = timeframe;
   /** Index in candlesRef of the candle under the crosshair, or null: the legend then shows the newest. */
   const hoverRef = useRef<number | null>(null);
-  /** Where the pointer is on the chart (in that pane's coordinates), or null when it is off it: see rebuildTail. */
-  const pointerRef = useRef<{ x: number; y: number; pane: number } | null>(null);
+  /** Where the pointer is on the chart (in that pane's and in the window's coordinates), or null when it is off it: see rebuildTail. */
+  const pointerRef = useRef<Pointer | null>(null);
+  /** Set when the chart library takes the mouse move restoreCrosshair hands it. */
+  const landedRef = useRef(false);
   /** Shows the candle at a crosshair position in the legend (the newest when there is none). */
   const showHoverRef = useRef<(param: CrosshairParam) => void>(() => undefined);
   /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
@@ -221,14 +225,14 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     };
     showHoverRef.current = showHover;
     chart.subscribeCrosshairMove((param) => {
+      // The pointer is where the user's own moves put it. The library also redoes the crosshair on its
+      // own (a zoom, a scroll, new data) from where it last put it, which is the pointer as long as it
+      // was put there by a mouse move (restoreCrosshair), and the legend follows it either way.
       if (!param.point) pointerRef.current = null;
-      else if (param.sourceEvent) pointerRef.current = { x: param.point.x, y: param.point.y, pane: param.paneIndex ?? 0 };
-      else if (pointerRef.current) {
-        // lightweight-charts redid the crosshair on its own (a zoom, a scroll, new data, a wider price
-        // axis) from where it last put it. After restoreCrosshair that is a candle's centre, not the
-        // pointer, so the crosshair would drift off the pointer: put it back under the pointer instead.
-        restoreCrosshair(pointerRef.current);
-        return;
+      else if (param.sourceEvent) {
+        const { clientX, clientY } = param.sourceEvent;
+        pointerRef.current = { x: param.point.x, y: param.point.y, pane: param.paneIndex ?? 0, clientX, clientY };
+        landedRef.current = true;
       }
       showHover(param);
     });
@@ -758,18 +762,27 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   /**
-   * Puts the crosshair back under the pointer after rebuildTail hid it or lightweight-charts redid it from
-   * a stale spot, as lightweight-charts would have put it, and shows the candle under it in the legend
-   * (setCrosshairPosition sends no crosshair event). Past the newest candle it is hidden until the
-   * pointer moves, and the legend shows the newest.
+   * Puts the crosshair back under the pointer after rebuildTail hid it. The library does it itself, from
+   * a mouse move where the pointer rests, which it handles like the user's own: the crosshair lands
+   * exactly where it would for that pointer (whitespace and magnet included), the legend follows its
+   * event, and its own later redraws start from the pointer. It ignores such a move while a mouse button
+   * is held (a drag) or just after a touch, and then the crosshair is set on the candle under the pointer
+   * (setCrosshairPosition, which sends no event, so the legend is set here); off the candles it is hidden
+   * until the pointer moves, and the legend shows the newest.
    */
-  function restoreCrosshair(p: { x: number; y: number; pane: number }): void {
+  function restoreCrosshair(p: Pointer): void {
+    const canvas = document.elementsFromPoint?.(p.clientX, p.clientY).find((el) => el instanceof HTMLCanvasElement && !!containerRef.current?.contains(el));
+    if (canvas) {
+      landedRef.current = false;
+      canvas.dispatchEvent(new MouseEvent('mousemove', { clientX: p.clientX, clientY: p.clientY }));
+      if (landedRef.current) return;
+    }
     const chart = chartRef.current;
     const candles = candlesRef.current;
     const start = windowStartRef.current;
     const series = p.pane === 0 ? candleRef.current : indicatorsRef.current.find((ind) => ind.pane === p.pane)?.series[0];
     const logical = chart?.timeScale().coordinateToLogical(p.x) ?? null;
-    const k = logical === null ? -1 : Math.max(0, Math.round(logical));
+    const k = logical === null ? -1 : Math.round(logical);
     const price = series?.coordinateToPrice(p.y) ?? null;
     const point = { x: p.x, y: p.y } as CrosshairParam['point'];
     if (!chart || !series || k < 0 || start + k >= candles.length || price === null) {

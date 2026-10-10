@@ -987,6 +987,7 @@ export class SimBroker {
         notes.push(`Your other ${req.action === 'sell' ? 'sell' : 'cover'} orders on ${symbol} are for some of these shares too: whichever fills first takes them, and the others are cut to the shares still held.`);
       }
     }
+    this.notePlacedThrough(order);
     this.s.orders.push(order);
     this.log('accepted', `${describe(order)} accepted`, order.id);
     if (!opening) this.noteLaterExit(order);
@@ -1060,6 +1061,7 @@ export class SimBroker {
     if (changes.quantity !== undefined) o.quantity = changes.quantity;
     o.updatedAt = this.s.clock;
     o.activeFrom = this.s.clock;
+    if (changes.stopPrice !== undefined || changes.limitPrice !== undefined) this.notePlacedThrough(o);
     this.log('info', `${describe(o)} modified`, o.id);
     // Moved through the market, it fills at once as far as the last bar's volume cap allows, partly filled or not.
     if (this.cfg.marketOrderFill === 'last_price' && (o.status === 'working' || o.status === 'partially_filled')) this.tryImmediate(o);
@@ -1471,6 +1473,8 @@ export class SimBroker {
       }
       reach(end);
     }
+    // A stop placed through the market fills at its first chance: one this bar left unfilled is now an ordinary stop.
+    for (const o of this.s.orders) if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0) delete o.placedThrough;
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };
@@ -1484,6 +1488,13 @@ export class SimBroker {
     this.recordEquity(bar.time + barSeconds, barSeconds < 60);
     this.touch();
     return this.s.fills.slice(fillsBefore);
+  }
+
+  /** Marks a stop or stop-limit placed or changed already through the market (Order.placedThrough). */
+  private notePlacedThrough(o: Order): void {
+    const stop = (o.type === 'stop' || o.type === 'stop_limit') && !o.triggered;
+    if (stop && this.s.lastPrice[o.symbol] !== undefined && this.expectedEntry(o).through) o.placedThrough = true;
+    else delete o.placedThrough;
   }
 
   /** Record `trip`'s open P/L (before costs) with its symbol at `price`: what it made so far plus the shares still held. */

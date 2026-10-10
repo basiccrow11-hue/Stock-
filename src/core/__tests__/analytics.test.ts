@@ -1490,8 +1490,8 @@ describe('stops placed after entry, and the risk over a trade’s life', () => {
 
 describe('a first stop or target placed after entry, at or past the average entry', () => {
   /** $10,000 trading X at zero cost from 09:30, one bar a minute; `result` reviews and scores the first trade. */
-  function setup() {
-    const broker = new SimBroker({ startingBalance: 10_000, config: ZERO_COST_CONFIG });
+  function setup(config = ZERO_COST_CONFIG) {
+    const broker = new SimBroker({ startingBalance: 10_000, config });
     const bars: Bar[] = [];
     let t = et('2025-01-15', '09:30');
     const next = (o: number, h: number, l: number, c: number) => {
@@ -1761,6 +1761,63 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect([b.trip.closed, b.trip.avgExit, b.review.rMultiple]).toEqual([true, 49.5, expect.closeTo(-0.5, 9)]);
     expect(b.text).toContain('Stop filled past its price: Your stop at 49.80 was already past the market when you placed or changed it, so it filled at once at 49.50, 0.30 past its price: -0.50R per share.');
     expect(b.text).not.toMatch(/well past|your moved stop allowed|turns into a market order/);
+  });
+
+  it('says the same of a stop placed or moved past the market in next-bar-open mode, which fills at the next bar’s open', () => {
+    const nbo = { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' as const };
+    const late = setup(nbo);
+    late.next(50, 50, 50, 50);
+    late.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day' });
+    late.next(50, 50.05, 49.2, 49.3);
+    expect(late.broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 49.5, quantity: 100, tif: 'day' }).ok).toBe(true);
+    late.next(49.3, 49.4, 49.2, 49.3);
+    const a = late.result();
+    expect([a.trip.closed, a.trip.avgExit, a.review.rMultiple]).toEqual([true, 49.3, expect.closeTo(-1.4, 9)]);
+    expect(a.text).toContain("Stop filled past its price: Your stop at 49.50 was already past the market when you placed or changed it, so it filled at the next bar's open, 49.30, 0.20 past its price: -1.40R per share.");
+    expect(a.text).not.toMatch(/well past|planned -1\.00R|turns into a market order/);
+
+    const moved = setup(nbo);
+    moved.next(50, 50, 50, 50);
+    moved.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day', stopLoss: 49, takeProfit: 52 });
+    moved.next(50, 50.05, 49.45, 49.5);
+    expect(moved.broker.modify(moved.broker.workingOrders('X').find((o) => o.type === 'stop')!.id, { stopPrice: 49.8 }).ok).toBe(true);
+    moved.next(49.5, 49.6, 49.4, 49.5);
+    const b = moved.result();
+    expect([b.trip.closed, b.trip.avgExit]).toEqual([true, 49.5]);
+    expect(b.text).toContain("Stop filled past its price: Your stop at 49.80 was already past the market when you placed or changed it, so it filled at the next bar's open, 49.50, 0.30 past its price: -0.50R per share.");
+    expect(b.text).not.toMatch(/well past|your moved stop allowed/);
+
+    // Past the market when placed, but the next bar opened back short of it: a later gap through it is a gap.
+    const back = setup(nbo);
+    back.next(50, 50, 50, 50);
+    back.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day' });
+    back.next(50, 50.05, 49.2, 49.3);
+    expect(back.broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 49.5, quantity: 100, tif: 'day' }).ok).toBe(true);
+    back.next(49.6, 49.8, 49.55, 49.7);
+    back.next(49, 49.1, 48.9, 49);
+    const c = back.result();
+    expect([c.trip.closed, c.trip.avgExit, c.review.rMultiple]).toEqual([true, 49, expect.closeTo(-2, 9)]);
+    expect(c.text).toContain('Stop filled well past its price: Your stop at 49.50 filled at 49.00, 0.50 past it, so this exit was -2.00R per share instead of the planned -1.00R. A stop turns into a market order');
+    expect(c.text).not.toContain('already past the market');
+  });
+
+  it('says a stop placed after entry at or past the average, but already past the market, closed the trade at once', () => {
+    for (const [direction, stop, nbo] of [['long', 50, false], ['long', 50.1, false], ['short', 50, false], ['long', 50, true]] as const) {
+      const s = setup(nbo ? { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' } : ZERO_COST_CONFIG);
+      const [open, close, worse] = direction === 'long' ? (['buy', 'sell', 49.3] as const) : (['short', 'cover', 50.7] as const);
+      s.next(50, 50, 50, 50);
+      s.broker.submit({ symbol: 'X', action: open, type: 'market', quantity: 100, tif: 'day' });
+      s.next(50, Math.max(50, worse), Math.min(50, worse), worse);
+      expect(s.broker.submit({ symbol: 'X', action: close, type: 'stop', stopPrice: stop, quantity: 100, tif: 'day' }).ok).toBe(true);
+      s.next(worse, worse, worse, worse);
+      const { trip: t, review, text } = s.result();
+      expect([t.closed, t.avgExit, t.pnl, review.rMultiple]).toEqual([true, worse, expect.closeTo(-70, 9), null]);
+      const how = nbo ? "filled at the next bar's open, " : 'filled at once at ';
+      const where = stop === 50 ? 'at your average entry' : 'past your average entry of 50.00';
+      expect(text).toContain(`Risk not measurable: Your stop at ${stop.toFixed(2)}, placed 1m after you entered, was ${where} and already past the market: it ${how}${worse.toFixed(2)} and closed the trade there, so the trade's risk cannot be measured in R.`);
+      expect(text).not.toMatch(/locked in a gain|risked nothing|risked at most/);
+      expect(text).toContain(`Stop filled past its price: Your stop at ${stop.toFixed(2)} was already past the market when you placed or changed it, so it ${how}${worse.toFixed(2)}, `);
+    }
   });
 
   it('cannot measure R from a short’s breakeven stop placed after several fills at the average as shown', () => {

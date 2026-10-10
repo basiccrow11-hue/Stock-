@@ -404,6 +404,18 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const rText = r !== null ? ` (${r >= 0 ? '+' : ''}${r.toFixed(2)}R)` : '';
   const dir = long ? 1 : -1;
   const parts = exitParts(trip, input.fills, input.orders);
+  // The order that closed the most shares.
+  const main = mainExit(parts);
+  /**
+   * How the closing order filled when it was a stop already past the market when placed or changed:
+   * at once at the last price ('once'), or at the next bar's open ('open': in next-bar-open mode, or
+   * placed before its session opened, or with no room left under the last bar's volume cap).
+   */
+  const placedPast = (): 'once' | 'open' | undefined => {
+    const first = main && input.fills.find((f) => f.orderId === main.order.id && trip.fills.includes(f.id));
+    return first?.at === 'placed' ? 'once' : first?.at === 'open' && main!.order.placedThrough ? 'open' : undefined;
+  };
+  const filledThrough = (how: 'once' | 'open', px: number) => (how === 'once' ? `filled at once at ${formatTick(px)}` : `filled at the next bar's open, ${formatTick(px)}`);
   // A limit exit at or beyond the original target reached it.
   const reachedTarget = (p: ExitPart) => trip.initialTarget !== undefined && p.order.type === 'limit' && (p.price - trip.initialTarget) * dir >= -1e-9;
   findings.push({
@@ -471,6 +483,12 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const placed = formatDuration(placedAt - trip.entryTime);
     const end = "so the trade's risk cannot be measured in R.";
     const atAverage = sameAtTick(trip.avgEntry, S);
+    // Placed already past the market, it closed the trade (or most of it) at once rather than waiting at its price.
+    const how = main && main.order.createdAt === placedAt && main.order.stopPrice === S ? placedPast() : undefined;
+    if (how) {
+      const closed = parts.length > 1 ? `${main!.qty} of your ${trip.exitQtyTotal} shares` : 'the trade';
+      return `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was ${atAverage ? 'at your average entry' : `past your average entry of ${formatTick(trip.avgEntry)}`} and already past the market: it ${filledThrough(how, main!.price)} and closed ${closed} there, ${end}`;
+    }
     // The average of the shares held when it was placed: the entries known by then.
     const then = avgOf(entries.filter((f) => (f.knownAt ?? f.time) <= placedAt));
     if (then !== undefined && (then - S) * sign > 0 && !sameAtTick(then, S)) {
@@ -529,7 +547,6 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   }
 
   // Where the closing stop sat when it filled (it may have been moved since entry) and its fills.
-  const main = mainExit(parts);
   const stopAt = main?.order.stopPrice;
   const exitPx = main?.price;
   /**
@@ -544,8 +561,6 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const beyond = past - halfSpread;
     return { past, beyond, slipped: beyond >= 2 * (px >= 1 ? 0.01 : 0.0001) - 1e-9 };
   };
-  /** The closing stop was already past the market when placed or changed, so it filled at once there. */
-  const stopPlacedPast = () => input.fills.find((f) => f.orderId === main!.order.id && trip.fills.includes(f.id))?.at === 'placed';
   /** Why the closing stop could fill past its price. */
   const stopFillNote = () =>
     main!.order.type === 'stop_limit'
@@ -607,11 +622,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
           afterExit ? ` In the ${afterExit.span} after your exit, price moved ${dist(afterExit.favorableMove)} further your way.` : ''
         }`,
       });
-    } else if (filledPast && stopPlacedPast()) {
+    } else if (filledPast && placedPast()) {
       findings.push({
         tone: 'neutral',
         title: 'Stop filled past its price',
-        detail: `Your stop at ${formatTick(stopAt)} was already past the market when you placed or changed it, so it filled at once at ${formatTick(exitPx)}, ${dist(past)} past its price: ${fmtR(inR(exitPx))} per share.`,
+        detail: `Your stop at ${formatTick(stopAt)} was already past the market when you placed or changed it, so it ${filledThrough(placedPast()!, exitPx)}, ${dist(past)} past its price: ${fmtR(inR(exitPx))} per share.`,
       });
     } else if (filledPast) {
       findings.push({
@@ -677,8 +692,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: 'neutral',
       title: 'Stop filled past its price',
-      detail: stopPlacedPast()
-        ? `Your stop at ${formatTick(stopAt)} was already past the market when you placed or changed it, so it filled at once at ${formatTick(exitPx)}, ${dist(past)} past its price.`
+      detail: placedPast()
+        ? `Your stop at ${formatTick(stopAt)} was already past the market when you placed or changed it, so it ${filledThrough(placedPast()!, exitPx)}, ${dist(past)} past its price.`
         : `Your stop at ${formatTick(stopAt)} filled at ${formatTick(exitPx)}, ${dist(past)} past it, which cost ${money(past * main!.qty)} on the ${main!.qty} shares it closed. ${stopFillNote()}`,
     });
   }

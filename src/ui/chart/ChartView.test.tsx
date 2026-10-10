@@ -113,11 +113,36 @@ const lw = vi.hoisted(() => {
     /** Where the crosshair is shown (none: hidden), and how often a series change made the library redo it. */
     cross: { time: number; price: number } | null = null;
     crosshairRedone = 0;
+    /** The spot the library redoes a shown crosshair from: the last mouse move, or the candle setCrosshairPosition chose. */
+    origin = { x: 0, y: 0 };
+    /** The pane's canvas, which takes mouse moves as the library's does (ignored while a button is held). */
+    canvas = document.createElement('canvas');
+    pressed = false;
+    constructor() {
+      this.canvas.addEventListener('mousemove', (e) => {
+        if (this.pressed) return;
+        this.origin = { x: e.clientX, y: e.clientY };
+        this.showCross({ clientX: e.clientX, clientY: e.clientY });
+      });
+    }
+    /** Shows the crosshair at its origin and sends the crosshair event; `sourceEvent` when the user moved. */
+    private showCross(sourceEvent?: { clientX: number; clientY: number }) {
+      const k = Math.round(this.ts.coordinateToLogical(this.origin.x)!);
+      const time = this.ts.points[k];
+      this.cross = time === undefined ? null : { time, price: 100 };
+      const param = { time, logical: k, point: { ...this.origin }, paneIndex: 0, ...(sourceEvent ? { sourceEvent } : {}) };
+      for (const fn of this.crosshair) fn(param);
+    }
+    /** What the library does on a zoom or a data change while the crosshair is shown: redo it from its origin. */
+    redo() {
+      if (this.cross) this.showCross();
+    }
     clearCrosshairPosition() {
       this.cross = null;
     }
     setCrosshairPosition(price: number, time: number) {
       this.cross = { time, price };
+      this.origin = { x: this.ts.logicalToCoordinate(this.ts.points.indexOf(time))!, y: this.origin.y };
     }
     pane() {
       return lenient({ getHeight: () => 400, getStretchFactor: () => 1, getHTMLElement: () => null });
@@ -167,8 +192,9 @@ vi.mock('lightweight-charts', async (original) => {
   const actual = await original<typeof import('lightweight-charts')>();
   return {
     ...actual,
-    createChart: () => {
+    createChart: (el: HTMLElement) => {
       const c = lw.lenient(new lw.Chart());
+      el.appendChild(c.canvas);
       lw.charts.push(c);
       return c;
     },
@@ -375,12 +401,18 @@ describe('the chart during fast play with the pointer on it', () => {
       const update = s.update.bind(s);
       Object.assign(s, { update: (...args: Parameters<typeof update>) => (calls.update++, update(...args)) });
     }
-    /** The pointer rests at x = 300 on the price pane, or leaves the chart; the library shows or hides the crosshair. */
-    const pointer = (on: boolean) => {
-      const k = Math.round(chart.ts.coordinateToLogical(300)!);
-      chart.cross = on ? { time: main.points[k].time, price: 100 } : null;
-      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 }, paneIndex: 0, sourceEvent: {} } : {})));
-    };
+    // The pane's canvas is what lies under the pointer (jsdom lays nothing out: it sits at 0, 0).
+    document.elementsFromPoint ??= () => [];
+    vi.spyOn(document, 'elementsFromPoint').mockImplementation(() => lw.charts.map((c) => c.canvas));
+    /** The pointer moves to x = 300 on the price pane, or leaves the chart; the library shows or hides the crosshair. */
+    const pointer = (on: boolean) =>
+      act(() => {
+        if (on) chart.canvas.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 100 }));
+        else {
+          chart.cross = null;
+          chart.crosshair.forEach((fn) => fn({}));
+        }
+      });
     /** The candle under the pointer, and the legend's first row. */
     const underPointer = () => main.points[Math.round(chart.ts.coordinateToLogical(300)!)] as unknown as { time: number; open: number; close: number };
     const legend = () => a.host.querySelector('.chart-legend .legend-row')?.textContent ?? '';
@@ -438,18 +470,37 @@ describe('the chart during fast play with the pointer on it', () => {
     expect(chart.crosshairRedone).toBe(0);
     expect(chart.cross?.time).toBe(underPointer().time);
 
-    // The library redoes a shown crosshair on its own (here after a zoom) from where it last put it, which
-    // was a candle's centre: it goes back under the pointer, not onto the candle at that spot.
+    // It was put back by a mouse move where the pointer rests, which the library takes as the user's own,
+    // so the spot it redoes the crosshair from is the pointer, not a candle's centre: after a zoom (3x
+    // out) the crosshair and the legend are still on the candle under the pointer.
+    expect(chart.origin.x).toBe(300);
     const shown = chart.ts.getVisibleLogicalRange()!;
     act(() => chart.ts.setVisibleLogicalRange({ from: shown.to - 3 * (shown.to - shown.from), to: shown.to }));
-    const stale = Math.round(chart.ts.coordinateToLogical(330)!);
-    expect(main.points[stale].time).not.toBe(underPointer().time);
-    chart.cross = { time: main.points[stale].time, price: 100 };
-    act(() => chart.crosshair.forEach((fn) => fn({ time: main.points[stale].time, logical: stale, point: { x: 330, y: 100 }, paneIndex: 0 })));
+    act(() => chart.redo());
     expect(chart.cross?.time).toBe(underPointer().time);
     expect(legend()).toContain(`O ${fmtPrice(underPointer().open)}`);
     expect(legend()).toContain(`C ${fmtPrice(underPointer().close)}`);
     act(() => chart.ts.setVisibleLogicalRange(shown));
+
+    // With a mouse button held (a drag) the library ignores that move: the crosshair is set on the candle
+    // under the pointer instead and the legend shows it. Past the newest candle it is hidden, and the
+    // legend shows the newest.
+    chart.pressed = true;
+    n = main.points.length;
+    act(() => store.stepForward());
+    await vi.waitFor(() => expect(main.points.length).toBe(n + 1));
+    expect(chart.cross?.time).toBe(underPointer().time);
+    expect(legend()).toContain(`C ${fmtPrice(underPointer().close)}`);
+    chart.pressed = false;
+    act(() => chart.canvas.dispatchEvent(new MouseEvent('mousemove', { clientX: 950, clientY: 100 })));
+    chart.pressed = true;
+    act(() => store.stepForward());
+    await vi.waitFor(() => expect(main.points.length).toBe(n + 2));
+    const newest = main.points.at(-1) as unknown as { close: number };
+    expect(chart.cross).toBeNull();
+    expect(legend()).toContain(`C ${fmtPrice(newest.close)}`);
+    chart.pressed = false;
+    pointer(true);
 
     /** Every series holds what a chart drawn afresh holds, on the candles that one holds. */
     const matchesFresh = async () => {
