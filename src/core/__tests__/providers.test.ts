@@ -364,7 +364,7 @@ describe('simulation provider', () => {
     p.advance(60);
     unsub();
     p.advance(60);
-    expect(seen.length).toBe(12); // 60s / 5s ticks, NOVA only, before unsubscribing
+    expect(seen.length).toBe(60 / p.market.config.tickSeconds); // one per tick, NOVA only, before unsubscribing
     expect((await p.listSymbols()).map((s) => s.symbol)).toContain('SIMX');
   });
 });

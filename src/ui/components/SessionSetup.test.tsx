@@ -19,12 +19,12 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-async function open() {
+async function open(mode: 'replay' | 'sim' = 'replay') {
   const { SessionSetup } = await import('./SessionSetup');
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
-  await act(async () => root.render(createElement(SessionSetup, { mode: 'replay', onClose: () => undefined })));
+  await act(async () => root.render(createElement(SessionSetup, { mode, onClose: () => undefined })));
   const dateField = () => document.querySelector<HTMLInputElement>('input[type=date]')!;
   return { root, dateField };
 }
@@ -173,5 +173,37 @@ describe('starts that overlap', () => {
     expect(store.useTrading.getState().session?.mode).toBe('sim');
     expect(store.useTrading.getState().loading).toBe(false);
     await store.endSession();
+  });
+});
+
+describe('the simulated market form', () => {
+  it('starts at 1x, real time, unless a speed was chosen before', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    const store = await import('../state/tradingStore');
+    const speed = () => [...document.querySelectorAll('label')].find((l) => l.querySelector('span')?.textContent === 'Speed')!.querySelector('select')!;
+    const form = await open('sim');
+    expect(speed().value).toBe('1');
+    expect(speed().selectedOptions[0].textContent).toBe('1x real time');
+    const start = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Start market')!;
+    await act(async () => start.click());
+    await vi.waitFor(() => expect(store.useTrading.getState().session?.mode).toBe('sim'));
+    expect(store.useTrading.getState().speed).toBe(1);
+    expect(store.useTrading.getState().playing).toBe(true);
+    act(() => form.root.unmount());
+    await store.endSession();
+
+    // A speed saved before, by this version or an older one, is kept.
+    useSettings.getState().update({ sim: { ...useSettings.getState().sim, speed: 30 } });
+    const again = await open('sim');
+    expect(speed().value).toBe('30');
+    act(() => again.root.unmount());
+  });
+
+  it('does not claim its tickers can never match a real one', async () => {
+    const form = await open('sim');
+    const text = document.body.textContent!;
+    expect(text).not.toMatch(/never uses or imitates real tickers/);
+    expect(text).toContain('The companies and their news are invented: a ticker that happens to match a real listing is a coincidence');
+    act(() => form.root.unmount());
   });
 });

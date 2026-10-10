@@ -95,7 +95,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   watchlist: ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'META'],
   indicators: DEFAULT_INDICATORS,
-  sim: { ...DEFAULT_SIM_CONFIG, speed: 10, startingBalance: 25_000 },
+  sim: { ...DEFAULT_SIM_CONFIG, speed: 1, startingBalance: 25_000 },
   alpacaFeed: 'iex',
   appearance: DEFAULT_APPEARANCE,
 };

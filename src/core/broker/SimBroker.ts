@@ -67,6 +67,8 @@ export interface BrokerState {
    * before the next bar. maxParticipation caps their total, not each order.
    */
   barVolumeUsed?: Record<string, number>;
+  /** How long each symbol's last bar lasted, in seconds (see impactVolume); 60 when not recorded. */
+  lastBarSeconds?: Record<string, number>;
   /** End time of the most recent processed bar (the broker's "now"). */
   clock: UnixSeconds;
   sessionDate: string;
@@ -1124,7 +1126,7 @@ export class SimBroker {
       this.s.orders.push(o);
       this.log('accepted', `${describe(o)} placed: the session ended`, o.id);
       const ext = this.symbolSession(pos.symbol) !== 'regular';
-      this.execute(o, last, time, Infinity, this.s.lastBar[pos.symbol]?.volume ?? 0, ext, new Set(), 'placed', time);
+      this.execute(o, last, time, Infinity, this.impactVolume(pos.symbol), ext, new Set(), 'placed', time);
       closing.push(o);
     }
     this.recordEquity(time);
@@ -1306,12 +1308,22 @@ export class SimBroker {
     const left = this.barCapacity(volume, this.s.barVolumeUsed?.[symbol] ?? 0);
     const qty = fillsNow && left >= o.quantity ? o.quantity : Math.min(o.quantity, this.barCapacity(volume));
     // Market and stop orders only trade in the regular session, at its spread.
-    return this.marketFill(actionSide(o.action), x, qty, volume, false).price;
+    return this.marketFill(actionSide(o.action), x, qty, this.impactVolume(symbol), false).price;
   }
 
   /** How far past a limit price must trade before it fills: nothing when touching it is enough, else one tick of its price. */
   private limitThrough(L: number): number {
     return this.cfg.limitFill === 'trade_through' ? tickOf(L) : 0;
+  }
+
+  /**
+   * The volume market impact is measured against for `symbol`'s last bar (or a bar of `volume` lasting
+   * `barSeconds`): the bar's volume, or for a bar shorter than a minute (the simulated market's price
+   * ticks) a minute's volume at its pace. So an order pays the same impact however often prices tick,
+   * as it would against a 1-minute bar; the volume cap still applies to each bar's own volume.
+   */
+  private impactVolume(symbol: string, volume = this.s.lastBar[symbol]?.volume ?? 0, barSeconds = this.s.lastBarSeconds?.[symbol] ?? 60): number {
+    return barSeconds > 0 && barSeconds < 60 ? (volume * 60) / barSeconds : volume;
   }
 
   /** Shares that can still trade against a bar of `volume` once `used` have: a bar without volume (none recorded) is not capped. */
@@ -1450,7 +1462,7 @@ export class SimBroker {
         reach(pos);
         // At the very start of the bar, for an order placed before it began: the bar's open set the price.
         const atOpen = seg === 0 && pos === path[0] && !startsAt.has(trig.order.id);
-        const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, done, atOpen ? 'open' : 'bar', bar.time + barSeconds);
+        const used = this.execute(trig.order, pos, t, capacity, this.impactVolume(symbol, bar.volume, barSeconds), ext, done, atOpen ? 'open' : 'bar', bar.time + barSeconds);
         capacity -= used;
         traded += used;
         // A trade opened (or reversed into) here starts at this level.
@@ -1462,13 +1474,14 @@ export class SimBroker {
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };
+    (this.s.lastBarSeconds ??= {})[symbol] = barSeconds;
     (this.s.barVolumeUsed ??= {})[symbol] = traded;
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
 
     const low = this.bar.low;
     if (low !== undefined) this.s.stepStart.low = Math.min(this.s.stepStart.low ?? low, low);
     this.bar = undefined;
-    this.recordEquity(bar.time + barSeconds);
+    this.recordEquity(bar.time + barSeconds, barSeconds < 60);
     this.touch();
     return this.s.fills.slice(fillsBefore);
   }
@@ -1486,12 +1499,19 @@ export class SimBroker {
     this.s.lastPrice[symbol.toUpperCase()] = price;
   }
 
-  private recordEquity(time: UnixSeconds): void {
+  /**
+   * Adds the equity at `time` to the curve, or updates the last point when it is for the same moment.
+   * Bars shorter than a minute (the simulated market's ticks) keep one point a minute, moved on to the
+   * latest tick, as 1-minute bars would: the curve grows no faster however often prices tick.
+   */
+  private recordEquity(time: UnixSeconds, subMinute = false): void {
     const eq = this.account().equity;
     const curve = this.s.equityCurve;
     const last = curve[curve.length - 1];
-    if (last && last.time === time) last.equity = eq;
-    else if (!last || time > last.time) curve.push({ time, equity: eq });
+    if (last && (last.time === time || (subMinute && time > last.time && Math.ceil(last.time / 60) === Math.ceil(time / 60)))) {
+      last.time = time;
+      last.equity = eq;
+    } else if (!last || time > last.time) curve.push({ time, equity: eq });
   }
 
   private intrabarPath(symbol: string, bar: Bar): number[] {
@@ -1595,11 +1615,11 @@ export class SimBroker {
     const capacity = this.barCapacity(bar.volume, used);
     const skip = new Set<string>();
     const fired = o.type === 'stop_limit' && !o.triggered;
-    let filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
+    let filled = this.execute(o, level, this.s.clock, capacity, this.impactVolume(o.symbol), session !== 'regular', skip, 'placed', this.s.clock);
     // A stop-limit whose stop has just fired is now a limit: one the market already meets fills at once.
     if (fired && o.triggered && isOpen(o) && !skip.has(o.id)) {
       const at = this.triggerLevel(o, last, last, session !== 'regular');
-      if (at !== null) filled = this.execute(o, at, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
+      if (at !== null) filled = this.execute(o, at, this.s.clock, capacity, this.impactVolume(o.symbol), session !== 'regular', skip, 'placed', this.s.clock);
     }
     if (filled > 0) (this.s.barVolumeUsed ??= {})[o.symbol] = used + filled;
     // A stop-limit may have triggered without filling; that's fine, it now rests as a limit.
@@ -1707,8 +1727,8 @@ export class SimBroker {
 
   /**
    * The price a marketable order (a market order, or a stop once it fires) gets for `qty` shares at path
-   * price `x` against a bar of `barVolume` shares: the quote (buys pay the ask, sells hit the bid), then
-   * slippage and market impact, rounded to the tick against the trader.
+   * price `x` against a bar of `barVolume` shares (see impactVolume): the quote (buys pay the ask, sells
+   * hit the bid), then slippage and market impact, rounded to the tick against the trader.
    */
   private marketFill(side: Side, x: number, qty: number, barVolume: number, ext: boolean): { price: number; quote: number } {
     const hs = halfSpread(this.cfg, x, ext);
