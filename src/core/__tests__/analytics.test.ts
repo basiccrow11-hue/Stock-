@@ -1535,6 +1535,7 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(entryPastStop(t)).toBe(false);
     expect([review.rMultiple, review.riskDollars, review.riskPctOfEquity]).toEqual([null, null, null]);
     expect(text).toContain("Risk not measurable: Your stop at 49.60, placed 2m after you entered, was at your average entry: it risked nothing before costs, so the trade's risk cannot be measured in R.");
+    expect(text).not.toContain('Stop filled past');
     expect(text).not.toContain('Entry filled past your stop');
     expect(text).not.toContain('Stop distance');
     expect(text).not.toMatch(/Risked/);
@@ -1697,6 +1698,16 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(challenge('achieved-rr-2')).toMatchObject({ status: 'failed', detail: 'A trade on X had no stop its risk could be measured from, so its R is unknown.' });
     const losses = Array.from({ length: 9 }, () => trip({ initialStop: 99, pnl: -100 }));
     expect(computeStats([...losses, t], [], 10_000).averageR).toBeCloseTo(-1, 9);
+  });
+
+  it('says what a breakeven stop that gapped past its price cost, in dollars, as there is no R', () => {
+    const { broker, next, result } = twoFills('long');
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 50.01, quantity: 300, tif: 'day' }).ok).toBe(true);
+    next(49.9, 49.95, 49.8, 49.85); // gaps through the stop
+    const { trip: t, review, text } = result();
+    expect([t.closed, t.avgExit, review.rMultiple]).toEqual([true, 49.9, null]);
+    expect(text).toContain('Stop filled past its price: Your stop at 50.01 filled at 49.90, 0.11 past it, which cost $33.00 on the 300 shares it closed.');
+    expect(text).not.toContain('well past');
   });
 
   it('cannot measure R from a short’s breakeven stop placed after several fills at the average as shown', () => {

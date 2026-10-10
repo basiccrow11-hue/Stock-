@@ -532,19 +532,24 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const main = mainExit(parts);
   const stopAt = main?.order.stopPrice;
   const exitPx = main?.price;
+  /**
+   * How far past the stop it filled (`past`), and whether that is more than slippage noise: two ticks of
+   * the price it filled at beyond the half spread every fill pays (on a sub-dollar stock that alone is
+   * many ticks), so rounding to the tick is not the fill going past the stop.
+   */
+  const stopSlip = (stop: number, px: number) => {
+    const past = (stop - px) * dir;
+    const mainFills = input.fills.filter((f) => f.orderId === main!.order.id && trip.fills.includes(f.id));
+    const halfSpread = mainFills.reduce((a, f) => a + f.spreadCost, 0) / Math.max(1, mainFills.reduce((a, f) => a + f.quantity, 0));
+    const beyond = past - halfSpread;
+    return { past, beyond, slipped: beyond >= 2 * (px >= 1 ? 0.01 : 0.0001) - 1e-9 };
+  };
   if (exitReason === 'stop_loss' && riskPerShare && stopAt !== undefined && exitPx !== undefined) {
     const inR = (px: number) => ((px - trip.avgEntry) * dir) / riskPerShare;
     const fmtR = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`;
-    // How far past the stop it filled: more than a quarter of the planned risk is not slippage noise.
-    // The half spread every fill pays is left out: on a sub-dollar stock it alone is many ticks.
-    const past = (stopAt - exitPx) * dir;
-    const mainFills = input.fills.filter((f) => f.orderId === main!.order.id && trip.fills.includes(f.id));
-    const halfSpread = mainFills.reduce((a, f) => a + f.spreadCost, 0) / Math.max(1, mainFills.reduce((a, f) => a + f.quantity, 0));
-    // At least two ticks of the price it filled at, so that rounding to the tick alone is not the fill
-    // going past the stop: a cent at $1 or more (many of a sub-dollar trade's ticks), else 0.0001.
-    const fillTick = exitPx >= 1 ? 0.01 : 0.0001;
-    const beyond = past - halfSpread;
-    const filledPast = beyond >= 2 * fillTick - 1e-9 && beyond > 0.25 * riskPerShare;
+    // Filled well past the stop: also more than a quarter of the planned risk.
+    const { past, beyond, slipped } = stopSlip(stopAt, exitPx);
+    const filledPast = slipped && beyond > 0.25 * riskPerShare;
     // The closing stop is judged by its own history: the stop an add brought with it (its own bracket)
     // starts at that add's stop loss, any other at the first stop; a price other than its start is the
     // user's move.
@@ -657,6 +662,14 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         }`,
       });
     }
+  } else if (exitReason === 'stop_loss' && riskPerShare === null && stopAt !== undefined && exitPx !== undefined && stopSlip(stopAt, exitPx).slipped) {
+    // With no R to measure it in (a breakeven stop, say), what the fill past the stop cost is said in dollars.
+    const { past } = stopSlip(stopAt, exitPx);
+    findings.push({
+      tone: 'neutral',
+      title: 'Stop filled past its price',
+      detail: `Your stop at ${formatTick(stopAt)} filled at ${formatTick(exitPx)}, ${dist(past)} past it, which cost ${money(past * main!.qty)} on the ${main!.qty} shares it closed. A stop turns into a market order when price reaches it and fills at the next price available.`,
+    });
   }
 
   if (pastTarget) {
