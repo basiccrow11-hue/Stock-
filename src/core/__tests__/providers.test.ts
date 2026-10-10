@@ -3,6 +3,7 @@ import { combineBars, parseCsv, parseTimestamp, tickerFromFileName } from '../da
 import { CsvDataProvider } from '../data/csvProvider';
 import { AlpacaProvider, PolygonProvider } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
+import { isDriven, type DrivenStreamingProvider, type StreamUpdate } from '../data/provider';
 import { et } from './helpers';
 import { formatExchangeDateTime } from '../time';
 
@@ -408,7 +409,33 @@ describe('simulation provider', () => {
     p.advance(60);
     unsub();
     p.advance(60);
-    expect(seen.length).toBe(60 / p.market.config.tickSeconds); // one per tick, NOVA only, before unsubscribing
+    expect(seen.length).toBe(60 / p.tickSeconds); // one per tick, NOVA only, before unsubscribing
     expect((await p.listSymbols()).map((s) => s.symbol)).toContain('SIMX');
+  });
+
+  it('gives a session all it needs through the streaming interface: symbols, clock, ticks to trade against, bars and news', () => {
+    const p: DrivenStreamingProvider = SimulationDataProvider.create('2026-10-08', { seed: 3, eventFrequency: 3 });
+    expect(isDriven(p)).toBe(true);
+    expect(p.symbols).toContain('NOVA');
+    const start = p.clock;
+    const updates: StreamUpdate[] = [];
+    p.subscribe(p.symbols, (u) => updates.push(u));
+    p.advance(30 * 60);
+    expect(p.clock).toBe(start + 30 * 60);
+    // Every update's tick is the stretch since the symbol's previous one, inside the minute bar it forms.
+    const nova = updates.filter((u) => u.symbol === 'NOVA');
+    expect(nova).toHaveLength((30 * 60) / p.tickSeconds);
+    for (const [i, u] of nova.entries()) {
+      expect(u.tick.time).toBe(start + i * p.tickSeconds);
+      expect(u.time).toBe(u.tick.time);
+      expect(u.bar.time).toBe(u.tick.time - (u.tick.time % 60));
+      expect(u.tick.high).toBeLessThanOrEqual(u.bar.high);
+      expect(u.tick.low).toBeGreaterThanOrEqual(u.bar.low);
+    }
+    // The bars so far end with the last update's minute, and news never runs ahead of the clock.
+    const bars = p.getHistory('NOVA');
+    expect(bars[bars.length - 1]).toEqual(nova[nova.length - 1].bar);
+    expect(p.events().length).toBeGreaterThan(0);
+    expect(p.events().every((e) => e.time <= p.clock && e.simulated)).toBe(true);
   });
 });

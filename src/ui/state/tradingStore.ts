@@ -11,6 +11,7 @@ import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type E
 import { ReplaySession, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
+import { isDriven, type StreamingDataProvider, type StreamUpdate, type Unsubscribe } from '../../core/data/provider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
 import { reviewTrade, type TradeReview, type TradingRules } from '../../core/learning/review';
@@ -110,8 +111,14 @@ export function registerSnapshotProvider(fn: (() => Promise<string | null>) | nu
 
 interface Engines {
   replay: ReplaySession | null;
-  sim: SimulationDataProvider | null;
+  /** The streaming session's prices (the simulated market), through the streaming interface only. */
+  stream: StreamingDataProvider<SimEvent> | null;
+  /** The streaming session's broker. */
   simBroker: SimBroker | null;
+  /** Ends the session's subscription to the stream. */
+  unsubscribe: Unsubscribe | null;
+  /** Per symbol, every minute bar stream updates have touched since the chart last heard, in its latest state (oldest first). */
+  streamTouched: Map<string, Map<number, Bar>>;
   processedTrips: Set<string>;
   /** Journal entries whose review waits for price after the exit, with the timeframe and trading rules it was made with. */
   watching: Map<string, { timeframe: Timeframe; rules: TradingRules }>;
@@ -127,8 +134,10 @@ interface Engines {
 
 const eng: Engines = {
   replay: null,
-  sim: null,
+  stream: null,
   simBroker: null,
+  unsubscribe: null,
+  streamTouched: new Map(),
   processedTrips: new Set(),
   watching: new Map(),
   noticedConflicts: new Set(),
@@ -188,7 +197,7 @@ function broker(): SimBroker | null {
 /** Revealed base bars for a symbol (replay) or generated history (sim). Never future data. */
 export function getBaseBars(symbol: string): Bar[] {
   if (eng.replay) return eng.replay.engineFor(symbol)?.visibleBaseBars() ?? [];
-  if (eng.sim) return eng.sim.getHistory(symbol);
+  if (eng.stream) return eng.stream.getHistory(symbol);
   return [];
 }
 
@@ -224,7 +233,7 @@ export function candleStartFor(symbol: string, t: UnixSeconds, timeframe: Timefr
 }
 
 export function getSimEventsFor(symbol: string): SimEvent[] {
-  return eng.sim ? eng.sim.market.events.filter((e) => e.symbol === symbol || e.symbol === 'MARKET') : [];
+  return eng.stream ? eng.stream.events().filter((e) => e.symbol === symbol || e.symbol === 'MARKET') : [];
 }
 
 /** "Day N" label used in blind mode: trading days from the start date of the blind session (default: this tab's). */
@@ -253,9 +262,9 @@ export function blindDayLabel(t: UnixSeconds, startDate = useTrading.getState().
 
 function computeQuotes(): Record<string, Quote> {
   const out: Record<string, Quote> = {};
-  const symbols = eng.replay ? eng.replay.symbols : eng.sim ? eng.sim.market.profiles.map((p) => p.symbol) : [];
+  const symbols = eng.replay ? eng.replay.symbols : eng.stream ? eng.stream.symbols : [];
   for (const sym of symbols) {
-    const bars = eng.replay ? null : eng.sim!.getHistory(sym);
+    const bars = eng.replay ? null : eng.stream!.getHistory(sym);
     const last = eng.replay ? eng.replay.engineFor(sym)?.lastBar() : bars![bars!.length - 1];
     if (!last) continue;
     const today = exchangeDate(last.time);
@@ -323,7 +332,7 @@ function publish(force = false): void {
     return;
   }
   const st = b.state;
-  const now = eng.replay ? eng.replay.now : eng.sim ? eng.sim.market.clock : 0;
+  const now = eng.replay ? eng.replay.now : eng.stream ? eng.stream.clock : 0;
   const finished = eng.replay ? eng.replay.finished : false;
   useTrading.setState({
     now,
@@ -337,7 +346,7 @@ function publish(force = false): void {
     events: st.events.slice(-200),
     equityCurve: publishedCurve(st.equityCurve),
     quotes: computeQuotes(),
-    simEvents: eng.sim ? eng.sim.market.events.slice(-100) : [],
+    simEvents: eng.stream ? eng.stream.events().slice(-100) : [],
     version: st.version,
   });
   announceConflicts(st.orders);
@@ -639,25 +648,42 @@ function loop(): void {
   if (eng.replay) {
     const revealed = eng.replay.advance(dt * s.speed);
     afterChange(revealed);
-  } else if (eng.sim && eng.simBroker) {
-    const tickSecs = eng.sim.market.config.tickSeconds;
-    eng.simCarry += dt * s.speed;
-    const steps = Math.floor(eng.simCarry / tickSecs);
-    if (steps <= 0) return;
-    eng.simCarry -= steps * tickSecs;
-    const updates = eng.sim.advance(steps * tickSecs);
-    // Per symbol, every minute this step touched in its final state (Maps keep first-insert order: oldest first).
-    const touched = new Map<string, Map<number, Bar>>();
-    for (const u of updates) {
-      eng.simBroker.onBar(u.symbol, u.tick, tickSecs);
-      let bars = touched.get(u.symbol);
-      if (!bars) touched.set(u.symbol, (bars = new Map()));
-      bars.set(u.bar.time, u.bar);
+  } else if (eng.stream && eng.simBroker) {
+    // A stream the app drives moves on by whole ticks at the chosen speed; its updates reach the
+    // broker as they come (onStreamUpdate) and are shown here.
+    if (isDriven(eng.stream)) {
+      const tickSecs = eng.stream.tickSeconds;
+      eng.simCarry += dt * s.speed;
+      const steps = Math.floor(eng.simCarry / tickSecs);
+      if (steps <= 0) return;
+      eng.simCarry -= steps * tickSecs;
+      eng.stream.advance(steps * tickSecs);
     }
-    for (const [symbol, bars] of touched) emitChart({ type: 'tick', symbol, bars: [...bars.values()] });
-    publish();
-    void processClosedTrips();
+    showStream(false);
   }
+}
+
+/** A stream update: its tick is traded against at once, and the chart hears of its minute bar when the step is shown. */
+function onStreamUpdate(u: StreamUpdate): void {
+  eng.simBroker?.onBar(u.symbol, u.tick, eng.stream!.tickSeconds);
+  let bars = eng.streamTouched.get(u.symbol);
+  if (!bars) eng.streamTouched.set(u.symbol, (bars = new Map()));
+  bars.set(u.bar.time, u.bar);
+}
+
+/**
+ * Shows the stream updates since the last call: the chart gets every minute they touched, in its final
+ * state, so a stalled frame leaves no gap (or redraws, `reset`), then the store is published and
+ * closed trades journaled. Nothing to show, nothing done.
+ */
+function showStream(reset: boolean): void {
+  const touched = eng.streamTouched;
+  if (!touched.size && !reset) return;
+  eng.streamTouched = new Map();
+  if (reset) emitChart({ type: 'reset' });
+  else for (const [symbol, bars] of touched) emitChart({ type: 'tick', symbol, bars: [...bars.values()] });
+  publish(reset);
+  void processClosedTrips();
 }
 
 function startTimer(): void {
@@ -679,8 +705,11 @@ function resetEngines(): void {
   settleWatchedReviews(true);
   eng.watching = new Map();
   eng.replay = null;
-  eng.sim = null;
+  eng.unsubscribe?.();
+  eng.unsubscribe = null;
+  eng.stream = null;
   eng.simBroker = null;
+  eng.streamTouched = new Map();
   eng.processedTrips = new Set();
   eng.noticedConflicts = new Set();
   eng.simCarry = 0;
@@ -790,20 +819,21 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
   resetEngines();
   const today = new Date().toISOString().slice(0, 10);
   const startDate = isTradingDay(today) ? today : nextTradingDay(today);
-  const provider = SimulationDataProvider.create(startDate, opts.config);
+  const stream: StreamingDataProvider<SimEvent> = SimulationDataProvider.create(startDate, opts.config);
   const id = newId('sim');
-  eng.sim = provider;
+  eng.stream = stream;
   eng.simBroker = new SimBroker({ startingBalance: opts.startingBalance, config: getSettings().execution, idPrefix: id, source: 'SIMULATED' });
   // Prime marks with the warm-up history.
-  for (const p of provider.market.profiles) {
-    const h = provider.getHistory(p.symbol);
+  for (const symbol of stream.symbols) {
+    const h = stream.getHistory(symbol);
     const last = h[h.length - 1];
-    if (last) eng.simBroker.onBar(p.symbol, last, 60);
+    if (last) eng.simBroker.onBar(symbol, last, 60);
   }
-  const symbols = provider.market.profiles.map((p) => p.symbol);
+  eng.unsubscribe = stream.subscribe(stream.symbols, onStreamUpdate);
+  const symbols = [...stream.symbols];
   useTrading.setState({
     ...EMPTY,
-    session: { id, mode: 'sim', source: 'SIMULATED', symbols, start: provider.market.clock, end: null, startDate, blind: false, challengeId: opts.challengeId, label: 'Simulated market' },
+    session: { id, mode: 'sim', source: 'SIMULATED', symbols, start: stream.clock, end: null, startDate, blind: false, challengeId: opts.challengeId, label: 'Simulated market' },
     activeSymbol: symbols[0],
     timeframe: '1m',
     speed: opts.speed,
@@ -872,12 +902,9 @@ export function setActiveSymbol(symbol: string): void {
 
 export function stepForward(): void {
   if (eng.replay) afterChange(eng.replay.step());
-  else if (eng.sim && eng.simBroker) {
-    const updates = eng.sim.advance(60);
-    for (const u of updates) eng.simBroker.onBar(u.symbol, u.tick, eng.sim.market.config.tickSeconds);
-    emitChart({ type: 'reset' });
-    publish(true);
-    void processClosedTrips();
+  else if (eng.stream && eng.simBroker && isDriven(eng.stream)) {
+    eng.stream.advance(60);
+    showStream(true);
   }
 }
 
@@ -947,8 +974,8 @@ export function jumpTo(time: UnixSeconds): void {
 
 /** The simulated market's broker, its clock brought up to the market's time for an order action. */
 function simBrokerNow(): SimBroker | null {
-  if (!eng.sim || !eng.simBroker) return null;
-  eng.simBroker.syncClock(eng.sim.market.clock);
+  if (!eng.stream || !eng.simBroker) return null;
+  eng.simBroker.syncClock(eng.stream.clock);
   return eng.simBroker;
 }
 
@@ -1030,7 +1057,7 @@ export function closeReview(): void {
 
 /** Where an order would be expected to fill if placed now, with its costs (SimBroker.estimateFill), at the time submit would place it. */
 export function estimateFill(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'quantity' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number | null {
-  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.estimateFill(req, now) ?? null;
 }
 
@@ -1040,25 +1067,25 @@ export function estimateFill(req: Pick<OrderRequest, 'symbol' | 'action' | 'type
  * place it.
  */
 export function tradeRisk(req: OrderRequest): TradeRisk | null {
-  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.tradeRisk(req, now) ?? null;
 }
 
 /** What submit would say is wrong with a Buy or Short order's stop loss or target (SimBroker.bracketErrors), at the time submit would place it. */
 export function bracketErrors(req: OrderRequest): string[] {
-  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.bracketErrors(req, now) ?? [];
 }
 
 /** Size by risk: the most shares whose trade risks at most `riskPct`% and that submit would accept (SimBroker.sizeByRisk). */
 export function sizeByRisk(input: Omit<OrderRequest, 'quantity'>, riskPct: number): ReturnType<SimBroker['sizeByRisk']> {
-  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.sizeByRisk(input, riskPct, now) ?? { ok: false, error: 'Start a session first.' };
 }
 
 /** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */
 export function affordableQuantity(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number {
-  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.affordableQuantity(req, now) ?? 0;
 }
 

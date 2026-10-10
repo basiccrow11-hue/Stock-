@@ -154,7 +154,8 @@ src/ui/              React UI
   state/             zustand stores; tradingStore runs the play loop and bridges engine → UI;
                      streakStore tracks active practice time
   theme/             themes, colour maths (WCAG contrast) and the resolved palette for CSS and charts
-  chart/             lightweight-charts wrapper, drawing layer, line charts
+  chart/             lightweight-charts wrapper, drawing layer, line charts, journal snapshots drawn
+                     off screen from the same chart parts
   components/        terminal panels, order ticket, dialogs
   pages/             backtest, journal, analytics, challenges, settings
 vite.config.ts       dev/preview proxy for vendor APIs, server-side key injection
@@ -163,3 +164,5 @@ vercel.json          build settings, proxy rewrites, security headers
 ```
 
 The engine has no browser dependencies, so new data sources plug in by implementing `HistoricalDataProvider` (see `src/core/data/provider.ts`) and registering it in `src/ui/state/dataRegistry.ts`.
+
+A streaming session (today, the simulated market) reaches its prices only through `StreamingDataProvider`: its symbols, its clock, updates by subscription (each with the tick that orders fill against), the bars so far and its news. The simulated market is a `DrivenStreamingProvider`, a stream whose clock the app moves at the chosen speed; a live feed would implement the same interface and push updates on its own clock instead. No live feed ships: the build environment could not reach any market-data provider to build and test one against.

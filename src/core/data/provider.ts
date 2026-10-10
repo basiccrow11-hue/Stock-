@@ -59,12 +59,50 @@ export interface StreamUpdate {
   bar: Bar;
   isNewBar: boolean;
   time: UnixSeconds;
+  /** What traded since the symbol's previous update, as a bar lasting the stream's tickSeconds: orders fill against it. */
+  tick: Bar;
 }
 
-export interface StreamingDataProvider extends MarketDataProvider {
-  subscribe(symbols: string[], onUpdate: (u: StreamUpdate) => void): Unsubscribe;
+/** News a stream reports alongside its prices (shown on the chart and in the News tab). */
+export interface StreamEvent {
+  id: string;
+  time: UnixSeconds;
+  /** Ticker, or 'MARKET' for market-wide news. */
+  symbol: string;
+  type: string;
+  headline: string;
+  /** Expected price impact in %. */
+  impactPct: number;
+  simulated: boolean;
+}
+
+/**
+ * A source of prices as they happen. A trading session needs only this: its symbols, its clock,
+ * updates as they come (subscribe), the bars so far and its news, so any stream can take the
+ * simulated market's place.
+ */
+export interface StreamingDataProvider<E extends StreamEvent = StreamEvent> extends MarketDataProvider {
+  /** The symbols it streams, in the order to list them. */
+  readonly symbols: readonly string[];
+  /** The time of its latest update. */
+  readonly clock: UnixSeconds;
+  /** Seconds each update covers (the length of its tick bar). */
+  readonly tickSeconds: number;
+  subscribe(symbols: readonly string[], onUpdate: (u: StreamUpdate) => void): Unsubscribe;
   /** Completed + forming bars up to now (never beyond the provider's current clock). */
   getHistory(symbol: string): Bar[];
+  /** Its news so far, oldest first. */
+  events(): readonly E[];
+}
+
+/** A stream whose clock the app moves (the simulated market, played at any speed), rather than one that runs on real time. */
+export interface DrivenStreamingProvider<E extends StreamEvent = StreamEvent> extends StreamingDataProvider<E> {
+  /** Moves the clock on by `seconds`, delivering every update in between to subscribers, in time order. */
+  advance(seconds: number): void;
+}
+
+export function isDriven<E extends StreamEvent>(p: StreamingDataProvider<E>): p is DrivenStreamingProvider<E> {
+  return typeof (p as DrivenStreamingProvider<E>).advance === 'function';
 }
 
 export class DataProviderError extends Error {
