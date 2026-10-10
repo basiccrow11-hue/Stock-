@@ -11,7 +11,7 @@
  * drawings, and instead of the screen's scroll and zoom it shows the trade from shortly before its
  * entry to the close.
  */
-import { PriceScaleMode, createChart, createSeriesMarkers, createTextWatermark, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
+import { PriceScaleMode, createChart, createSeriesMarkers, createTextWatermark, type IChartApi } from 'lightweight-charts';
 import type { Bar, DataSourceKind, Fill, Timeframe, UnixSeconds } from '../../core/types';
 import type { SimEvent } from '../../core/sim/SimMarket';
 import { aggregateBars, bucketFor, ownCandles } from '../../core/data/aggregate';
@@ -22,7 +22,7 @@ import { blindDayLabel } from '../state/tradingStore';
 import { resolved } from '../theme/useTheme';
 import { CHART_LOCALE } from '../services/format';
 import { addMainSeries, chartOptions, mainPoint, mainPriceFormat, priceScaleMode, valueDecimals, valueFormat } from './chartTheme';
-import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, fillMarker, indicatorPoint, indicatorSpec, newsMarker, timeLabels, toJpeg, volumePoint, watermarkLines, withHistory } from './chartParts';
+import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, chartMarkers, indicatorPoint, indicatorSpec, timeLabels, toJpeg, volumePoint, watermarkLines, withHistory } from './chartParts';
 import { blindChartShift, fromChartTime, toChartTime } from './ChartView';
 
 /** Everything the picture shows, taken when the trade closed: later changes to the session do not reach it. */
@@ -147,11 +147,8 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     }
     chart.panes()[0].setStretchFactor(1);
 
-    const markers: SeriesMarker<Time>[] = [];
-    for (const f of scene.fills) markers.push(fillMarker(f, ct(candleStart(f.time)), pal));
-    for (const ev of scene.news) markers.push(newsMarker(ev, ct(candleStart(ev.time)), pal));
-    markers.sort((a, b) => (a.time as number) - (b.time as number));
-    createSeriesMarkers(series, markers);
+    // An earlier trade's fills and earlier news, from before the first candle, are left out, as on screen.
+    createSeriesMarkers(series, chartMarkers(scene.fills, scene.news, candleStart, candles[0].time, ct, pal));
 
     // Set once every series has its data, so nothing moves it afterwards; the screen's room after the last candle.
     chart.timeScale().setVisibleLogicalRange({ from: 0, to: candles.length - 1 + RIGHT_OFFSET });
