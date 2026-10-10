@@ -167,6 +167,10 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     idPrefix: 'bt',
     source: p.source,
   });
+  // A signal on the last warm-up candle is placed as the first bar opens, so the broker needs that
+  // candle's close, as a replay's broker has the last bar before its start. Only the price: no order
+  // exists to fill, and the clock, the equity curve and the statistics start with the first bar.
+  if (warmup.length) broker.mark(symbol, warmup[warmup.length - 1].close);
   const signals: SignalRecord[] = [];
   let pendingEntry: { action: OrderAction; candleTime: UnixSeconds; ref: number } | null = null;
   // The last warm-up candle has closed by the first bar, which evaluates it as a bar of its own day would.
