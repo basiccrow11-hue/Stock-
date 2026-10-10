@@ -79,7 +79,7 @@ describe('the simulated market on the chart', () => {
     const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     try {
-      store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 300 });
+      expect(await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 300 })).toBe(true);
       const symbol = store.useTrading.getState().activeSymbol;
       const chart = store.getBaseBars(symbol);
       const off = store.onChartEvent((e) => {
@@ -97,6 +97,36 @@ describe('the simulated market on the chart', () => {
       const truth = store.getBaseBars(symbol);
       expect(chart.length).toBe(truth.length);
       expect(chart).toEqual(truth);
+    } finally {
+      vi.useRealTimers();
+      now.mockRestore();
+      await store.endSession();
+    }
+  });
+
+  it('moves like a live tape at 1x: a new price every second of real time', async () => {
+    const store = await import('./tradingStore');
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      expect(await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 1 })).toBe(true);
+      const symbol = store.useTrading.getState().activeSymbol;
+      const start = store.useTrading.getState().now;
+      const ticks: number[] = [];
+      const off = store.onChartEvent((e) => {
+        if (e.type === 'tick' && e.symbol === symbol) ticks.push(clock);
+      });
+      store.play();
+      // Three seconds of real time, in the loop's 50 ms frames.
+      for (let i = 0; i < 60; i++) {
+        clock += 50;
+        vi.advanceTimersByTime(50);
+      }
+      off();
+      store.pause();
+      expect(ticks).toEqual([1000, 2000, 3000]);
+      expect(store.useTrading.getState().now - start).toBe(3);
     } finally {
       vi.useRealTimers();
       now.mockRestore();
