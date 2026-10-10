@@ -10,7 +10,7 @@ import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../typ
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, equityBeforeEntry, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
-import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, formatDuration, formatExchangeDateTime, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
 import { formatTick } from '../util/math';
 import { pctAgainst } from '../risk/risk';
 
@@ -74,6 +74,14 @@ export interface TradeReview {
   riskLimitPct?: number;
   /** Adds past the initial stop moved the average entry past it: the trade risked more than planned. */
   addedPastStop?: boolean;
+  /**
+   * The most the trade had at stake over its life (riskOverLife), when that was more than the risk
+   * planned to its first stop, or that could not be measured. Absent on older reviews.
+   */
+  largestRiskDollars?: number;
+  largestRiskPct?: number | null;
+  /** Some shares had no working stop after the trade had one (RoundTrip.unprotectedAt). Absent on older reviews. */
+  unprotected?: boolean;
   equityAtEntry: number;
   atrAtEntry: number | null;
   stopDistanceAtr: number | null;
@@ -153,6 +161,37 @@ export function equityAt(curve: readonly EquityPoint[], time: number, fallback: 
     eq = p.equity;
   }
   return eq;
+}
+
+/** What a trade had at stake over its life: see riskOverLife. */
+export interface LifeRisk {
+  /** The largest of the measures below that is known, in dollars; null when none is. */
+  dollars: number | null;
+  /** More was at risk to its working stops, as some bar began, than was planned to its first stop. */
+  grew: boolean;
+  /** Its open loss before its stop came (placed after entry, or with an add) was more than either. */
+  beforeStop: boolean;
+  /** Some shares had no working stop after the trade had one: the loss on them was not limited. */
+  unprotected: boolean;
+}
+
+/**
+ * The most a trade had at stake over its life, as its review, its risk rule and the challenges count
+ * it: the larger of the risk planned to its first stop (`planned`, in dollars), the most at risk to its
+ * working stops as any bar began (a stop moved further away, shares added with a wider stop:
+ * RoundTrip.maxRisk), and, when its stop came after entry, the largest open loss it had before that
+ * (RoundTrip.lossBeforeStop). Trades recorded before these were tracked have only the planned risk.
+ */
+export function riskOverLife(trip: RoundTrip, planned: number | null): LifeRisk {
+  const known = [planned, trip.maxRisk, trip.lossBeforeStop].filter((x): x is number => x !== null && x !== undefined);
+  const dollars = known.length ? Math.max(...known) : null;
+  const atStops = Math.max(planned ?? 0, trip.maxRisk ?? 0);
+  return {
+    dollars,
+    grew: trip.maxRisk !== undefined && trip.maxRisk > (planned ?? 0) + 0.005,
+    beforeStop: trip.lossBeforeStop !== undefined && trip.lossBeforeStop > atStops + 0.005,
+    unprotected: trip.unprotectedAt !== undefined,
+  };
 }
 
 /** An excursion of `dollars` (open P/L), also per share, as % of the position and in R, at the trade's full size. */
@@ -308,6 +347,10 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const equityAtEntry = equityBeforeEntry(trip, input.fills, input.equityCurve, input.startingBalance);
   const riskDollars = riskPerShare !== null ? riskPerShare * trip.maxQuantity : null;
   const riskPctOfEquity = riskDollars !== null && equityAtEntry > 0 ? (riskDollars / equityAtEntry) * 100 : null;
+  const life = riskOverLife(trip, riskDollars);
+  const lifePct = life.dollars !== null && equityAtEntry > 0 ? (life.dollars / equityAtEntry) * 100 : null;
+  // More at stake at some point than planned (or a measure where the plan had none).
+  const largest = life.dollars !== null && (riskDollars === null || life.dollars > riskDollars + 0.005) ? life.dollars : null;
 
   // ATR on the trading timeframe, from candles that had completed before entry.
   const before = input.revealedBars.filter((b) => b.time < trip.entryTime);
@@ -400,7 +443,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push(
       trip.initialStop === undefined
         ? { tone: 'bad', title: 'No stop loss', detail: `Your risk was undefined. ${worstText}` }
-        : trip.stopFromAdd
+        : trip.stopPlacedAt !== undefined
+          ? {
+              tone: 'bad',
+              title: 'Risk not measurable',
+              detail: `Your stop at ${formatTick(trip.initialStop)}, placed ${formatDuration(trip.stopPlacedAt - trip.entryTime)} after you entered, sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain rather than capping a loss, so the trade's risk cannot be measured in R. ${worstText}`,
+            }
+          : trip.stopFromAdd
           ? { tone: 'bad', title: 'No stop on your first entry', detail: `${stopPastAverage(trip.initialStop)} ${worstText}` }
           : { tone: 'bad', title: 'Risk not measurable', detail: `Your entry filled past your stop at ${formatTick(trip.initialStop)}, so the trade's risk cannot be measured in R. ${worstText}` },
     );
@@ -422,6 +471,19 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry! < 0.01 ? atrAtEntry!.toFixed(4) : dist(atrAtEntry!)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
+    });
+  }
+
+  // A stop placed as its own order after entry: how long the trade went without one, and what it cost.
+  if (trip.stopPlacedAt !== undefined && trip.stopPlacedAt > trip.entryTime) {
+    const lost = trip.lossBeforeStop ?? 0;
+    const inR = riskDollars ? ` (${(lost / riskDollars).toFixed(2)}R)` : '';
+    findings.push({
+      tone: riskDollars === null ? (lost > 0.005 ? 'bad' : 'neutral') : lost > riskDollars + 0.005 ? 'bad' : 'neutral',
+      title: `Stop placed ${formatDuration(trip.stopPlacedAt - trip.entryTime)} after entry`,
+      detail: `Your stop at ${formatTick(trip.initialStop!)} was its own order, placed after you entered. Until then the trade had no stop, ${
+        lost > 0.005 ? `and its open loss reached ${money(lost)}${inR}${riskDollars !== null && lost > riskDollars + 0.005 ? ', more than the stop then risked' : ''}` : 'though price did not go against you in that time'
+      }. A stop loss set with the entry in the ticket protects a trade from its first moment.`,
     });
   }
 
@@ -616,11 +678,26 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       title: 'Added past your stop',
       detail: `You added at prices past your original stop at ${formatTick(trip.initialStop!)}, which moved your average entry to ${formatTick(trip.avgEntry)}. Your plan risked ${dist(riskPerShare!)} per share from your first entry at ${formatTick(bracketEntry)} (${money(riskDollars!)} at this size). Shares added past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
     });
+  } else if (riskPctOfEquity !== null && largest !== null && lifePct !== null) {
+    findings.push({
+      tone: lifePct > rules.maxRiskPctPerTrade + 1e-9 ? 'bad' : 'neutral',
+      title: `Risked up to ${pctAgainst(lifePct, rules.maxRiskPctPerTrade)}% of the account`,
+      detail: `${money(riskDollars!)} (${riskPctOfEquity.toFixed(2)}%) was at risk to your stop as planned, but ${
+        life.beforeStop ? `the trade's open loss reached ${money(largest)} before your stop was placed` : `${money(largest)} was at risk to your stops at one point, after a stop moved further from your entry or shares were added with a wider stop`
+      }, with ${money(equityAtEntry)} equity at entry. Your rule is ${rules.maxRiskPctPerTrade}% or less, counted at the trade's largest.`,
+    });
   } else if (riskPctOfEquity !== null) {
     findings.push({
       tone: riskPctOfEquity > rules.maxRiskPctPerTrade + 1e-9 ? 'bad' : 'good',
       title: `Risked ${pctAgainst(riskPctOfEquity, rules.maxRiskPctPerTrade)}% of the account`,
       detail: `${money(riskDollars!)} at risk to your stop with ${money(equityAtEntry)} equity. Your rule is ${rules.maxRiskPctPerTrade}% or less.`,
+    });
+  }
+  if (life.unprotected) {
+    findings.push({
+      tone: 'bad',
+      title: 'Shares left without a stop',
+      detail: `From ${formatExchangeDateTime(trip.unprotectedAt!)}, ${trip.unprotectedQty} of your shares had no working stop: a stop was cancelled or expired, covered fewer shares than you held, or shares were bought without one. The loss on them was not limited.`,
     });
   }
 
@@ -637,6 +714,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     riskPctOfEquity,
     riskLimitPct: rules.maxRiskPctPerTrade,
     ...(addedPastStop ? { addedPastStop } : {}),
+    ...(largest !== null ? { largestRiskDollars: largest, largestRiskPct: equityAtEntry > 0 ? (largest / equityAtEntry) * 100 : null } : {}),
+    ...(life.unprotected ? { unprotected: true } : {}),
     equityAtEntry,
     atrAtEntry,
     stopDistanceAtr,
@@ -659,26 +738,33 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   const { trip, rules, allTrips } = input;
   const out: RuleCheck[] = [];
   const hasStop = trip.initialStop !== undefined;
-  // A stop that only came with an add leaves the first entry without one.
-  const stopAtEntry = hasStop && !trip.stopFromAdd;
   if (rules.requireStopLoss) {
-    out.push({
-      rule: 'Use a stop loss',
-      passed: stopAtEntry,
-      detail: stopAtEntry ? `Stop at ${formatTick(trip.initialStop!)}` : hasStop ? `No stop at entry (one came with a later add, at ${formatTick(trip.initialStop!)})` : 'No stop was attached at entry',
-    });
+    // A stop placed after entry counts, as does one an add brought; the time without it is counted in
+    // the risk rule (the loss before the stop came) and named in the review.
+    const late = trip.stopPlacedAt !== undefined ? `, placed ${formatDuration(trip.stopPlacedAt - trip.entryTime)} after entry` : trip.stopFromAdd ? ', which came with a later add' : '';
+    out.push({ rule: 'Use a stop loss', passed: hasStop, detail: hasStop ? `Stop at ${formatTick(trip.initialStop!)}${late}` : 'The trade never had a stop' });
   }
   const addedPastStop = riskBasis(trip)?.from === 'first';
+  // Counted at the trade's largest over its life (riskOverLife), against the equity it opened with.
+  const plannedRisk = initialRiskPerShare(trip);
+  const life = riskOverLife(trip, plannedRisk !== null ? plannedRisk * trip.maxQuantity : null);
+  const equityAtEntry = equityBeforeEntry(trip, input.fills, input.equityCurve, input.startingBalance);
+  const lifePct = life.dollars !== null && equityAtEntry > 0 ? (life.dollars / equityAtEntry) * 100 : null;
+  const pct = lifePct !== null && (riskPctOfEquity === null || lifePct > riskPctOfEquity) ? lifePct : riskPctOfEquity;
   out.push({
     rule: `Risk ≤ ${rules.maxRiskPctPerTrade}% per trade`,
-    passed: addedPastStop ? false : riskPctOfEquity === null ? (hasStop ? null : false) : riskPctOfEquity <= rules.maxRiskPctPerTrade + 1e-9,
+    passed: addedPastStop || life.unprotected ? false : pct === null ? (hasStop ? null : false) : pct <= rules.maxRiskPctPerTrade + 1e-9,
     detail: addedPastStop
       ? 'Added past your stop: more than the planned risk'
-      : riskPctOfEquity === null
-        ? hasStop
-          ? 'Not measurable: the stop sat past your average entry'
-          : 'Risk undefined without a stop'
-        : `${pctAgainst(riskPctOfEquity, rules.maxRiskPctPerTrade)}%`,
+      : life.unprotected
+        ? `${trip.unprotectedQty} shares had no stop from ${formatExchangeDateTime(trip.unprotectedAt!)}`
+        : pct === null
+          ? hasStop
+            ? 'Not measurable: the stop sat past your average entry'
+            : 'Risk undefined without a stop'
+          : pct !== riskPctOfEquity
+            ? `${pctAgainst(pct, rules.maxRiskPctPerTrade)}% at its largest${riskPctOfEquity !== null ? ` (${riskPctOfEquity.toFixed(2)}% planned)` : life.beforeStop ? ', lost before its stop was placed' : ''}`
+            : `${pctAgainst(pct, rules.maxRiskPctPerTrade)}%`,
   });
   if (rules.minRewardRisk > 0) {
     out.push({

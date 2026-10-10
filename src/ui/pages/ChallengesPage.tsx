@@ -1,7 +1,7 @@
 /** Challenge mode: pick a challenge, start a session for it, see past attempts. */
 import { CHALLENGES } from '../../core/challenges/challenges';
 import { useChallenges } from '../state/challengeStore';
-import { EmptyState } from '../components/common';
+import { EmptyState, SourceBadge } from '../components/common';
 import { money } from '../services/format';
 import { StreakPanel } from '../components/Streak';
 
@@ -73,7 +73,15 @@ export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mod
                   <tr key={a.id}>
                     <td className="mono small">{new Date(a.startedAt).toLocaleString('en-US')}</td>
                     <td>{CHALLENGES.find((c) => c.id === a.challengeId)?.title ?? a.challengeId}</td>
-                    <td className="small">{a.label}</td>
+                    <td className="small">
+                      {a.label}
+                      {a.source && (
+                        <>
+                          {' '}
+                          <SourceBadge source={a.source} />
+                        </>
+                      )}
+                    </td>
                     <td>
                       <span className={`badge ${a.result.status === 'passed' ? 'success' : a.result.status === 'failed' ? 'error' : 'neutral'}`}>{a.result.status === 'in_progress' ? 'abandoned' : a.result.status}</span>
                       {!a.result.official && <span className="badge warn" style={{ marginLeft: 4 }}>unofficial</span>}

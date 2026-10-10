@@ -299,12 +299,17 @@ describe('order validation', () => {
     expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 50 }).ok).toBe(false);
   });
 
-  it('does not allow selling more than is available after open exit orders', () => {
+  it('lets exits overlap, never past the shares held, and cuts the others when one fills', () => {
     const { broker } = setup();
     broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
-    broker.submit({ symbol: S, action: 'sell', type: 'limit', quantity: 8, limitPrice: 110 });
-    expect(broker.submit({ symbol: S, action: 'sell', type: 'market', quantity: 3 }).ok).toBe(false);
-    expect(broker.submit({ symbol: S, action: 'sell', type: 'market', quantity: 2 }).ok).toBe(true);
+    const target = broker.submit({ symbol: S, action: 'sell', type: 'limit', quantity: 8, limitPrice: 110 }).order!;
+    expect(broker.submit({ symbol: S, action: 'sell', type: 'market', quantity: 11 })).toMatchObject({ ok: false, error: 'You hold 10 TEST: sell 10 shares or fewer.' });
+    const r = broker.submit({ symbol: S, action: 'sell', type: 'market', quantity: 3 });
+    expect(r.ok).toBe(true);
+    expect(r.notes).toEqual(['Your other sell orders on TEST are for some of these shares too: whichever fills first takes them, and the others are cut to the shares still held.']);
+    expect(broker.position(S).quantity).toBe(7);
+    expect(broker.state.orders.find((o) => o.id === target.id)).toMatchObject({ status: 'working', quantity: 7 });
+    expect(broker.modify(target.id, { quantity: 8 })).toMatchObject({ ok: false, error: 'An exit can be for at most the 7 shares held.' });
   });
 
   it('rejects brackets on the wrong side of the entry', () => {
@@ -1834,5 +1839,110 @@ describe('an add still filling when its own stop loss or take profit fills, and 
     broker.onBar('AAA', bar(et('2025-01-15', '09:30'), 49.9, 50, 49.85, 49.95));
     expect(broker.position('AAA').quantity).toBe(0);
     expect(broker.state.roundTrips.every((t) => t.closed)).toBe(true);
+  });
+});
+
+describe('exits placed after entry, and the risk over a trade’s life', () => {
+  it('makes a stop and a target placed after a plain entry the trade’s own, and the target filling cancels the stop', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 });
+    next(100, 100.5, 99.8, 100.2);
+    const placedAt = broker.state.clock;
+    const stop = broker.submit({ symbol: S, action: 'sell', type: 'stop', stopPrice: 99, quantity: 100, tif: 'gtc' });
+    const target = broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 102, quantity: 100, tif: 'gtc' });
+    expect(stop.ok && target.ok).toBe(true);
+    expect(target.notes).toEqual(['Your other sell orders on TEST are for some of these shares too: whichever fills first takes them, and the others are cut to the shares still held.']);
+    expect(broker.state.roundTrips[0]).toMatchObject({ initialStop: 99, stopPlacedAt: placedAt, initialTarget: 102, targetPlacedAt: placedAt });
+    expect(riskBasis(broker.state.roundTrips[0])).toEqual({ entry: 100, risk: 1, from: 'average' });
+    next(100.2, 102.5, 100.1, 102.3);
+    expect(broker.position(S).quantity).toBe(0);
+    expect(broker.state.orders.find((o) => o.id === stop.order!.id)!.status).toBe('cancelled');
+    expect(broker.state.roundTrips[0]).toMatchObject({ closed: true, maxRisk: 100 });
+    expect(broker.state.roundTrips[0].unprotectedAt).toBeUndefined();
+  });
+
+  it('keeps a trade’s first stop and target: a later one, or a sell limit under the entry, is not taken for them', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 98, takeProfit: 104 });
+    next(100, 100.5, 99.8, 100.2);
+    broker.submit({ symbol: S, action: 'sell', type: 'stop', stopPrice: 99, quantity: 50 });
+    broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 103, quantity: 50 });
+    expect(broker.state.roundTrips[0]).toMatchObject({ initialStop: 98, initialTarget: 104 });
+    expect(broker.state.roundTrips[0].stopPlacedAt).toBeUndefined();
+
+    const b = setup();
+    b.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 });
+    b.next(100, 100.5, 99.8, 100.2);
+    b.broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 99.5, quantity: 100 });
+    expect(b.broker.state.roundTrips[0].initialTarget).toBeUndefined();
+  });
+
+  it('scales out of a bracketed trade: the bracket is cut to the shares left and still closes them all', () => {
+    const { broker, next } = setup();
+    const entry = broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 98, takeProfit: 104 }).order!;
+    next(100, 100.5, 99.8, 100.2);
+    const part = broker.submit({ symbol: S, action: 'sell', type: 'market', quantity: 40 });
+    expect(part.ok).toBe(true);
+    expect(broker.position(S).quantity).toBe(60);
+    const exits = () => broker.state.orders.filter((o) => o.parentId === entry.id && (o.status === 'working' || o.status === 'partially_filled'));
+    expect(exits().map((o) => [o.type, o.quantity])).toEqual([
+      ['stop', 60],
+      ['limit', 60],
+    ]);
+    next(100.2, 104.5, 100.1, 104.2);
+    expect(broker.position(S).quantity).toBe(0);
+    expect(exits()).toEqual([]);
+    expect(broker.state.roundTrips[0]).toMatchObject({ closed: true, exitQtyTotal: 100 });
+  });
+
+  it('never sells more than is held when a stop and a target for the same shares are both crossed in one bar', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 });
+    broker.submit({ symbol: S, action: 'sell', type: 'stop', stopPrice: 99, quantity: 100 });
+    broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 101, quantity: 100 });
+    next(100, 101.5, 98.5, 99);
+    expect(broker.position(S).quantity).toBe(0);
+    expect(broker.state.fills.filter((f) => f.action === 'sell').reduce((a, f) => a + f.quantity, 0)).toBe(100);
+    expect(broker.workingOrders(S)).toEqual([]);
+  });
+
+  it('records the largest risk to the trade’s stops as each bar begins, and when shares are left with no stop', () => {
+    const { broker, next } = setup();
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 99, tif: 'gtc' });
+    next(100, 100.3, 99.8, 100.1);
+    const trip = () => broker.state.roundTrips[0];
+    expect(trip().maxRisk).toBe(100);
+    const stop = broker.state.orders.find((o) => o.type === 'stop' && o.status === 'working')!;
+    expect(broker.modify(stop.id, { stopPrice: 97 }).ok).toBe(true);
+    next(100.1, 100.3, 99.8, 100.1);
+    expect(trip().maxRisk).toBe(300);
+    expect(broker.modify(stop.id, { stopPrice: 99.5 }).ok).toBe(true);
+    next(100.1, 100.3, 99.8, 100.1);
+    expect(trip().maxRisk).toBe(300); // the largest it was, not what it is now
+    // An add with no stop of its own leaves its shares without one.
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 50 });
+    const addedAt = broker.state.clock;
+    expect(trip().unprotectedAt).toBeUndefined();
+    next(100.1, 100.3, 99.8, 100.1);
+    expect(trip()).toMatchObject({ unprotectedAt: addedAt, unprotectedQty: 50 });
+    broker.cancel(stop.id);
+    next(100.1, 100.3, 99.8, 100.1);
+    expect(trip()).toMatchObject({ unprotectedAt: addedAt, unprotectedQty: 150 });
+  });
+
+  it('counts a stop past the average entry as risking nothing, and a DAY stop that expired as leaving the shares bare', () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    broker.onBar(S, bar(et(D, '15:57'), 100, 100, 100, 100));
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 });
+    broker.onBar(S, bar(et(D, '15:58'), 100, 102, 100, 102));
+    broker.submit({ symbol: S, action: 'sell', type: 'stop', stopPrice: 101, quantity: 100, tif: 'day' });
+    broker.onBar(S, bar(et(D, '15:59'), 102, 102.2, 101.8, 102));
+    const trip = broker.state.roundTrips[0];
+    expect(trip).toMatchObject({ initialStop: 101, maxRisk: 0 });
+    expect(riskBasis(trip)).toBeNull();
+    const nextDay = et('2025-01-16', '09:30');
+    broker.onBar(S, bar(nextDay, 102.5, 103, 102.4, 102.8));
+    expect(broker.state.orders.find((o) => o.type === 'stop')!.status).toBe('expired');
+    expect(trip).toMatchObject({ unprotectedAt: nextDay, unprotectedQty: 100 });
   });
 });

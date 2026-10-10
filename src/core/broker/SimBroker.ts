@@ -883,18 +883,14 @@ export class SimBroker {
         if (this.cfg.marginMultiplier < 1.5) return error('Short selling requires a margin account (set margin to 2x or more in Settings).');
         if (pos.quantity > 0) return error(`You are long ${pos.quantity} ${symbol}. Sell the long before shorting.`);
         break;
-      case 'sell': {
+      case 'sell':
         if (pos.quantity <= 0) return error(`No long position in ${symbol} to sell. Use Short to open a short.`);
-        const avail = pos.quantity - this.committedExitQty(symbol, 'sell');
-        if (qty > avail + EPS) return error(`Only ${Math.max(0, avail)} shares available to sell (others are committed to open orders).`);
+        if (qty > pos.quantity + EPS) return error(`You hold ${pos.quantity} ${symbol}: sell ${pos.quantity} shares or fewer.`);
         break;
-      }
-      case 'cover': {
+      case 'cover':
         if (pos.quantity >= 0) return error(`No short position in ${symbol} to cover.`);
-        const avail = -pos.quantity - this.committedExitQty(symbol, 'cover');
-        if (qty > avail + EPS) return error(`Only ${Math.max(0, avail)} shares available to cover (others are committed to open orders).`);
+        if (qty > -pos.quantity + EPS) return error(`You are short ${-pos.quantity} ${symbol}: cover ${-pos.quantity} shares or fewer.`);
         break;
-      }
     }
     return { req };
   }
@@ -980,10 +976,19 @@ export class SimBroker {
               : `${symbol} has not traded yet in this session: the order works from its first bar.`,
       );
     }
+    const notes: string[] = [];
+    if (!opening) {
+      // Exits may overlap (a stop and a target for the same shares): the first to fill takes them, and
+      // fitExits cuts the rest to what is still held, so none can sell shares that are gone.
+      const held = Math.abs(this.position(symbol).quantity);
+      if (qty + this.committedExitQty(symbol, req.action as 'sell' | 'cover') > held + EPS) {
+        notes.push(`Your other ${req.action === 'sell' ? 'sell' : 'cover'} orders on ${symbol} are for some of these shares too: whichever fills first takes them, and the others are cut to the shares still held.`);
+      }
+    }
     this.s.orders.push(order);
     this.log('accepted', `${describe(order)} accepted`, order.id);
+    if (!opening) this.noteLaterExit(order);
 
-    const notes: string[] = [];
     if (this.cfg.marketOrderFill === 'last_price' && order.status === 'working' && this.tryImmediate(order) === 'capped' && order.type === 'market') {
       notes.push(`Fills are capped at ${Math.round(this.cfg.maxParticipation * 100)}% of a bar's volume (Data & Settings), so the rest fills from the next bars.`);
     }
@@ -1020,6 +1025,10 @@ export class SimBroker {
     };
     if (changes.quantity !== undefined && (changes.quantity < o.filledQty + 1 || Math.floor(changes.quantity) !== changes.quantity)) {
       return refuse('Quantity must be a whole number above the filled quantity.');
+    }
+    const held = Math.abs(this.position(o.symbol).quantity);
+    if (changes.quantity !== undefined && !isOpeningAction(o.action) && changes.quantity - o.filledQty > held) {
+      return refuse(`An exit can be for at most the ${held} shares held.`);
     }
     if (changes.limitPrice !== undefined && (!(changes.limitPrice > 0) || (o.type !== 'limit' && o.type !== 'stop_limit'))) return refuse('Invalid limit price.');
     if (changes.stopPrice !== undefined && (!(changes.stopPrice > 0) || (o.type !== 'stop' && o.type !== 'stop_limit'))) return refuse('Invalid stop price.');
@@ -1123,7 +1132,70 @@ export class SimBroker {
     return closing;
   }
 
-  /** Qty already committed to working exit orders; an OCO group counts once. */
+  /**
+   * A separate stop or target placed on an open trade that has none becomes its stop or target from now
+   * (RoundTrip.stopPlacedAt): the journal, the review and the challenges count it as the trade's own.
+   */
+  private noteLaterExit(o: Order): void {
+    const id = this.s.openTripBySymbol[o.symbol];
+    const trip = id ? this.tripById(id) : undefined;
+    if (!trip || trip.closed || o.parentId) return;
+    const dir = trip.direction === 'long' ? 1 : -1;
+    if (o.action !== (dir === 1 ? 'sell' : 'cover')) return;
+    if ((o.type === 'stop' || o.type === 'stop_limit') && trip.initialStop === undefined) {
+      trip.initialStop = o.stopPrice;
+      trip.stopPlacedAt = this.s.clock;
+      trip.lossBeforeStop = money(Math.max(0, -(trip.worstOpenPnl ?? 0)));
+    } else if (o.type === 'limit' && trip.initialTarget === undefined && (o.limitPrice! - trip.avgEntry) * dir > 0) {
+      trip.initialTarget = o.limitPrice;
+      trip.targetPlacedAt = this.s.clock;
+    }
+  }
+
+  /** After part of a position is closed, no other exit is left for more shares than are still held. */
+  private fitExits(symbol: string): void {
+    const held = Math.abs(this.position(symbol).quantity);
+    if (held === 0) return; // flat: updateRoundTrip cancels the exits left
+    for (const x of this.workingOrders(symbol)) {
+      if (isOpeningAction(x.action) || x.quantity - x.filledQty <= held) continue;
+      x.quantity = x.filledQty + held;
+      this.log('info', `${describe(x)}: cut to the ${held} shares still held`, x.id);
+    }
+  }
+
+  /**
+   * As a bar begins, what the open trade in `symbol` has at risk to its working stops (RoundTrip.maxRisk)
+   * and whether some of its shares have none (RoundTrip.unprotectedAt). Stops nearest the price are
+   * reached first and take the shares they are for; a market exit, or a stop that has fired, is closing
+   * its shares where they are and adds no risk; a stop past the average entry loses nothing.
+   */
+  private noteRisk(symbol: string, time: UnixSeconds): void {
+    const id = this.s.openTripBySymbol[symbol];
+    const trip = id ? this.tripById(id) : undefined;
+    const held = Math.abs(this.position(symbol).quantity);
+    if (!trip || trip.closed || held === 0 || trip.initialStop === undefined) return;
+    const dir = trip.direction === 'long' ? 1 : -1;
+    const exit = dir === 1 ? 'sell' : 'cover';
+    const covers = this.workingOrders(symbol)
+      .filter((o) => o.action === exit && (o.type === 'market' || o.type === 'stop' || o.type === 'stop_limit'))
+      .map((o) => ({ qty: o.quantity - o.filledQty, at: o.type === 'market' || o.triggered ? undefined : o.stopPrice! }))
+      .sort((a, b) => (b.at === undefined ? Infinity : b.at * dir) - (a.at === undefined ? Infinity : a.at * dir));
+    let covered = 0;
+    let risk = 0;
+    for (const c of covers) {
+      const n = Math.min(c.qty, held - covered);
+      if (n <= 0) break;
+      if (c.at !== undefined) risk += n * Math.max(0, (trip.avgEntry - c.at) * dir);
+      covered += n;
+    }
+    trip.maxRisk = Math.max(trip.maxRisk ?? 0, money(risk));
+    if (covered < held) {
+      trip.unprotectedAt ??= time;
+      trip.unprotectedQty = Math.max(trip.unprotectedQty ?? 0, held - covered);
+    }
+  }
+
+  /** Shares already in working exit orders; an OCO group counts once. */
   private committedExitQty(symbol: string, action: 'sell' | 'cover'): number {
     const groups = new Map<string, number>();
     let loose = 0;
@@ -1311,6 +1383,7 @@ export class SimBroker {
     for (const o of this.liveOrders()) {
       if (o.symbol === symbol && o.status === 'pending' && this.eligible(o, session)) o.status = 'working';
     }
+    this.noteRisk(symbol, bar.time);
 
     // The bar's assumed path in time: each point with the fraction of the bar elapsed when price is there.
     const points = this.intrabarPath(symbol, bar).map((p, i, all) => ({ p, f: i / (all.length - 1) }));
@@ -1715,6 +1788,7 @@ export class SimBroker {
 
     this.updateRoundTrip(o, fill, opening);
     this.manageBrackets(o, qty, time);
+    if (!opening) this.fitExits(symbol);
     this.s.lastPrice[symbol] = this.s.lastPrice[symbol] ?? price;
   }
 
@@ -1775,6 +1849,7 @@ export class SimBroker {
         trip.bracketEntry = fill.price;
         trip.stopOrder = { id: o.id, qty: 0 };
         trip.stopFromAdd = true;
+        trip.lossBeforeStop = money(Math.max(0, -(trip.worstOpenPnl ?? 0)));
       }
       if (trip.initialTarget === undefined && o.takeProfit !== undefined) {
         trip.initialTarget = o.takeProfit;

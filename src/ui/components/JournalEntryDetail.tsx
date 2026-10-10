@@ -111,6 +111,8 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   }, [notes, tag, saved, entry.id, updateNotes]);
 
   const r = entry.review;
+  /** A stop or target that was its own order, placed after entry. */
+  const placedAfter = (at: number | undefined) => (at !== undefined && at > entry.entryTime ? ` (placed ${formatDuration(at - entry.entryTime)} after entry)` : '');
   const entryTime = useEntryTime();
   const when = (t: number) => entryTime(entry, t);
   return (
@@ -136,8 +138,8 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
         <Stat k="Quantity" v={qty(entry.quantity)} />
         <Stat k="Avg entry" v={price(entry.avgEntry)} />
         <Stat k="Avg exit" v={price(entry.avgExit)} />
-        <Stat k="Stop loss" v={entry.stopLoss !== undefined ? price(entry.stopLoss) : 'none'} cls={entry.stopLoss === undefined ? 'warn' : ''} />
-        <Stat k="Take profit" v={entry.takeProfit !== undefined ? price(entry.takeProfit) : 'none'} />
+        <Stat k="Stop loss" v={entry.stopLoss !== undefined ? `${price(entry.stopLoss)}${placedAfter(entry.trip.stopPlacedAt)}` : 'none'} cls={entry.stopLoss === undefined ? 'warn' : ''} />
+        <Stat k="Take profit" v={entry.takeProfit !== undefined ? `${price(entry.takeProfit)}${placedAfter(entry.trip.targetPlacedAt)}` : 'none'} />
         <Stat k="Entry" v={when(entry.entryTime)} />
         <Stat k="Exit" v={when(entry.exitTime)} />
         <Stat k="Held" v={formatDuration(entry.holdingSeconds)} />
@@ -203,6 +205,13 @@ function ReviewView({ review: r, hasStop }: { review: TradeReview; hasStop: bool
           v={r.riskDollars === null ? (hasStop ? 'Not measurable' : 'No stop') : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)}${r.riskPctOfEquity === null ? '' : ` · ${pctAgainst(r.riskPctOfEquity, r.riskLimitPct)}%`}`}
           cls={r.riskDollars === null || r.addedPastStop ? 'warn' : ''}
         />
+        {(r.largestRiskDollars !== undefined || r.unprotected) && (
+          <Stat
+            k="Largest risk"
+            v={r.unprotected ? 'Not limited: shares had no stop' : `${money(r.largestRiskDollars!)}${r.largestRiskPct != null ? ` · ${pctAgainst(r.largestRiskPct, r.riskLimitPct)}%` : ''}`}
+            cls="warn"
+          />
+        )}
         <Stat k="Planned R:R" v={r.plannedRR !== null ? `${r.plannedRR.toFixed(2)}:1` : '—'} />
         <Stat k="Stop distance" v={r.stopDistanceAtr !== null ? `${r.stopDistanceAtr.toFixed(2)} ATR` : '—'} />
         <Stat k="ATR at entry" v={r.atrAtEntry !== null ? price(r.atrAtEntry) : '—'} />

@@ -197,6 +197,29 @@ export interface RoundTrip {
   bracketEntry?: number;
   /** The initial stop came with an add, not with the trade's first entry (which had none). */
   stopFromAdd?: boolean;
+  /**
+   * The initial stop (target) was a separate exit order, placed at this time while the trade was open
+   * with none, rather than a bracket that came with an entry.
+   */
+  stopPlacedAt?: UnixSeconds;
+  targetPlacedAt?: UnixSeconds;
+  /**
+   * For a stop that came after entry (placed on its own, or with an add): the largest open loss, before
+   * costs, the trade had before it, while it had no stop.
+   */
+  lossBeforeStop?: number;
+  /**
+   * The most the trade had at risk to its working stops as a bar began: the shares each stop covers
+   * times the distance from the average entry to it (none for a stop past the entry). Absent before the
+   * trade had a stop, and on older trades.
+   */
+  maxRisk?: number;
+  /**
+   * The first time a bar began with some of the trade's shares covered by no working stop, after it had
+   * a stop (a stop cancelled or expired, or shares added without one), and the most shares uncovered.
+   */
+  unprotectedAt?: UnixSeconds;
+  unprotectedQty?: number;
   /** The same for the entry order the initial target came with (which may be a later add). Absent on older trades. */
   targetPlanned?: number;
   targetEntry?: number;

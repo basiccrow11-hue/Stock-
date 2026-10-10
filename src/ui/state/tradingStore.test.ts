@@ -303,3 +303,29 @@ describe('starting another session', () => {
     await store.endSession();
   });
 });
+
+describe('a challenge attempt', () => {
+  it('records where its prices came from, and is scored on the rules it started with', async () => {
+    const store = await import('./tradingStore');
+    const { useChallenges } = await import('./challengeStore');
+    const { useSettings } = await import('./settingsStore');
+    const rules = useSettings.getState().rules;
+    useSettings.getState().update({ rules: { ...rules, maxTradesPerDay: 5 } });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'rules-20' })).toBe(true);
+    expect(useChallenges.getState().active).toMatchObject({ challengeId: 'rules-20', source: 'DEMO', rules: { maxTradesPerDay: 5 } });
+    // Tightened in Settings mid-challenge: the two trades below would break a limit of 1 a day.
+    useSettings.getState().update({ rules: { ...rules, maxTradesPerDay: 1 } });
+    for (let i = 0; i < 2; i++) {
+      store.stepForward();
+      const price = store.lastPrice('SPY')!;
+      expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1, stopLoss: price - 1, takeProfit: price + 2 }).ok).toBe(true);
+      store.stepForward();
+      expect(store.closePosition('SPY').ok).toBe(true);
+      store.stepForward();
+    }
+    expect(store.useTrading.getState().trips.filter((t) => t.closed)).toHaveLength(2);
+    expect(useChallenges.getState().active?.result.status).toBe('in_progress');
+    useSettings.getState().update({ rules });
+    await store.endSession();
+  });
+});

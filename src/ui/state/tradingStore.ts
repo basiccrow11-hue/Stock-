@@ -490,7 +490,7 @@ function evaluateActiveChallenge(): void {
       equity: b.account().equity,
       sessionFinished: eng.replay?.finished ?? false,
       rewound: (eng.replay?.rewinds ?? 0) > 0,
-      rules: getSettings().rules,
+      rules: active.rules ?? getSettings().rules,
     });
   } catch (e) {
     // Scoring a challenge must never stop trading or journaling: its last result stays until the next try.
@@ -661,6 +661,8 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
       sessionId: id,
       startedAt: Date.now(),
       label: meta.label,
+      source: meta.source,
+      rules: { ...getSettings().rules },
       result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true },
     });
   }
@@ -699,7 +701,16 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
   });
   if (opts.challengeId) {
     const def = CHALLENGES.find((c) => c.id === opts.challengeId);
-    useChallenges.getState().start({ id: newId('attempt'), challengeId: opts.challengeId, sessionId: id, startedAt: Date.now(), label: 'Simulated market', result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true } });
+    useChallenges.getState().start({
+      id: newId('attempt'),
+      challengeId: opts.challengeId,
+      sessionId: id,
+      startedAt: Date.now(),
+      label: 'Simulated market',
+      source: 'SIMULATED',
+      rules: { ...getSettings().rules },
+      result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true },
+    });
   }
   emitChart({ type: 'reset' });
   publish(true);

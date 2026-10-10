@@ -2,6 +2,8 @@
 import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { ChallengeResult } from '../../core/challenges/challenges';
+import type { TradingRules } from '../../core/learning/review';
+import type { DataSourceKind } from '../../core/types';
 
 export interface ChallengeAttempt {
   id: string;
@@ -10,6 +12,10 @@ export interface ChallengeAttempt {
   startedAt: number;
   endedAt?: number;
   label: string;
+  /** Where the session's prices came from, shown beside the result. Absent on older attempts. */
+  source?: DataSourceKind;
+  /** The trading rules when the attempt started, which it is scored on. Absent on older attempts (scored on the current rules). */
+  rules?: TradingRules;
   result: ChallengeResult;
 }
 
