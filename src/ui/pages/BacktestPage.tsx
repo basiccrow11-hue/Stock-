@@ -1,10 +1,11 @@
 /** Rule-based backtester: build IF/THEN rules, pick data, run without look-ahead, inspect results. */
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CandlestickSeries, createChart, createSeriesMarkers, PriceLineSource, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
 import {
   OPERATOR_LABELS,
   STRATEGY_PRESETS,
   seriesLabel,
+  strategyLabel,
   type Condition,
   type Operator,
   type Rule,
@@ -12,14 +13,14 @@ import {
   type Sizing,
   type StrategyDefinition,
 } from '../../core/backtest/strategy';
-import type { BacktestResult } from '../../core/backtest/Backtester';
+import { warmupCandlesFrom, warmupTradingDays, type BacktestResult } from '../../core/backtest/Backtester';
 import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { toast } from '../state/toasts';
 import { TIMEFRAMES, type Bar, type DataSourceKind, type OrderAction, type Timeframe } from '../../core/types';
 import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
-import { AFTERHOURS_CLOSE, exchangeTimeToUnix, isTradingDay, nextTradingDay, prevTradingDay, tradingDayOnOrBefore } from '../../core/time';
+import { AFTERHOURS_CLOSE, exchangeDate, exchangeTimeToUnix, isTradingDay, nextTradingDay, prevTradingDay, tradingDayOnOrAfter, tradingDayOnOrBefore } from '../../core/time';
 import { runBacktestAsync, cancelBacktests } from '../services/backtestClient';
 import { NumberField, SourceBadge, EmptyState, useFocusRescue, useNumberDraft } from '../components/common';
 import { StatsGrid } from './AnalyticsPage';
@@ -75,6 +76,11 @@ function defaultRef(kind: SeriesRef['kind']): SeriesRef {
       return { kind } as SeriesRef;
   }
 }
+
+/** The most warm-up history one run loads: about three years of trading days (a vendor's minute bars for longer take many requests). */
+const MAX_WARMUP_DAYS = 756;
+/** Warm-up history is loaded this many trading days at a time: at most 48,000 minute bars with extended hours, one Polygon page. */
+const WARMUP_CHUNK_DAYS = 50;
 
 function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
@@ -335,6 +341,8 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
   const [slippage, setSlippage] = useState<number | ''>(settings.execution.slippage.bps);
   const [spread, setSpread] = useState<number | ''>(settings.execution.spread.mode === 'bps' ? settings.execution.spread.value : 2);
   const [running, setRunning] = useState<string | null>(null);
+  /** How far a long load has got, shown next to `running` but not announced (it changes every moment). */
+  const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   /** What a screen reader is told when a run finishes. */
   const [announce, setAnnounce] = useState('');
@@ -349,6 +357,14 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
   activeRef.current = active;
 
   const provider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
+  // A daily candle is a whole session: the flatten before the close does not apply (the results say so too).
+  const flattenNoteId = useId();
+  const flattenNote =
+    timeframe === '1D'
+      ? 'Not used with the 1D signal timeframe: each candle is a whole session, so positions are held overnight.'
+      : provider.baseTimeframe(symbol.trim().toUpperCase()) === '1D'
+        ? 'Not used with daily data: each bar is a whole session, so positions are held overnight.'
+        : null;
 
   // Read on every render: a key or a CSV added on another page makes the source available without
   // changing anything this page holds.
@@ -374,24 +390,67 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
     setError(null);
     setAnnounce('');
     setRunning('Loading bars…');
+    setProgress('');
     try {
-      // Warm-up history so indicators are valid from the first tradable candle.
-      let warm = isTradingDay(from) ? from : nextTradingDay(from);
-      const tradeStart = warm;
-      const lookback = Math.min(DEFAULT_LOOKBACK[timeframe], 60);
-      for (let i = 0; i < lookback; i++) warm = prevTradingDay(warm);
+      const tradeStart = isTradingDay(from) ? from : nextTradingDay(from);
       const end = tradingDayOnOrBefore(to);
       const sym = symbol.trim().toUpperCase();
-      const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(warm, 0), to: exchangeTimeToUnix(end, AFTERHOURS_CLOSE) }, controller.signal);
+      const baseTimeframe = provider.baseTimeframe(sym);
+      const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(tradeStart, 0), to: exchangeTimeToUnix(end, AFTERHOURS_CLOSE) }, controller.signal);
       if (cancelled()) throw new Error('Cancelled');
       if (!bars.length) throw new Error(`No data for ${sym} in that range.`);
+      // Warm-up history, so the rules' indicators have settled values from the first tradable candle: as
+      // many trading days as the longest of them needs on this timeframe (never fewer than the replay's
+      // own lookback, up to 60), from no earlier than the data starts. The results say when that was
+      // not enough.
+      const days = Math.min(MAX_WARMUP_DAYS, Math.max(Math.min(DEFAULT_LOOKBACK[timeframe], 60), warmupTradingDays(strategy, timeframe)));
+      let warm = tradeStart;
+      for (let i = 0; i < days; i++) warm = prevTradingDay(warm);
+      const range = await provider.availableRange(sym);
+      if (range && exchangeDate(range.from) > warm) warm = tradingDayOnOrAfter(exchangeDate(range.from));
+      // Loaded a few weeks at a time, newest first, and turned into candles at once, so a long warm-up
+      // never holds its minute bars, a vendor's page limit never cuts it short, and Cancel works between
+      // pieces. A piece that fails to load (a free plan's rate limit, say) ends the warm-up there: the
+      // test runs on the recent history already loaded, which has no gap before the start, and says so.
+      const pieces: Bar[][] = [];
+      let partial: string | null = null;
+      let total = 0;
+      for (let d = warm; d < tradeStart; d = nextTradingDay(d)) total++;
+      setRunning('Loading warm-up history…');
+      for (let hi = tradeStart, done = 0; hi > warm; ) {
+        let lo = hi;
+        let n = 0;
+        for (; n < WARMUP_CHUNK_DAYS && lo > warm; n++) lo = prevTradingDay(lo);
+        let chunk: Bar[];
+        try {
+          chunk = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(lo, 0), to: exchangeTimeToUnix(hi, 0) }, controller.signal);
+        } catch (e) {
+          if (cancelled()) throw e;
+          const why = (e as Error).message;
+          partial = done
+            ? `Only ${done} of ${total} trading days of warm-up history could be loaded (from ${hi} on), so the test started with less: ${why}`
+            : `The warm-up history (${total} trading days) could not be loaded, so the test started without it: ${why}`;
+          break;
+        }
+        if (cancelled()) throw new Error('Cancelled');
+        pieces.unshift(warmupCandlesFrom(chunk, strategy, timeframe, baseTimeframe));
+        done += n;
+        setProgress(`${done} of ${total} days`);
+        hi = lo;
+        // Demo bars are made on this thread: let the page draw and take a Cancel press between pieces.
+        await new Promise((r) => setTimeout(r, 0));
+        if (cancelled()) throw new Error('Cancelled');
+      }
+      const warmupCandles = pieces.flat();
+      setProgress('');
       setRunning(`Running on ${bars.length.toLocaleString('en-US')} bars…`);
       const ex = settings.execution;
       const job = runBacktestAsync({
         symbol: sym,
         bars,
-        baseTimeframe: provider.baseTimeframe(sym),
+        baseTimeframe,
         timeframe,
+        warmupCandles,
         tradeFrom: exchangeTimeToUnix(tradeStart, 0),
         startingBalance: balance as number,
         config: {
@@ -408,9 +467,10 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
       // for a second or two: a second press queued meanwhile is handled only now, so it still counts
       // as part of the Run press.
       runRef.current!.started = performance.now();
-      const r = await job;
+      const ran = await job;
       if (cancelled()) throw new Error('Cancelled');
-      setResult({ r, tf: timeframe, label: `${strategy.name} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, rules: strategy.rules.map(describeRule), source: provider.source });
+      const r = partial ? { ...ran, warnings: [partial, ...ran.warnings] } : ran;
+      setResult({ r, tf: timeframe, label: `${strategyLabel(strategy)} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, rules: strategy.rules.map(describeRule), source: provider.source });
       const done = `Backtest done: ${r.stats.totalTrades} ${r.stats.totalTrades === 1 ? 'trade' : 'trades'}, strategy return ${r.stats.totalReturnPct.toFixed(2)}%.`;
       setAnnounce(done);
       // Finished while another page is showing: say so there.
@@ -424,6 +484,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
     } finally {
       runRef.current = null;
       setRunning(null);
+      setProgress('');
     }
   };
 
@@ -542,8 +603,19 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
           </div>
           <div className="row wrap" style={{ gap: 16 }}>
             <label className="check">
-              <input type="checkbox" checked={strategy.exitAtSessionEnd} onChange={(e) => setStrategy({ ...strategy, exitAtSessionEnd: e.target.checked })} /> Flatten before the close each day
+              <input
+                type="checkbox"
+                checked={strategy.exitAtSessionEnd}
+                aria-describedby={flattenNote ? flattenNoteId : undefined}
+                onChange={(e) => setStrategy({ ...strategy, exitAtSessionEnd: e.target.checked })}
+              />{' '}
+              Flatten before the close each day
             </label>
+            {flattenNote && (
+              <span id={flattenNoteId} className="small muted">
+                {flattenNote}
+              </span>
+            )}
             <label className="check">
               <input type="checkbox" checked={strategy.regularHoursOnly} onChange={(e) => setStrategy({ ...strategy, regularHoursOnly: e.target.checked })} /> Regular hours only
             </label>
@@ -596,7 +668,12 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
             {providerId === 'demo' && <span className="small muted">Synthetic data: results show how the rules behave, not how they would have done on the real ticker.</span>}
             <div className="spacer" />
             {validation && <span className="small warn">{validation}</span>}
-            {running && <span className="small muted">{running}</span>}
+            {running && (
+              <span className="small muted">
+                {running}
+                {progress && ` ${progress}`}
+              </span>
+            )}
             {/* One button that turns into Cancel while running, so keyboard focus stays on it. */}
             <button
               className={running ? 'btn' : 'btn primary'}

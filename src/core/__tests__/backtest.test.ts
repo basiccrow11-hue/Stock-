@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { runBacktest, type BacktestParams } from '../backtest/Backtester';
-import { STRATEGY_PRESETS, evalCondition, type StrategyDefinition } from '../backtest/strategy';
+import { runBacktest, warmupCandlesFrom, warmupTradingDays, type BacktestParams } from '../backtest/Backtester';
+import { STRATEGY_PRESETS, computeSeries, evalCondition, seriesWarmup, strategyLabel, strategyWarmup, type SeriesRef, type StrategyDefinition } from '../backtest/strategy';
 import { DemoDataProvider } from '../data/demoProvider';
 import { ZERO_COST_CONFIG, DEFAULT_EXECUTION_CONFIG } from '../broker/config';
 import { bar, et, minuteBars } from './helpers';
 import type { Bar } from '../types';
 import { aggregateBars } from '../data/aggregate';
-import { exchangeDate, marketSession } from '../time';
+import { exchangeDate, marketSession, nextTradingDay, prevTradingDay } from '../time';
 
 const provider = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
 
@@ -341,3 +341,176 @@ describe("signals on data at its own bar size", () => {
   });
 });
 
+
+describe('backtester: indicator warm-up', () => {
+  const smaCross = (period: number): StrategyDefinition => ({
+    name: 'SMA cross',
+    rules: [
+      { id: 'b', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'crosses_above', right: { kind: 'sma', period } }] },
+      { id: 's', logic: 'all', action: 'sell', conditions: [{ left: { kind: 'close' }, op: 'crosses_below', right: { kind: 'sma', period } }] },
+    ],
+    sizing: { mode: 'percent_equity', percent: 100 },
+    exitAtSessionEnd: false,
+    regularHoursOnly: true,
+  });
+
+  it('asks for enough history for the longest indicator on the signal timeframe, with room for EMA, MACD, RSI and ATR to settle', () => {
+    // SMA 200 crossing on daily candles: 200 candles for its first value and one more for the cross.
+    expect(strategyWarmup(smaCross(200))).toBe(201);
+    expect(warmupTradingDays(smaCross(200), '1D')).toBe(202);
+    expect(seriesWarmup({ kind: 'ema', period: 200 })).toBe(600);
+    expect(seriesWarmup({ kind: 'rsi', period: 14 })).toBe(71);
+    expect(seriesWarmup({ kind: 'atr', period: 14 })).toBe(70);
+    expect(seriesWarmup({ kind: 'macd_signal', fast: 12, slow: 26, signal: 9 })).toBe(105);
+    expect(seriesWarmup({ kind: 'vwap' })).toBe(1);
+    // The day-trading presets need less than a day of 5-minute candles; the MACD preset 107 daily candles.
+    expect(warmupTradingDays(STRATEGY_PRESETS[0], '5m')).toBe(2);
+    expect(warmupTradingDays(STRATEGY_PRESETS[3], '1D')).toBe(107);
+    // Never fewer candles than the series needs for its first value.
+    const candles = demoBars('SPY', '2025-01-13', '2025-01-17').filter((b) => marketSession(b.time) === 'regular');
+    const refs: SeriesRef[] = [
+      { kind: 'sma', period: 30 },
+      { kind: 'ema', period: 30 },
+      { kind: 'rsi', period: 30 },
+      { kind: 'atr', period: 30 },
+      { kind: 'macd', fast: 12, slow: 26, signal: 9 },
+      { kind: 'macd_signal', fast: 26, slow: 12, signal: 9 },
+      { kind: 'macd_hist', fast: 12, slow: 26, signal: 9 },
+      { kind: 'bb_lower', period: 30, mult: 2 },
+      { kind: 'vwap' },
+    ];
+    for (const ref of refs) expect(computeSeries(ref, candles).findIndex((v) => !Number.isNaN(v)) + 1, ref.kind).toBeLessThanOrEqual(seriesWarmup(ref));
+    // The seed's remaining weight after the extra history is under 2%: EMA forgets at 2/(p+1) a candle, Wilder's smoothing at 1/p.
+    for (const period of [2, 9, 14, 50, 200]) {
+      expect((1 - 2 / (period + 1)) ** (seriesWarmup({ kind: 'ema', period }) - period)).toBeLessThan(0.02);
+      expect((1 - 1 / period) ** (seriesWarmup({ kind: 'atr', period }) - period)).toBeLessThan(0.02);
+    }
+  });
+
+  it('gives the same results from warm-up candles built a few days at a time as from every warm-up bar', () => {
+    const all = demoBars('AAPL', '2024-12-02', '2025-01-24');
+    const tradeFrom = et('2025-01-14', '00:00');
+    const cases: [StrategyDefinition, BacktestParams['timeframe']][] = [
+      [STRATEGY_PRESETS[0], '5m'],
+      [{ ...STRATEGY_PRESETS[2], regularHoursOnly: false }, '15m'],
+      [STRATEGY_PRESETS[3], '1h'],
+      [{ ...STRATEGY_PRESETS[4], exitAtSessionEnd: true }, '4h'],
+      [smaCross(10), '1D'],
+    ];
+    for (const [strategy, timeframe] of cases) {
+      const whole = runBacktest(params(all, strategy, { timeframe, tradeFrom }));
+      // Seven trading days at a time, the way the backtest page loads a long warm-up.
+      const warmupCandles = [];
+      for (let d = '2024-12-02'; d < '2025-01-14'; ) {
+        let next = d;
+        for (let i = 0; i < 7 && next < '2025-01-14'; i++) next = nextTradingDay(next);
+        const piece = all.filter((b) => b.time >= et(d, '00:00') && b.time < et(next, '00:00'));
+        warmupCandles.push(...warmupCandlesFrom(piece, strategy, timeframe, '1m'));
+        d = next;
+      }
+      const split = runBacktest(params(all.filter((b) => b.time >= tradeFrom), strategy, { timeframe, tradeFrom, warmupCandles }));
+      expect(whole.signals.length, timeframe).toBeGreaterThan(0);
+      expect(split.candles, timeframe).toEqual(whole.candles);
+      expect(split.signals, timeframe).toEqual(whole.signals);
+      expect(split.fills, timeframe).toEqual(whole.fills);
+      expect(split.trades, timeframe).toEqual(whole.trades);
+      expect(split.equityCurve, timeframe).toEqual(whole.equityCurve);
+      expect(split.warnings, timeframe).toEqual(whole.warnings);
+    }
+  });
+
+  it('warms up SMA 200 on daily candles from the history before the test, and says when the history was too short', () => {
+    // Daily bars (stamped at the open, as imported daily files are) on a slow wave that crosses its SMA 200 every few months.
+    const days: string[] = [];
+    for (let d = '2024-01-02'; d <= '2026-06-30'; d = nextTradingDay(d)) days.push(d);
+    const daily = days.map((d, i) => {
+      const px = 100 + 15 * Math.sin((2 * Math.PI * i) / 130) + i * 0.01;
+      return bar(et(d, '09:30'), px, px + 0.5, px - 0.5, px, 1_000_000);
+    });
+    const start = '2025-10-01';
+    const run = (warmDays: number) => {
+      let warm = start;
+      for (let i = 0; i < warmDays; i++) warm = prevTradingDay(warm);
+      const warmupCandles = warmupCandlesFrom(daily.filter((b) => b.time >= et(warm, '00:00') && b.time < et(start, '00:00')), smaCross(200), '1D', '1D');
+      return runBacktest(params(daily.filter((b) => b.time >= et(start, '00:00')), smaCross(200), { baseTimeframe: '1D', timeframe: '1D', tradeFrom: et(start, '00:00'), config: ZERO_COST_CONFIG, warmupCandles }));
+    };
+    // The page used to load 60 days at most: SMA 200 had no value until its 200th candle, 140 into the test.
+    const short = run(60);
+    const firstValue = exchangeDate(daily[days.indexOf(start) - 60 + 199].time);
+    expect(short.warnings).toEqual([
+      `Not enough history before ${start} to warm up the indicators: the data had 60 1D candles before it. SMA 200 (needs 200) first had a value on the ${firstValue} candle, so rules using it could not fire before then.`,
+    ]);
+    expect(short.signals.every((x) => exchangeDate(x.candleTime) >= firstValue)).toBe(true);
+    // With the warm-up the rules ask for, the indicator has a value from the start, and signals come before that date.
+    const full = run(warmupTradingDays(smaCross(200), '1D'));
+    expect(full.warnings).toEqual([]);
+    expect(full.signals.some((x) => exchangeDate(x.candleTime) < firstValue)).toBe(true);
+    // Values still settling are named too: an EMA 50 has a value after 50 candles but needs 150.
+    const ema: StrategyDefinition = { ...smaCross(200), rules: [{ id: 'e', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'ema', period: 50 } }] }] };
+    const warmupCandles = warmupCandlesFrom(daily.filter((b) => b.time < et(start, '00:00')).slice(-100), ema, '1D', '1D');
+    const settling = runBacktest(params(daily.filter((b) => b.time >= et(start, '00:00')), ema, { baseTimeframe: '1D', timeframe: '1D', tradeFrom: et(start, '00:00'), config: ZERO_COST_CONFIG, warmupCandles }));
+    expect(settling.warnings.filter((w) => w.startsWith('Not enough history'))).toEqual([
+      `Not enough history before ${start} to warm up the indicators: the data had 100 1D candles before it. EMA 50 (needs 150) had values from the start, but they were still settling, so early signals may differ from a chart with more history.`,
+    ]);
+  });
+});
+
+describe('backtester: flatten before the close with daily candles', () => {
+  const alwaysLong = (exitAtSessionEnd: boolean): StrategyDefinition => ({
+    name: 'always long',
+    rules: [{ id: 'x', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'value', value: 0 } }] }],
+    sizing: { mode: 'shares', shares: 10 },
+    exitAtSessionEnd,
+    regularHoursOnly: true,
+  });
+  const minute = demoBars('AAPL', '2025-01-13', '2025-01-17');
+
+  it('holds overnight with a 1D signal timeframe on minute data, as on daily bars, and says so', () => {
+    const r = runBacktest(params(minute, alwaysLong(true), { timeframe: '1D', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-13', '00:00') }));
+    // Bought at the 14th's open after the 13th's candle closed, and still held at the end.
+    expect(r.trades.map((t) => [t.entryTime, t.closed])).toEqual([[et('2025-01-14', '09:30'), false]]);
+    expect(r.fills).toEqual(runBacktest(params(minute, alwaysLong(false), { timeframe: '1D', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-13', '00:00') })).fills);
+    expect(r.warnings).toContain('Flatten before the close does not apply to the 1D signal timeframe: each candle is a whole session, so positions are held overnight, as on daily bars.');
+    // The same strategy on daily bars holds just the same.
+    const daily = runBacktest(params(aggregateBars(minute.filter((b) => marketSession(b.time) === 'regular'), '1D'), alwaysLong(true), { baseTimeframe: '1D', timeframe: '1D', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-13', '00:00') }));
+    expect(daily.trades.map((t) => [t.entryTime, t.closed])).toEqual([[et('2025-01-14', '09:30'), false]]);
+  });
+
+  it('still flattens every day with 4-hour candles on minute data', () => {
+    const r = runBacktest(params(minute, alwaysLong(true), { timeframe: '4h', config: ZERO_COST_CONFIG, tradeFrom: et('2025-01-13', '00:00') }));
+    const closed = r.trades.filter((t) => t.closed);
+    expect(closed.length).toBeGreaterThanOrEqual(3);
+    for (const t of closed) expect(exchangeDate(t.exitTime!)).toBe(exchangeDate(t.entryTime));
+    expect(r.warnings.some((w) => w.startsWith('Flatten before the close'))).toBe(false);
+  });
+});
+
+describe('the name results give a strategy', () => {
+  const preset = STRATEGY_PRESETS[0];
+  const copy = (): StrategyDefinition => JSON.parse(JSON.stringify(preset));
+
+  it("keeps a preset's name only while its rules and settings are the preset's", () => {
+    expect(strategyLabel(copy())).toBe(preset.name);
+    const period = copy();
+    period.rules[0].conditions[0].right = { kind: 'ema', period: 30 };
+    expect(strategyLabel(period)).toBe(`Custom rules based on ${preset.name}`);
+    const added = copy();
+    added.rules.push({ id: 'new', logic: 'all', action: 'short', conditions: [{ left: { kind: 'close' }, op: 'below', right: { kind: 'vwap' } }] });
+    expect(strategyLabel(added)).toBe(`Custom rules based on ${preset.name}`);
+    const stop = { ...copy(), stopLossPct: 2 };
+    expect(strategyLabel(stop)).toBe(`${preset.name} with edited settings`);
+    expect(strategyLabel({ ...copy(), exitAtSessionEnd: false })).toBe(`${preset.name} with edited settings`);
+    expect(strategyLabel({ ...copy(), sizing: { mode: 'risk_percent', percent: 2 } })).toBe(`${preset.name} with edited settings`);
+  });
+
+  it('does not count a new rule id, or ALL and ANY on a single condition, as an edit', () => {
+    const same = copy();
+    same.rules = same.rules.map((r, i) => ({ ...r, id: `again${i}`, logic: 'any' }));
+    expect(strategyLabel(same)).toBe(preset.name);
+  });
+
+  it('uses a name the user typed as it is', () => {
+    expect(strategyLabel({ ...copy(), name: '  My breakout ' })).toBe('My breakout');
+    expect(strategyLabel({ ...copy(), name: ' ' })).toBe('Unnamed strategy');
+  });
+});

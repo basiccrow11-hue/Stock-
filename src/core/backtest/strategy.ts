@@ -149,6 +149,50 @@ export function computeSeries(s: SeriesRef, bars: readonly Bar[]): number[] {
   }
 }
 
+/**
+ * How many completed candles a series needs before its values can be used: up to and including its
+ * first value, and for indicators that carry their past forward (EMA, MACD, RSI, ATR), enough more
+ * that the starting value they were seeded with weighs under 2% of today's. That is three times the
+ * period for an EMA or the MACD line (the signal line needs three times its own period on top), and
+ * five times for RSI and ATR, whose Wilder smoothing forgets more slowly. Prices, numbers and VWAP
+ * (which restarts every session) need only the candle itself.
+ */
+export function seriesWarmup(s: SeriesRef): number {
+  switch (s.kind) {
+    case 'sma':
+    case 'bb_upper':
+    case 'bb_middle':
+    case 'bb_lower':
+      return s.period;
+    case 'ema':
+      return 3 * s.period;
+    case 'rsi':
+      // The first change needs a previous close.
+      return 5 * s.period + 1;
+    case 'atr':
+      return 5 * s.period;
+    case 'macd':
+      return 3 * Math.max(s.fast, s.slow);
+    case 'macd_signal':
+    case 'macd_hist':
+      return 3 * Math.max(s.fast, s.slow) + 3 * s.signal;
+    default:
+      return 1;
+  }
+}
+
+/** Candles of history the rules need before they are first evaluated: the longest series warm-up, plus the previous candle a cross compares with. */
+export function strategyWarmup(strategy: StrategyDefinition): number {
+  let n = 1;
+  for (const rule of strategy.rules) {
+    for (const c of rule.conditions) {
+      const cross = c.op === 'crosses_above' || c.op === 'crosses_below' ? 1 : 0;
+      n = Math.max(n, Math.max(seriesWarmup(c.left), seriesWarmup(c.right)) + cross);
+    }
+  }
+  return n;
+}
+
 /** Evaluate a condition at candle i using only values at i and i-1. */
 export function evalCondition(c: Condition, left: readonly number[], right: readonly number[], i: number): boolean {
   const l = left[i];
@@ -262,3 +306,25 @@ export const STRATEGY_PRESETS: StrategyDefinition[] = [
     regularHoursOnly: true,
   },
 ];
+
+/** A rule as text, without its id, and without ALL or ANY when it has one condition (both mean the same then). */
+function ruleKey(r: Rule): string {
+  const conditions = r.conditions.map((c) => `${seriesKey(c.left)} ${c.op} ${seriesKey(c.right)}`).join(' ; ');
+  return `${r.conditions.length > 1 ? r.logic : ''} ${conditions} => ${r.action}`;
+}
+
+/**
+ * What results call a strategy. A preset's name is used only while the strategy still is that preset:
+ * edited rules are "Custom rules based on" it, and its rules with another stop, target, size or
+ * session setting are the preset "with edited settings". A name the user typed is used as typed.
+ */
+export function strategyLabel(s: StrategyDefinition): string {
+  const name = s.name.trim();
+  const preset = STRATEGY_PRESETS.find((p) => p.name === name);
+  if (!preset) return name || 'Unnamed strategy';
+  if (s.rules.length !== preset.rules.length || s.rules.some((r, i) => ruleKey(r) !== ruleKey(preset.rules[i]))) return `Custom rules based on ${preset.name}`;
+  const settings = (x: StrategyDefinition) =>
+    JSON.stringify([x.stopLossPct ?? null, x.takeProfitPct ?? null, x.sizing.mode, x.sizing.mode === 'shares' ? x.sizing.shares : x.sizing.percent, x.exitAtSessionEnd, x.regularHoursOnly]);
+  if (settings(s) !== settings(preset)) return `${preset.name} with edited settings`;
+  return preset.name;
+}
