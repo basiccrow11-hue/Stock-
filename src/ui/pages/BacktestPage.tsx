@@ -1,6 +1,6 @@
 /** Rule-based backtester: build IF/THEN rules, pick data, run without look-ahead, inspect results. */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { CandlestickSeries, createChart, createSeriesMarkers, PriceLineSource, type SeriesMarker, type Time } from 'lightweight-charts';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { CandlestickSeries, createChart, createSeriesMarkers, PriceLineSource, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
 import {
   OPERATOR_LABELS,
   STRATEGY_PRESETS,
@@ -28,6 +28,7 @@ import { toChartTime } from '../chart/ChartView';
 import { candleOptions, lastVisibleIndex, panelChartOptions } from '../chart/chartTheme';
 import { chartLabelFill } from '../theme/color';
 import { useTheme } from '../theme/useTheme';
+import type { PanelChartPalette } from '../theme/themes';
 import { CHART_LOCALE, dateTime, money, pnlClass, price, qty, signedMoney } from '../services/format';
 import { newId } from '../../core/util/ids';
 import { lastIndexAtOrBefore } from '../../core/util/math';
@@ -182,12 +183,24 @@ function describeRule(r: Rule): string {
   return `IF ${r.conditions.map((c) => `${seriesLabel(c.left)} ${OPERATOR_LABELS[c.op]} ${seriesLabel(c.right)}`).join(r.logic === 'all' ? ' AND ' : ' OR ')} THEN ${r.action.toUpperCase()}`;
 }
 
-function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe: Timeframe }) {
+/**
+ * The trades chart. Built only while the page shows (a chart sized while hidden has no width, and
+ * would open zoomed out on every candle), and kept while it is hidden; a result or a theme change made
+ * meanwhile rebuilds it when the page shows again.
+ */
+function ResultChart({ result, timeframe, panel, active }: { result: BacktestResult; timeframe: Timeframe; panel: PanelChartPalette; active: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
-  const panel = useTheme().panel;
+  const built = useRef<{ chart: IChartApi; result: BacktestResult; timeframe: Timeframe; panel: PanelChartPalette } | null>(null);
+  useEffect(() => () => {
+    built.current?.chart.remove();
+    built.current = null;
+  }, []);
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || !active) return;
+    const was = built.current;
+    if (was && was.result === result && was.timeframe === timeframe && was.panel === panel) return;
+    was?.chart.remove();
     const themed = panelChartOptions(panel);
     const chart = createChart(el, {
       ...themed,
@@ -229,10 +242,72 @@ function ResultChart({ result, timeframe }: { result: BacktestResult; timeframe:
     if (n > 200) chart.timeScale().setVisibleLogicalRange({ from: n - 200, to: n + 5 });
     else chart.timeScale().fitContent();
     syncLabel();
-    return () => chart.remove();
-  }, [result, timeframe, panel]);
+    built.current = { chart, result, timeframe, panel };
+  }, [result, timeframe, panel, active]);
   return <div ref={ref} style={{ height: 380, position: 'relative' }} />;
 }
+
+// The results' tables can hold thousands of rows: they re-render only when their data changes, not
+// on every theme change made while the page is hidden.
+const TradesTable = memo(function TradesTable({ trades }: { trades: BacktestResult['trades'] }) {
+  return (
+    <table className="grid">
+      <thead>
+        <tr>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th className="num">Qty</th>
+          <th className="num">Entry px</th>
+          <th className="num">Exit px</th>
+          <th className="num">P/L</th>
+          <th>Held</th>
+        </tr>
+      </thead>
+      <tbody>
+        {trades.map((t) => (
+          <tr key={t.id}>
+            <td className={t.direction === 'long' ? 'pos' : 'neg'}>{t.direction.toUpperCase()}</td>
+            <td className="mono small">{dateTime(t.entryTime)}</td>
+            <td className="mono small">{t.exitTime ? dateTime(t.exitTime) : 'open'}</td>
+            <td className="num">{qty(t.maxQuantity)}</td>
+            <td className="num">{price(t.avgEntry)}</td>
+            <td className="num">{price(t.avgExit)}</td>
+            <td className={`num ${pnlClass(t.pnl)}`}>{signedMoney(t.pnl)}</td>
+            <td>{t.exitTime ? formatDuration(t.exitTime - t.entryTime) : '—'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+});
+
+const SignalsTable = memo(function SignalsTable({ signals }: { signals: BacktestResult['signals'] }) {
+  return (
+    <table className="grid">
+      <thead>
+        <tr>
+          <th>Candle closed</th>
+          <th>Action</th>
+          <th className="num">Close</th>
+          <th>Executed</th>
+          <th>Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {signals.map((s, i) => (
+          <tr key={i}>
+            <td className="mono small">{dateTime(s.candleTime)}</td>
+            <td>{s.action.toUpperCase()}</td>
+            <td className="num">{price(s.price)}</td>
+            <td>{s.executed ? 'yes' : 'no'}</td>
+            <td className="small muted">{s.note ?? ''}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+});
 
 /**
  * Stays mounted once opened (App hides it while another page is showing), so the strategy, the
@@ -263,7 +338,8 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   /** What a screen reader is told when a run finishes. */
   const [announce, setAnnounce] = useState('');
-  const [result, setResult] = useState<{ r: BacktestResult; tf: Timeframe; label: string; source: DataSourceKind } | null>(null);
+  /** The last run's results, with the rules that produced them (the editor may have changed since). */
+  const [result, setResult] = useState<{ r: BacktestResult; tf: Timeframe; label: string; rules: string[]; source: DataSourceKind } | null>(null);
   const [tab, setTab] = useState<'trades' | 'signals'>('trades');
   /** The run in progress: Cancel aborts its bar download, or stops the worker once it is running. */
   const runRef = useRef<{ controller: AbortController; started: number } | null>(null);
@@ -272,9 +348,10 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
 
   const provider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
 
-  const validation = useMemo(() => {
-    const reason = provider.unavailableReason();
-    if (reason) return reason;
+  // Read on every render: a key or a CSV added on another page makes the source available without
+  // changing anything this page holds.
+  const unavailable = provider.unavailableReason();
+  const fieldError = useMemo(() => {
     if (!symbol.trim()) return 'Choose a ticker.';
     if (!from || !to || from > to) return 'Choose a valid date range.';
     if (!strategy.rules.length) return 'Add at least one rule.';
@@ -284,7 +361,8 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
     const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000);
     if (days > 1100) return 'Backtests are limited to about three years per run to keep memory use reasonable in the browser.';
     return null;
-  }, [provider, symbol, from, to, strategy, balance]);
+  }, [symbol, from, to, strategy, balance]);
+  const validation = unavailable ?? fieldError;
 
   const run = async () => {
     if (validation || runRef.current) return;
@@ -330,7 +408,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
       runRef.current!.started = performance.now();
       const r = await job;
       if (cancelled()) throw new Error('Cancelled');
-      setResult({ r, tf: timeframe, label: `${strategy.name} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, source: provider.source });
+      setResult({ r, tf: timeframe, label: `${strategy.name} · ${sym} · ${tradeStart} → ${end} · ${timeframe}`, rules: strategy.rules.map(describeRule), source: provider.source });
       const done = `Backtest done: ${r.stats.totalTrades} ${r.stats.totalTrades === 1 ? 'trade' : 'trades'}, strategy return ${r.stats.totalReturnPct.toFixed(2)}%.`;
       setAnnounce(done);
       // Finished while another page is showing: say so there.
@@ -541,8 +619,8 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
               <span className="small muted">{result.label}</span>
             </div>
             <div className="small muted">
-              {strategy.rules.map((r) => (
-                <div key={r.id}>{describeRule(r)}</div>
+              {result.rules.map((r, i) => (
+                <div key={i}>{r}</div>
               ))}
             </div>
             {result.r.warnings.map((w, i) => (
@@ -563,9 +641,10 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
             </div>
             <StatsGrid s={result.r.stats} />
             <h3>Equity vs buy &amp; hold</h3>
-            {result.r.equityCurve.length > 1 ? <LineChart lines={equityLines} height={240} format={money} /> : <p className="muted small">No equity changes.</p>}
+            {/* Fitted to its width when drawn, so drawn only while the page shows. */}
+            {result.r.equityCurve.length <= 1 ? <p className="muted small">No equity changes.</p> : active ? <LineChart lines={equityLines} height={240} format={money} /> : <div style={{ height: 240 }} />}
             <h3>Trades on chart</h3>
-            <ResultChart result={result.r} timeframe={result.tf} />
+            <ResultChart result={result.r} timeframe={result.tf} panel={panel} active={active} />
             <div className="tabs">
               <button className={tab === 'trades' ? 'on' : ''} aria-pressed={tab === 'trades'} onClick={() => setTab('trades')}>
                 Trades <span className="count">{result.r.trades.length}</span>
@@ -575,59 +654,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
               </button>
             </div>
             <div style={{ maxHeight: 420, overflow: 'auto' }}>
-              {tab === 'trades' ? (
-                <table className="grid">
-                  <thead>
-                    <tr>
-                      <th>Side</th>
-                      <th>Entry</th>
-                      <th>Exit</th>
-                      <th className="num">Qty</th>
-                      <th className="num">Entry px</th>
-                      <th className="num">Exit px</th>
-                      <th className="num">P/L</th>
-                      <th>Held</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.r.trades.map((t) => (
-                      <tr key={t.id}>
-                        <td className={t.direction === 'long' ? 'pos' : 'neg'}>{t.direction.toUpperCase()}</td>
-                        <td className="mono small">{dateTime(t.entryTime)}</td>
-                        <td className="mono small">{t.exitTime ? dateTime(t.exitTime) : 'open'}</td>
-                        <td className="num">{qty(t.maxQuantity)}</td>
-                        <td className="num">{price(t.avgEntry)}</td>
-                        <td className="num">{price(t.avgExit)}</td>
-                        <td className={`num ${pnlClass(t.pnl)}`}>{signedMoney(t.pnl)}</td>
-                        <td>{t.exitTime ? formatDuration(t.exitTime - t.entryTime) : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <table className="grid">
-                  <thead>
-                    <tr>
-                      <th>Candle closed</th>
-                      <th>Action</th>
-                      <th className="num">Close</th>
-                      <th>Executed</th>
-                      <th>Note</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.r.signals.map((s, i) => (
-                      <tr key={i}>
-                        <td className="mono small">{dateTime(s.candleTime)}</td>
-                        <td>{s.action.toUpperCase()}</td>
-                        <td className="num">{price(s.price)}</td>
-                        <td>{s.executed ? 'yes' : 'no'}</td>
-                        <td className="small muted">{s.note ?? ''}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+              {tab === 'trades' ? <TradesTable trades={result.r.trades} /> : <SignalsTable signals={result.r.signals} />}
             </div>
           </div>
         )}

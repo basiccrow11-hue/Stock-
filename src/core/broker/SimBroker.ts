@@ -71,6 +71,8 @@ export interface BrokerState {
   clock: UnixSeconds;
   sessionDate: string;
   dayStartEquity: number;
+  /** The lowest equity at a bar's close since the session began (Strict Mode's daily limit holds once reached). */
+  dayLowEquity?: number;
   equityCurve: EquityPoint[];
   events: BrokerEvent[];
   version: number;
@@ -117,6 +119,8 @@ export interface TradeRisk {
   /** Shares held in the trade, and in its other working entries. */
   held: number;
   working: number;
+  /** The trade's largest size so far, when the review's measure counts the trade at it (more shares than it holds and has working). */
+  peak?: number;
   /** The trade's average entry is already at or past its first stop, so its risk can't be measured. */
   unmeasurable: boolean;
 }
@@ -469,17 +473,25 @@ export class SimBroker {
       gD += x.n * x.d;
       gQ += x.n;
     }
-    const review = Math.max(gQ > 0 ? (M0 * gD) / gQ : 0, Q0 + N > 0 ? ((t.held + N) * (D0 + adds.reduce((a, x) => a + x.n * x.d, 0))) / (Q0 + N) : 0);
+    const atPeak = gQ > 0 ? (M0 * gD) / gQ : 0;
+    const atAll = Q0 + N > 0 ? ((t.held + N) * (D0 + adds.reduce((a, x) => a + x.n * x.d, 0))) / (Q0 + N) : 0;
+    const review = Math.max(atPeak, atAll);
     const loss = -(t.trip?.pnl ?? 0) + t.held * d(t.pos.avgPrice) + adds.reduce((a, x) => a + x.n * x.d, 0);
     const commission = o.quantity > 0 ? 2 * commissionFor(this.cfg, o.quantity, o.fillAt) : 0;
     const dollars = Math.max(review, loss) + commission;
-    return { ...base, pct: equity > 0 ? (dollars / equity) * 100 : Infinity, dollars, by: loss > review + EPS ? 'loss' : 'review', unmeasurable: false };
+    const by = loss > review + EPS ? 'loss' : 'review';
+    const peak = by === 'review' && M0 > t.held + N && atPeak >= atAll - EPS ? M0 : undefined;
+    return { ...base, pct: equity > 0 ? (dollars / equity) * 100 : Infinity, dollars, by, unmeasurable: false, ...(peak ? { peak } : {}) };
   }
 
-  /** Whether today's loss has reached Strict Mode's daily limit. */
+  /**
+   * Whether today's loss has reached Strict Mode's daily limit: now, or at any bar's close since the
+   * session began, so the limit holds until the next session even if open trades recover.
+   */
   private dailyLimitReached(): boolean {
-    const acct = this.account();
-    return this.s.dayStartEquity > 0 && (-acct.dayPnl / this.s.dayStartEquity) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
+    const start = this.s.dayStartEquity;
+    const low = Math.min(this.account().equity, this.s.dayLowEquity ?? Infinity);
+    return start > 0 && (money(start - low) / start) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
   }
 
   /**
@@ -563,7 +575,13 @@ export class SimBroker {
         const raised = this.workingOrders(sym).some((x) => x.action === (long ? 'sell' : 'cover') && (x.type === 'stop' || x.type === 'stop_limit') && (x.stopPrice! - S) * t.dir > EPS);
         const tighter = o.stopLoss !== undefined && (o.stopLoss - S) * t.dir > EPS;
         const why = tighter ? `This order's tighter stop at ${formatTick(o.stopLoss!)}` : raised ? 'Raising your stop' : '';
-        return `Strict risk: with this order the ${sym} trade would risk ${over(risk.pct, L, 2)}% (limit ${L}%), counting ${parts}, every share from the trade's first stop at ${formatTick(S)}, as the trade review counts it.${why ? ` ${why} does not change this: the review counts every share from the first stop.` : ''}`;
+        const unchanged = why ? ` ${why} does not change this: the review counts every share from the first stop.` : '';
+        if (risk.peak && t.trip) {
+          // Sold down since its largest size: the review still counts that many shares, from the trade's average entry.
+          const raises = (fillAt - t.trip.avgEntry) * t.dir > EPS;
+          return `Strict risk: with this order the ${sym} trade would risk ${over(risk.pct, L, 2)}% (limit ${L}%). The trade review counts the trade at its largest size, ${shares(risk.peak)} (you hold ${shares(risk.held)} now), from its average entry to its first stop at ${formatTick(S)}${raises ? ', and this order raises that average' : ''}.${unchanged}`;
+        }
+        return `Strict risk: with this order the ${sym} trade would risk ${over(risk.pct, L, 2)}% (limit ${L}%), counting ${parts}, every share from the trade's first stop at ${formatTick(S)}, as the trade review counts it.${unchanged}`;
       }
     }
     // The position: the shares held that way at the last price, the working entries at their prices.
@@ -595,7 +613,7 @@ export class SimBroker {
     const assess = (px: number) =>
       assessRisk({ action: o.action, quantity: o.quantity, entryPrice: px, stopLoss: o.stopLoss, takeProfit: o.takeProfit, equity: acct.equity, commissionEstimate: commissionFor(this.cfg, o.quantity, px) });
     const risk = assess(refPrice);
-    if (risk.errors.length) return fail(expected.atOnce ? throughTheMarket(risk.errors[0], o.type, refPrice, this.cfg.marketOrderFill) : risk.errors[0]);
+    if (risk.errors.length) return fail(expected.through ? throughTheMarket(risk.errors[0], o.type, refPrice, expected.atOnce ? this.cfg.marketOrderFill : o.type === 'limit' && o.extendedHours && this.cfg.allowExtendedHours ? 'next' : 'regular') : risk.errors[0]);
     // The risk itself is measured at the price the order is expected to fill at with its costs, as
     // the ticket sizes it and the review judges it.
     const fillAt = this.estimateFill(o) ?? refPrice;
@@ -672,7 +690,7 @@ export class SimBroker {
         return {
           ok: false as const,
           error: joined
-            ? `With even one more share the ${req.symbol} trade would risk ${one.pct.toFixed(2)}% from its first stop at ${S}, more than the ${riskPct}% asked.`
+            ? `With even one more share the ${req.symbol} trade would risk ${over(one.pct, riskPct, 2)}% from its first stop at ${S}${one.peak ? `, counted at its largest size of ${shares(one.peak)} as the trade review counts it` : ''}, more than the ${riskPct}% asked.`
             : `Even one share would risk more than ${riskPct}% of the account at this stop${2 * commissionFor(b.cfg, 1, fill1) > 0 ? ', with commissions in and out' : ''}.`,
         };
       }
@@ -986,30 +1004,34 @@ export class SimBroker {
   /**
    * Where an order is expected to fill, which its stop loss and target are checked against: a market
    * order at the quote (buys pay the ask, sells hit the bid), a stop at its stop price, a limit at its
-   * limit, unless the stop or limit is already through the market and fills at once, at the quote.
+   * limit, unless the stop or limit is already through the market (`through`) and fills near the
+   * quote: at once when it can trade now (`atOnce`), or as soon as its session opens (a plain stop or
+   * limit placed in the pre-market, say, which fills at the open near today's price, not at its own).
    * `quote` is that quote: the wider extended-hours one only for an order that can trade outside the
-   * regular session (an extended-hours limit); market and stop orders wait for it. `clock` is the time
-   * the order is placed at (the broker's own clock, or the replay's ahead of it).
+   * regular session (an extended-hours limit); market and stop orders wait for it. `tradesNow` says
+   * whether the order can trade in the symbol's current session. `clock` is the time the order is
+   * placed at (the broker's own clock, or the replay's ahead of it).
    */
   private expectedEntry(
     o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>,
     clock = this.s.clock,
-  ): { price: number; quote: number; atOnce: boolean } {
+  ): { price: number; quote: number; through: boolean; atOnce: boolean; tradesNow: boolean } {
     const last = this.s.lastPrice[o.symbol] ?? 0;
     const session = this.symbolSession(o.symbol, clock);
+    const tradesNow = this.eligible(o, session);
     const extended = session !== 'regular' && o.type === 'limit' && !!o.extendedHours && this.cfg.allowExtendedHours;
     const hs = halfSpread(this.cfg, last, extended);
     const buy = actionSide(o.action) === 'buy';
     const quote = last + (buy ? hs : -hs);
-    if (o.type === 'market') return { price: quote, quote, atOnce: false };
+    if (o.type === 'market') return { price: quote, quote, through: false, atOnce: false, tradesNow };
     const own = o.type === 'stop' ? o.stopPrice! : o.limitPrice!;
     // Already through the market, it fills near the quote: at once, or at the next bar's open (about
-    // the same price) in next-bar-open mode.
-    if ((o.type === 'stop' || o.type === 'limit') && this.eligible(o, session) && this.triggerLevel(o as Order, last, last, session !== 'regular') !== null) {
+    // the same price) in next-bar-open mode, or at the first bar of the session it can trade in.
+    if ((o.type === 'stop' || o.type === 'limit') && this.triggerLevel(o as Order, last, last, extended) !== null) {
       const atQuote = buy ? ceilTick(quote) : floorTick(quote);
-      return { price: o.type === 'stop' ? atQuote : buy ? Math.min(own, atQuote) : Math.max(own, atQuote), quote, atOnce: true };
+      return { price: o.type === 'stop' ? atQuote : buy ? Math.min(own, atQuote) : Math.max(own, atQuote), quote, through: true, atOnce: tradesNow, tradesNow };
     }
-    return { price: own, quote, atOnce: false };
+    return { price: own, quote, through: false, atOnce: false, tradesNow };
   }
 
   /**
@@ -1027,9 +1049,13 @@ export class SimBroker {
     const last = this.s.lastPrice[symbol];
     if (last === undefined) return null;
     const expected = this.expectedEntry({ ...o, symbol, extendedHours: !!o.extendedHours }, Math.max(now ?? this.s.clock, this.s.clock));
-    const x = o.type === 'market' || expected.atOnce ? last : o.stopPrice!;
+    const x = o.type === 'market' || expected.through ? last : o.stopPrice!;
     const volume = this.s.lastBar[symbol]?.volume ?? 0;
-    const qty = Math.min(o.quantity, this.barCapacity(volume, this.s.barVolumeUsed?.[symbol] ?? 0));
+    // An order that fills against the last bar now gets what is left of that bar's volume; one that
+    // fills on a later bar (a stop not yet reached, an order waiting for its session, next-bar-open
+    // mode) gets a whole bar's, and pays the impact of that many shares.
+    const fillsNow = this.cfg.marketOrderFill === 'last_price' && (o.type === 'market' ? expected.tradesNow : expected.atOnce);
+    const qty = Math.min(o.quantity, this.barCapacity(volume, fillsNow ? (this.s.barVolumeUsed?.[symbol] ?? 0) : 0));
     // Market and stop orders only trade in the regular session, at its spread.
     return this.marketFill(actionSide(o.action), x, qty, volume, false).price;
   }
@@ -1061,6 +1087,7 @@ export class SimBroker {
     const date = exchangeDate(barTime);
     if (date !== this.s.sessionDate) {
       if (this.s.sessionDate) this.s.dayStartEquity = this.account().equity;
+      this.s.dayLowEquity = undefined;
       this.s.sessionDate = date;
     }
     const session = marketSession(barTime);
@@ -1189,6 +1216,7 @@ export class SimBroker {
 
   private recordEquity(time: UnixSeconds): void {
     const eq = this.account().equity;
+    this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? eq, eq);
     const curve = this.s.equityCurve;
     const last = curve[curve.length - 1];
     if (last && last.time === time) last.equity = eq;
@@ -1546,9 +1574,12 @@ export class SimBroker {
       trip.closed = true;
       trip.exitTime = fill.time;
       delete this.s.openTripBySymbol[symbol];
-      // Flat: any remaining exit orders for this symbol are orphans. Under Strict Mode, so are the entries
-      // still working on the trade's side: they were measured as part of it (from its first stop, against
-      // the equity it started with), and filling now they would start a new trade that was never checked.
+      // Flat: any remaining exit orders for this symbol are orphans. So is the rest of an entry that had
+      // already filled into the trade (as Close position cancels it): its bracket stop came with the
+      // shares it closed, and a new trade from it would get a stop already past the price. Under Strict
+      // Mode so are the other entries working on the trade's side: they were measured as part of it
+      // (from its first stop, against the equity it started with), and filling now they would start a
+      // new trade that was never checked.
       const entry = trip.direction === 'long' ? 'buy' : 'short';
       for (const x of this.liveOrders()) {
         if (x.symbol !== symbol || !isOpen(x)) continue;
@@ -1557,6 +1588,8 @@ export class SimBroker {
           x.rejectReason = 'Position closed';
           x.updatedAt = fill.time;
           this.log('cancelled', `${describe(x)} cancelled: position closed`, x.id);
+        } else if (x.action === entry && x.filledQty > 0) {
+          this.autoCancel(x, fill.time, `It filled ${shares(x.filledQty)} into the ${symbol} trade, which has closed. Place it again to start a new trade.`, `the ${symbol} trade it filled into closed`);
         } else if (x.action === entry && this.cfg.strictRisk.enabled) {
           this.autoCancel(x, fill.time, `Strict Mode: it was measured as part of the ${symbol} trade that closed. Place it again to check it as a new trade.`, `Strict Mode measured it as part of the ${symbol} trade that closed`);
         }
@@ -1625,8 +1658,14 @@ export function isOpeningAction(a: OrderAction): boolean {
 }
 
 /** A bracket error for a stop or limit already through the market, which fills at once at the quote rather than at its own price. */
-function throughTheMarket(error: string, type: OrderType, price: number, fill: ExecutionConfig['marketOrderFill']): string {
-  return `${error.replace(/\.$/, '')}: this ${type === 'stop' ? 'stop' : 'limit'} is already through the market, so it would fill ${fill === 'last_price' ? 'at once' : "at the next bar's open"} at about ${formatTick(price)}.`;
+/** `fill` is when it fills: now (by the fill mode), or 'regular' / 'next' for an order waiting for the regular session or for the stock's next bar. */
+function throughTheMarket(error: string, type: OrderType, price: number, fill: ExecutionConfig['marketOrderFill'] | 'regular' | 'next'): string {
+  const at = `at about ${formatTick(price)}`;
+  const when =
+    fill === 'last_price' ? `at once ${at}`
+    : fill === 'next_bar_open' ? `at the next bar's open ${at}`
+    : `${at} when the stock next trades${fill === 'regular' ? ' in the regular session' : ''}`;
+  return `${error.replace(/\.$/, '')}: this ${type === 'stop' ? 'stop' : 'limit'} is already through the market, so it would fill ${when}.`;
 }
 
 /** The price an entry order was placed at: its limit, its stop, or for a market order the price it was checked against. */

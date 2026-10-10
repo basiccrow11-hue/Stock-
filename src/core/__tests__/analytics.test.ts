@@ -665,10 +665,11 @@ describe('learning review', () => {
     it('says price was already past both when an order on a hidden daily bar fills past its stop', () => {
       const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
       const day = (d: string, o: number, h: number, l: number, c: number) => bar(et(d, '09:30'), o, h, l, c);
-      const bars = [day('2025-01-14', 99, 101, 98, 100), day('2025-01-15', 110, 114, 108, 112)];
+      const bars = [day('2025-01-14', 99, 112, 98, 111), day('2025-01-15', 110, 114, 108, 112)];
       b.onBar('T', bars[0], 23_400);
       b.syncClock(et('2025-01-15', '12:00'));
-      // Placed at noon, while the day's bar is hidden: by then its path (110 → 108 → 114 → 112) is near 108.92.
+      // Placed at noon below yesterday's close, while the day's bar is hidden: by then its path
+      // (110 → 108 → 114 → 112) is near 108.92.
       expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 110, quantity: 10, stopLoss: 109.5, tif: 'gtc' }).order!.status).toBe('pending');
       b.onBar('T', bars[1], 23_400);
       const { t, text } = review(b, bars);
@@ -775,37 +776,55 @@ describe('learning review', () => {
     expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
   });
 
-  it("closes the trade with its stop before the rest of a part-filled entry fills at a gap, and the rest starts a new trade", () => {
+  it("closes the trade with its stop before the rest of a part-filled entry fills at a gap, and cancels the rest", () => {
     const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
     const t0 = et('2025-01-15', '10:00');
     const bars = [
       bar(t0, 100, 100, 100, 100, 4000),
       bar(t0 + 60, 100.1, 100.1, 99.4, 99.45, 4000), // 1000 of the 2000 fill at the limit
-      bar(t0 + 120, 99, 99.1, 98.9, 99, 4000), // gap past the stop: the stop sells first and takes the bar's volume cap
-      bar(t0 + 180, 99, 99.1, 98.9, 99, 40000), // the rest of the entry, still working, fills and its stop fires
+      bar(t0 + 120, 99, 99.1, 98.9, 99, 4000), // gap past the stop: the stop sells first and closes the trade
+      bar(t0 + 180, 99, 99.1, 98.9, 99, 40000), // the rest of the entry would fill here, with a stop already past the price
     ];
     b.onBar('T', bars[0]);
-    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day' }).ok).toBe(true);
+    const entry = b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 99.9, quantity: 2000, stopLoss: 99.5, takeProfit: 101, tif: 'day' }).order!;
     for (const x of bars.slice(1)) b.onBar('T', x);
     const st = b.state;
     expect(st.fills.map((f) => [f.time - t0, f.side, f.quantity])).toEqual([
       [85, 'buy', 1000],
       [120, 'sell', 1000],
-      [180, 'buy', 1000],
-      [180, 'sell', 1000],
     ]);
-    expect(st.roundTrips.map((t) => [t.maxQuantity, t.closed])).toEqual([
-      [1000, true],
-      [1000, true],
-    ]);
-    const reviews = st.roundTrips.map((t) =>
-      reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES }),
-    );
-    for (const r of reviews) {
-      expect(r.findings.map((f) => f.title)).not.toContain('Added past your stop');
-      expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
+    // One order, one trade: the rest is cancelled when the trade it filled into closes, and the user is told.
+    expect(st.roundTrips.map((t) => [t.maxQuantity, t.closed])).toEqual([[1000, true]]);
+    expect(st.orders.find((o) => o.id === entry.id)).toMatchObject({
+      status: 'cancelled',
+      filledQty: 1000,
+      conflict: true,
+      rejectReason: 'It filled 1000 shares into the T trade, which has closed. Place it again to start a new trade.',
+    });
+    const r = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    expect(r.findings.map((f) => f.title)).not.toContain('Added past your stop');
+    expect(r.rules.find((c) => c.rule.startsWith('Risk'))!.passed).toBe(true);
+  });
+
+  it('turns one large entry on a thin stock into one trade when its stop fires while it is still filling', () => {
+    // 5000 shares at 10 on 2000-share bars (a 500-share cap) while price drifts through the stop with no
+    // gap: the stop and the rest of the entry would take turns, buying and selling every other bar.
+    const b = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const t0 = et('2025-01-15', '10:00');
+    const bars = [bar(t0, 10.05, 10.05, 10.05, 10.05, 2000)];
+    for (let i = 1; i <= 8; i++) {
+      const px = Math.round((10 - 0.1 * i) * 100) / 100;
+      bars.push(bar(t0 + 60 * i, px + 0.1, px + 0.1, px, px, 2000));
     }
-    expect(reviews[1].findings.find((f) => f.title === 'Entry filled past your stop')!.detail).toMatch(/^Price gapped through both your entry order at 99\.90 and your stop at 99\.50/);
+    for (let i = 9; i <= 20; i++) bars.push(bar(t0 + 60 * i, 9.4, 9.42, 9.38, 9.4, 2000));
+    b.onBar('T', bars[0]);
+    expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 10, quantity: 5000, stopLoss: 9.6, takeProfit: 11, tif: 'day' }).ok).toBe(true);
+    for (const x of bars.slice(1)) b.onBar('T', x);
+    const st = b.state;
+    expect(st.roundTrips.length).toBe(1);
+    expect(st.roundTrips[0].closed).toBe(true);
+    expect(b.position('T').quantity).toBe(0);
+    expect(st.fills.filter((f) => f.side === 'buy').reduce((a, f) => a + f.quantity, 0)).toBeLessThan(5000);
   });
 
   it('counts a loss on a position carried from an earlier day toward the daily loss rule', () => {

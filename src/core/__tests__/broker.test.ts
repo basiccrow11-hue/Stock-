@@ -537,7 +537,10 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
     const dear = { symbol: S, action: 'buy' as const, type: 'stop' as const, stopPrice: 10.8, quantity: 50, stopLoss: 9.6 };
     // 50 more at 10.80 make the average 10.16: 200 x 0.56 = $112 from the first stop.
     const refused = "Strict risk: with this order the TEST trade would risk 1.12% (limit 1%), counting the 100 shares you hold";
-    expect(broker.submit(dear).error).toBe(`${refused}, every share from the trade's first stop at 9.60, as the trade review counts it.`);
+    // Sold down to 100, the review still counts the trade at its largest size, and says so.
+    expect(broker.submit(dear).error).toBe(
+      "Strict risk: with this order the TEST trade would risk 1.12% (limit 1%). The trade review counts the trade at its largest size, 200 shares (you hold 100 shares now), from its average entry to its first stop at 9.60, and this order raises that average.",
+    );
     // A cheap entry at 9.70 would pull the average down only if it filled, so it changes nothing.
     const cheap = broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 9.7, quantity: 50, stopLoss: 9.6 }).order!;
     expect(broker.submit(dear).error).toBe(`${refused} and 50 shares in working entries, every share from the trade's first stop at 9.60, as the trade review counts it.`);
@@ -1196,5 +1199,96 @@ describe('snapshots', () => {
     broker.restore(before);
     expect(broker.getState()).toEqual(before);
     expect(broker.position(S).quantity).toBe(0);
+  });
+});
+
+describe('estimates for orders that fill later, and the daily loss limit', () => {
+  const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 1, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+  const reviewedPct = (broker: SimBroker, i = 0) => {
+    const st = broker.state;
+    const t = st.roundTrips[i];
+    return ((riskBasis(t)!.risk * t.maxQuantity) / equityBeforeEntry(t, st.fills, st.equityCurve, st.startingBalance)) * 100;
+  };
+
+  for (const dir of [1, -1] as const) {
+    it(`prices a ${dir === 1 ? 'buy' : 'short'} stop placed in the pre-market already past its level near the price, as it fills at the open`, () => {
+      const broker = new SimBroker({ startingBalance: 10_000, config: { ...DEFAULT_EXECUTION_CONFIG, strictRisk } });
+      const p = dir === 1 ? 52 : 48;
+      let t = et('2025-01-15', '08:00');
+      for (let i = 0; i < 30; i++, t += 60) broker.onBar(S, bar(t, p, p + 0.02, p - 0.02, p, 50_000));
+      const req = { symbol: S, action: dir === 1 ? ('buy' as const) : ('short' as const), type: 'stop' as const, stopPrice: p - dir, stopLoss: p - 2 * dir, tif: 'day' as const };
+      // A plain stop can't trade before the open, where it fills near today's price, not at its own.
+      expect(Math.abs(broker.estimateFill({ ...req, quantity: 100 })! - p)).toBeLessThan(0.05);
+      const size = broker.sizeByRisk(req, 1);
+      expect(size).toMatchObject({ ok: true, quantity: 49 });
+      expect(broker.submit({ ...req, quantity: 49 }).order!.status).toBe('pending');
+      t = et('2025-01-15', '09:30');
+      for (let i = 0; i < 3; i++, t += 60) broker.onBar(S, bar(t, p, p + 0.03, p - 0.03, p, 1_000_000));
+      expect(broker.position(S).quantity).toBe(49 * dir);
+      broker.closePosition(S);
+      broker.onBar(S, bar(t, p, p, p, p, 1_000_000));
+      expect(reviewedPct(broker)).toBeLessThanOrEqual(1);
+    });
+  }
+
+  it('checks the bracket of an order waiting for the open against where it will fill', () => {
+    for (const strict of [true, false]) {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...DEFAULT_EXECUTION_CONFIG, strictRisk: { ...strictRisk, enabled: strict } } });
+      let t = et('2025-01-15', '08:00');
+      for (let i = 0; i < 5; i++, t += 60) broker.onBar(S, bar(t, 52, 52.02, 51.98, 52, 50_000));
+      // A buy stop at 51 fills near 52 at the open, so a stop loss at 51.50 is below it.
+      expect(broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 51, quantity: 50, stopLoss: 51.5, tif: 'day' }).ok).toBe(true);
+      // A buy limit at 53 fills near 52 too, so a stop loss at 52.50 would be above it.
+      expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 53, quantity: 50, stopLoss: 52.5, tif: 'day' }).error).toBe(
+        'Stop loss must be below the entry price for a long: this limit is already through the market, so it would fill at about 52.01 when the stock next trades in the regular session.',
+      );
+    }
+  });
+
+  it('charges a resting stop entry the impact of a whole bar, whatever the last bar already traded', () => {
+    const run = (useBar: boolean) => {
+      const broker = new SimBroker({ startingBalance: 10_000, config: { ...DEFAULT_EXECUTION_CONFIG, strictRisk } });
+      let t = et('2025-01-15', '09:30');
+      broker.onBar(S, bar(t, 50, 50.05, 49.95, 50, 400));
+      if (useBar) {
+        // An in-and-out in the same bar uses up its volume cap.
+        broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 50, stopLoss: 49, tif: 'gtc' });
+        broker.closePosition(S);
+      }
+      const req = { symbol: S, action: 'buy' as const, type: 'stop' as const, stopPrice: 50.5, stopLoss: 49.5, tif: 'gtc' as const };
+      const size = broker.sizeByRisk(req, 1);
+      expect(size.ok).toBe(true);
+      if (!size.ok) return null;
+      broker.submit({ ...req, quantity: size.quantity });
+      t += 60;
+      broker.onBar(S, bar(t, 50, 50.7, 49.98, 50.6, 400));
+      const trip = broker.state.roundTrips[broker.state.roundTrips.length - 1];
+      return { quantity: size.quantity, est: broker.estimateFill({ ...req, quantity: size.quantity }), risk: ((trip.avgEntry - 49.5) * trip.maxQuantity) / 100 };
+    };
+    const fresh = run(false)!;
+    const used = run(true)!;
+    expect(used.quantity).toBe(fresh.quantity);
+    expect(used.risk).toBeLessThanOrEqual(1);
+  });
+
+  it('holds the daily loss limit for the rest of the session once reached, even if the open trade recovers', () => {
+    const { broker, next } = setup({ strictRisk: { ...strictRisk, maxRiskPctPerTrade: 5 } }, 10_000, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 46 }).ok).toBe(true);
+    next(50, 50, 46.9, 46.9); // -3.1% at the close
+    const add = { symbol: S, action: 'buy' as const, type: 'limit' as const, limitPrice: 48, quantity: 10, stopLoss: 46 };
+    const refused = 'Strict risk: daily loss limit of 3% reached. No new entries or adds until the next session.';
+    expect(broker.submit(add).error).toBe(refused);
+    next(46.9, 48.5, 46.9, 48.5); // back to -1.5%
+    expect(broker.submit(add).error).toBe(refused);
+    // The next session starts afresh.
+    broker.onBar(S, bar(et('2025-01-16', '09:30'), 48.5, 48.5, 48.5, 48.5));
+    expect(broker.submit(add).ok).toBe(true);
+  });
+
+  it('says an add is just over the asked % with enough decimals to read as over', () => {
+    const { broker } = setup({}, 50_000, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1666, stopLoss: 49.7 }).ok).toBe(true);
+    const sized = broker.sizeByRisk({ symbol: S, action: 'buy', type: 'limit', limitPrice: 50, stopLoss: 49.7 }, 1);
+    expect(sized).toEqual({ ok: false, error: "With even one more share the TEST trade would risk 1.0002% from its first stop at 49.70, more than the 1% asked." });
   });
 });

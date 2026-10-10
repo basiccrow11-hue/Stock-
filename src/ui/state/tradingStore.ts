@@ -277,7 +277,7 @@ function publishedCurve(src: EquityPoint[]): EquityPoint[] {
   return copy;
 }
 
-/** Tells the user about working orders the broker cancelled because a position the other way opened first. */
+/** Tells the user about working orders the broker cancelled (Order.conflict says when). */
 function announceConflicts(orders: readonly Order[]): void {
   for (const o of orders) {
     if (!o.conflict || eng.noticedConflicts.has(o.id)) continue;

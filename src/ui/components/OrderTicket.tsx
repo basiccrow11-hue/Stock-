@@ -164,7 +164,8 @@ export function OrderTicket() {
       return;
     }
     const joined = r.risk.held + r.risk.working > 0;
-    const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}.` : '';
+    const peak = r.risk.peak ? `, counted at its largest size of ${r.risk.peak} shares as the trade review counts it` : '';
+    const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}${peak}.` : '';
     if (r.reason) toast('info', `Sized to ${r.quantity}, below the ${r.needed} that ${String(+asked.toFixed(2))}% risk would need. ${r.reason}${trade}`, 8000);
     else if (joined) toast('info', `Sized to ${r.quantity}.${trade}`, 6000);
     setQuantity(String(r.quantity));
@@ -346,7 +347,7 @@ export function OrderTicket() {
             </span>
             {trade && (
               <>
-                <span className="muted" title="The whole trade with this order: every share, held, working or in this order, counted from the trade's first stop, as Strict Mode and the trade review measure it">
+                <span className="muted" title="The whole trade with this order: every share, held, working or in this order (or the trade's largest size, if you sold part), counted from the trade's first stop, as Strict Mode and the trade review measure it">
                   Trade risk
                 </span>
                 <span className={`num ${trade.unmeasurable || trade.pct > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
