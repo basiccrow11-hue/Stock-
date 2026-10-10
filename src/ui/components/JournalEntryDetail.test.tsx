@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -173,6 +174,87 @@ describe('your own rules on a trade review', () => {
     await settle();
     expect(stored()).toEqual({ 'No revenge trades': false });
     expect(mark('Trade with the trend')).toBe('–');
+    unsub();
+    act(() => root.unmount());
+  });
+
+  it('are buttons at least 24 px tall with rows apart, and fingertip-sized on touch screens', () => {
+    const style = document.createElement('style');
+    style.textContent = readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
+    document.head.appendChild(style);
+    document.body.innerHTML = '<div class="rule-row"><span class="seg own-rule"><button>Followed</button><button>Broke</button></span></div>';
+    const button = document.querySelector('.own-rule button')!;
+    expect(parseFloat(getComputedStyle(button).minHeight)).toBeGreaterThanOrEqual(24);
+    // The space above and below keeps one rule's buttons from touching the next rule's.
+    const seg = getComputedStyle(button.parentElement!);
+    expect(parseFloat(seg.marginTop) + parseFloat(seg.marginBottom)).toBeGreaterThanOrEqual(4);
+    const coarse = [...style.sheet!.cssRules].filter((r): r is CSSMediaRule => r instanceof CSSMediaRule && r.conditionText.includes('pointer: coarse'));
+    const touch = coarse.flatMap((m) => [...m.cssRules]).find((r): r is CSSStyleRule => r instanceof CSSStyleRule && r.selectorText === '.seg.own-rule button');
+    expect(touch?.style.minHeight).toBe('44px');
+    style.remove();
+  });
+
+  it('ask before a Broke mark that would fail the rules challenge you are on, and change nothing if you cancel', async () => {
+    const { reviewTrade, DEFAULT_TRADING_RULES } = await import('../../core/learning/review');
+    const t = 1_700_000_000;
+    const trip = {
+      ...{ id: 'r2', symbol: 'AAPL', direction: 'long' as const, entryTime: t, exitTime: t + 600, maxQuantity: 10, avgEntry: 100, avgExit: 101, entryQtyTotal: 10, exitQtyTotal: 10 },
+      ...{ pnl: 10, commission: 0, initialStop: 99, initialTarget: 102, highWhileOpen: 101, lowWhileOpen: 99.5, fills: [], closed: true, source: 'DEMO' as const },
+    };
+    const rules = { ...DEFAULT_TRADING_RULES, custom: ['Trade with the trend'] };
+    const review = reviewTrade({ trip, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 25_000, allTrips: [trip], rules });
+    db.set('r2', {
+      ...{ id: 'r2', sessionId: 's9', mode: 'replay', source: 'DEMO', symbol: 'AAPL', direction: 'long', entryTime: t, exitTime: t + 600, stopLoss: 99, takeProfit: 102 },
+      ...{ avgEntry: 100, avgExit: 101, quantity: 10, pnl: 10, returnPct: 1, holdingSeconds: 600, commission: 0, rewound: false, createdAt: 1 },
+      ...{ tag: '', notes: { ...EMPTY_NOTES }, trip, review },
+    });
+    vi.resetModules();
+    const { JournalEntryDetail } = await import('./JournalEntryDetail');
+    const { useJournal } = await import('../state/journalStore');
+    const { useTrading } = await import('../state/tradingStore');
+    const { useChallenges } = await import('../state/challengeStore');
+    await useJournal.getState().load();
+    // The trade belongs to the running session, whose rules challenge is under way.
+    useTrading.setState({ session: { id: 's9', mode: 'replay', source: 'DEMO', symbols: ['AAPL'], start: t, end: t + 3600, startDate: '2023-11-14', blind: false, label: 'AAPL' } });
+    const result = { status: 'in_progress' as const, progress: 0, detail: '', official: true };
+    useChallenges.getState().start({ id: 'a1', challengeId: 'rules-20', sessionId: 's9', startedAt: 1, label: 'AAPL', rules, result });
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const render = () => root.render(createElement(JournalEntryDetail, { entry: useJournal.getState().entries[0] }));
+    act(render);
+    const unsub = useJournal.subscribe(() => act(render));
+    const button = (label: 'Followed' | 'Broke') => [...host.querySelectorAll<HTMLButtonElement>('.own-rule button')].find((b) => b.textContent === label)!;
+    const stored = () => (db.get('r2') as JournalEntry).ruleChecks;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    button('Broke').focus();
+    act(() => button('Broke').click());
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toBe('Marking “Trade with the trend” as broken fails your challenge “Complete 20 trades while following your rules”. A failed attempt cannot be undone.\n\nContinue?');
+    await settle();
+    expect(stored()).toBeUndefined();
+    expect(button('Broke').getAttribute('aria-pressed')).toBe('false');
+    expect(document.activeElement).toBe(button('Broke'));
+
+    // Followed fails nothing, so it is not asked about.
+    act(() => button('Followed').click());
+    await settle();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(stored()).toEqual({ 'Trade with the trend': true });
+
+    confirm.mockReturnValue(true);
+    act(() => button('Broke').click());
+    expect(confirm).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(stored()).toEqual({ 'Trade with the trend': false });
+
+    // Once that challenge is over, or for a trade of another session, a mark fails nothing and is not asked about.
+    await useChallenges.getState().finishActive();
+    act(() => button('Followed').click());
+    act(() => button('Broke').click());
+    expect(confirm).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
     unsub();
     act(() => root.unmount());
   });

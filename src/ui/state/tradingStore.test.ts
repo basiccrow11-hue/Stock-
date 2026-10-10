@@ -646,6 +646,85 @@ describe('a challenge attempt', () => {
     useSettings.getState().update({ rules });
     await store.endSession();
   });
+
+  it('stops asking you to mark a trade whose journal entry you deleted, and says it does not count', async () => {
+    const store = await import('./tradingStore');
+    const { useChallenges } = await import('./challengeStore');
+    const { useSettings } = await import('./settingsStore');
+    const { useJournal } = await import('./journalStore');
+    const rules = useSettings.getState().rules;
+    useSettings.getState().update({ rules: { ...rules, custom: ['Trade with the trend'] } });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'rules-20' })).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    const entries = () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId);
+    for (let i = 0; i < 2; i++) {
+      store.stepForward();
+      const price = store.lastPrice('SPY')!;
+      expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1, stopLoss: price - 1, takeProfit: price + 2 }).ok).toBe(true);
+      store.stepForward();
+      expect(store.closePosition('SPY').ok).toBe(true);
+      store.stepForward();
+      // Closed, its journal entry still being written: it waits for its marks, it was not deleted.
+      if (i === 1) expect(useChallenges.getState().active?.result.detail).toBe('0/20 trades, all rules followed so far. 2 more trades count once you mark your own rules on their reviews (in the Journal).');
+      await vi.waitFor(() => expect(entries()).toHaveLength(i + 1));
+    }
+    const [second, first] = entries();
+    await useJournal.getState().updateRuleCheck(first.id, 'Trade with the trend', true);
+    expect(useChallenges.getState().active?.result.detail).toBe('1/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal).');
+    await useJournal.getState().remove(second.id);
+    expect(useChallenges.getState().active?.result).toMatchObject({ status: 'in_progress', detail: '1/20 trades, all rules followed so far. 1 trade whose journal entry was deleted does not count.' });
+    useSettings.getState().update({ rules });
+    await store.endSession();
+  });
+
+  it('does not take a trade whose journal entry a rewind removed, closed again, for one whose entry you deleted', async () => {
+    const store = await import('./tradingStore');
+    const { useChallenges } = await import('./challengeStore');
+    const { useSettings } = await import('./settingsStore');
+    const { useJournal } = await import('./journalStore');
+    const rules = useSettings.getState().rules;
+    useSettings.getState().update({ rules: { ...rules, custom: ['Trade with the trend'] } });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'rules-20' })).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    const entries = () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId);
+    store.stepForward();
+    const price = store.lastPrice('SPY')!;
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1, stopLoss: price - 1, takeProfit: price + 2 }).ok).toBe(true);
+    store.stepForward();
+    expect(store.closePosition('SPY').ok).toBe(true);
+    store.stepForward();
+    await vi.waitFor(() => expect(entries()).toHaveLength(1));
+    // Back over the close: the trade is open again and its entry is gone with the close (undone, not deleted).
+    store.stepBack();
+    store.stepBack();
+    await vi.waitFor(() => expect(entries()).toHaveLength(0));
+    expect(store.useTrading.getState().positions).toHaveLength(1);
+    expect(store.closePosition('SPY').ok).toBe(true);
+    store.stepForward();
+    expect(useChallenges.getState().active?.result.detail).toBe('0/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal).');
+    await vi.waitFor(() => expect(entries()).toHaveLength(1));
+    expect(useChallenges.getState().active?.result.detail).toBe('0/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal).');
+    useSettings.getState().update({ rules });
+    await store.endSession();
+  });
+
+  it('names the challenge that marking one of its own rules broken would fail, for the confirmation', async () => {
+    const store = await import('./tradingStore');
+    const { useSettings } = await import('./settingsStore');
+    const rules = useSettings.getState().rules;
+    useSettings.getState().update({ rules: { ...rules, custom: ['Trade with the trend'] } });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'rules-20' })).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    expect(store.challengeFailedByBrokenRule(sessionId, 'Trade with the trend')?.title).toBe('Complete 20 trades while following your rules');
+    // A rule the challenge does not score, or a trade from another session, fails nothing.
+    expect(store.challengeFailedByBrokenRule(sessionId, 'Added since')).toBeNull();
+    expect(store.challengeFailedByBrokenRule('another-session', 'Trade with the trend')).toBeNull();
+    // Another challenge does not read your own rules.
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false, challengeId: 'achieved-rr-2' })).toBe(true);
+    expect(store.challengeFailedByBrokenRule(store.useTrading.getState().session!.id, 'Trade with the trend')).toBeNull();
+    useSettings.getState().update({ rules });
+    await store.endSession();
+  });
 });
 
 describe('history for higher timeframes on the chart', () => {

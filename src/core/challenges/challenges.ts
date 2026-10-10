@@ -5,9 +5,8 @@
  */
 import type { EquityPoint, Fill, RoundTrip } from '../types';
 import { plannedRR, plannedRRGap, initialRiskPerShare, riskBasis, rMultiple } from '../analytics/stats';
-import { equityBeforeEntry, followedAllRules, checkRules, riskOverLife, type TradingRules } from '../learning/review';
+import { equityBeforeEntry, followedAllRules, checkRules, riskOverLife, unprotectedSince, type TradingRules } from '../learning/review';
 import { over } from '../risk/risk';
-import { formatExchangeDateTime } from '../time';
 
 export interface ChallengeContext {
   trips: readonly RoundTrip[];
@@ -23,6 +22,11 @@ export interface ChallengeContext {
   rules: TradingRules;
   /** How you marked your own rules on each trade's review (followed or broken, by the rule's text), by trade id. */
   ownRuleMarks?: ReadonlyMap<string, Readonly<Record<string, boolean>>>;
+  /**
+   * Trades whose journal entry was deleted, by trade id: your own rules are marked on a trade's journal
+   * entry, so with rules of your own these can no longer count toward the rules challenge.
+   */
+  deletedEntries?: ReadonlySet<string>;
 }
 
 export type ChallengeStatus = 'in_progress' | 'passed' | 'failed';
@@ -81,7 +85,7 @@ export const CHALLENGES: ChallengeDefinition[] = [
           if (lost > 1 + 1e-6) return { status: 'failed', progress: 0, detail: `A trade on ${t.symbol} lost ${over(lost, 1, 2)}% before it had a stop (limit 1%).` };
           continue;
         }
-        if (t.unprotectedAt !== undefined) return { status: 'failed', progress: 0, detail: `${t.unprotectedQty} shares of a trade on ${t.symbol} had no stop from ${formatExchangeDateTime(t.unprotectedAt)}.` };
+        if (t.unprotectedAt !== undefined) return { status: 'failed', progress: 0, detail: `${t.unprotectedQty} shares of a trade on ${t.symbol} had no stop from ${unprotectedSince(t)}.` };
         if (riskBasis(t)?.from === 'first') return { status: 'failed', progress: 0, detail: `A trade on ${t.symbol} added past its stop, so it risked more than planned.` };
         const { pct, why } = lifeRiskPct(t, ctx);
         if (pct === null) return { status: 'failed', progress: 0, detail: `The risk of a trade on ${t.symbol} to its stop could not be measured.` };
@@ -124,7 +128,7 @@ export const CHALLENGES: ChallengeDefinition[] = [
       const bad = closed.find((_, i) => rrs[i] === null);
       if (bad) {
         const gap = plannedRRGap(bad);
-        const why = { stop_past_average: 'its stop sat past its average entry', entry_past_target: 'its entry filled past its target', average_past_target: 'adds moved its average entry past its target' };
+        const why = { stop_past_average: 'its stop sat at or past its average entry', entry_past_target: 'its entry filled past its target', average_past_target: 'adds moved its average entry past its target' };
         return {
           status: 'failed',
           progress: 0,
@@ -144,11 +148,12 @@ export const CHALLENGES: ChallengeDefinition[] = [
     id: 'achieved-rr-2',
     title: 'Achieve 2:1 reward/risk over 10 trades',
     description:
-      'What your trades actually made, in R (P/L over the risk to the first stop), not what the ticket planned. Every trade needs a stop. After 10 closed trades your average win must be at least twice your average loss (with no losses, at least +2R).',
+      'What your trades actually made, in R (P/L over the risk to the first stop), not what the ticket planned. Every trade needs a stop its risk can be measured from: a trade with no R fails it, for example one with no stop or one whose first stop was placed after entry at or past its average entry (a breakeven stop). After 10 closed trades your average win must be at least twice your average loss (with no losses, at least +2R).',
     setup: { startingBalance: 25_000, mode: 'replay', multiDay: true },
     evaluate(ctx) {
       const closed = ctx.trips.filter((t) => t.closed);
       const rs = closed.map(rMultiple);
+      // A trade with no R fails it rather than being left out, as a trade with no stop always has.
       const bad = closed.find((_, i) => rs[i] === null);
       if (bad) return { status: 'failed', progress: 0, detail: `A trade on ${bad.symbol} had no stop its risk could be measured from, so its R is unknown.` };
       const wins = (rs as number[]).filter((r) => r > 0);
@@ -170,13 +175,15 @@ export const CHALLENGES: ChallengeDefinition[] = [
     id: 'rules-20',
     title: 'Complete 20 trades while following your rules',
     description:
-      'Uses your trading rules from Settings (risk limit, stop required, minimum R:R, trades per day, daily loss limit, and your own rules) as they were when the challenge started. The app checks its rules; you say on each trade\'s review whether you followed your own, and a trade counts once you have. Breaking any rule on any trade fails it.',
+      'Uses your trading rules from Settings (risk limit, stop required, minimum R:R, trades per day, daily loss limit, and your own rules) as they were when the challenge started. The app checks its rules; you say on each trade\'s review whether you followed your own, and a trade counts once you have, so one whose journal entry you delete does not count. Breaking any rule on any trade fails it.',
     setup: { startingBalance: 25_000, mode: 'replay', multiDay: true },
     evaluate(ctx) {
       const closed = ctx.trips.filter((t) => t.closed);
       const own = ctx.rules.custom ?? [];
       // Trades whose review still asks whether you followed your own rules: they count once you answer.
       let unmarked = 0;
+      // Trades whose journal entry was deleted: no review is left to mark your own rules on.
+      let deleted = 0;
       for (const t of closed) {
         const checks = checkRules(
           { trip: t, fills: ctx.fills, orders: [], revealedBars: [], timeframe: '1m', equityCurve: ctx.equityCurve, startingBalance: ctx.startingBalance, allTrips: ctx.trips, rules: ctx.rules },
@@ -189,12 +196,14 @@ export const CHALLENGES: ChallengeDefinition[] = [
           const broken = [...checks.filter((c) => c.passed === false).map((c) => c.rule), ...brokeOwn].join(', ');
           return { status: 'failed', progress: 0, detail: `Rule broken on a ${t.symbol} trade: ${broken}.` };
         }
-        if (own.some((rule) => marks?.[rule] === undefined)) unmarked++;
+        if (own.length && ctx.deletedEntries?.has(t.id)) deleted++;
+        else if (own.some((rule) => marks?.[rule] === undefined)) unmarked++;
       }
-      const counted = closed.length - unmarked;
+      const counted = closed.length - unmarked - deleted;
       if (counted >= 20) return { status: 'passed', progress: 1, detail: '20 trades, every rule followed.' };
       const waiting = unmarked ? ` ${unmarked} more ${unmarked === 1 ? 'trade counts' : 'trades count'} once you mark your own rules on ${unmarked === 1 ? 'its review' : 'their reviews'} (in the Journal).` : '';
-      return { status: 'in_progress', progress: counted / 20, detail: `${counted}/20 trades, all rules followed so far.${waiting}` };
+      const gone = deleted ? ` ${deleted} ${deleted === 1 ? 'trade whose journal entry was deleted does' : 'trades whose journal entries were deleted do'} not count.` : '';
+      return { status: 'in_progress', progress: counted / 20, detail: `${counted}/20 trades, all rules followed so far.${waiting}${gone}` };
     },
   },
   {

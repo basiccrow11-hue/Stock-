@@ -44,13 +44,16 @@ export interface PerformanceStats {
  * price the entry order was placed at, which is the risk that was planned. None when the trade opened
  * without a stop and its average sat past the stop a later add brought (the earlier shares were past
  * it, the add filled past it, or shares added after it moved the average): R is never measured from an add.
+ * None either when its average sat at or past a stop placed on its own after entry (a breakeven stop, one
+ * locking in a gain, or one that shares added after it moved the average past): that stop came with no
+ * entry, so the first entry's price and plan say nothing about it.
  */
 export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;
   const dir = t.direction === 'long' ? 1 : -1;
   const avgRisk = (t.avgEntry - t.initialStop) * dir;
   if (avgRisk > 0) return { entry: t.avgEntry, risk: avgRisk, from: 'average' };
-  if (t.stopFromAdd) return null;
+  if (t.stopFromAdd || t.stopPlacedAt !== undefined) return null;
   const candidates: Array<[number | undefined, 'first' | 'planned']> = [
     [t.bracketEntry, 'first'],
     [t.plannedEntry, 'planned'],
@@ -69,15 +72,19 @@ export function initialRiskPerShare(t: RoundTrip): number | null {
 
 /**
  * True when the entry the initial stop came with filled at or past that stop (only a gap can do
- * that). Adds made later past the stop do not count: they are a choice, not a gap.
+ * that). Adds made later past the stop do not count: they are a choice, not a gap. Never for a stop
+ * placed on its own after entry, which came with no entry.
  */
 export function entryPastStop(t: RoundTrip): boolean {
-  return t.initialStop !== undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
+  return t.initialStop !== undefined && t.stopPlacedAt === undefined && ((t.bracketEntry ?? t.avgEntry) - t.initialStop) * (t.direction === 'long' ? 1 : -1) <= 0;
 }
 
-/** True when the entry the initial target came with filled at or past that target (a gap through both). */
+/**
+ * True when the entry the initial target came with filled at or past that target (a gap through both).
+ * Never for a target placed on its own after entry.
+ */
 export function entryPastTarget(t: RoundTrip): boolean {
-  return t.initialTarget !== undefined && ((t.targetEntry ?? t.bracketEntry ?? t.avgEntry) - t.initialTarget) * (t.direction === 'long' ? 1 : -1) >= 0;
+  return t.initialTarget !== undefined && t.targetPlacedAt === undefined && ((t.targetEntry ?? t.bracketEntry ?? t.avgEntry) - t.initialTarget) * (t.direction === 'long' ? 1 : -1) >= 0;
 }
 
 /** Realized R multiple: P/L divided by the dollars at risk to the initial stop. */

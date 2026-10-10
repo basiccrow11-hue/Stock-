@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeStats, drawdown, plannedRR, rMultiple } from '../analytics/stats';
+import { computeStats, drawdown, entryPastStop, entryPastTarget, plannedRR, riskBasis, rMultiple } from '../analytics/stats';
 import { assessRisk, positionSizeForRisk } from '../risk/risk';
 import { reviewTrade, DEFAULT_TRADING_RULES } from '../learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeContext } from '../challenges/challenges';
@@ -591,9 +591,9 @@ describe('learning review', () => {
       expect(review.rMultiple).not.toBeNull();
       // The stop counts, but it covered only the add's 300 shares: the first 100 never had one.
       expect(review.rules.find((r) => r.rule === 'Use a stop loss')).toMatchObject({ passed: true, detail: 'Stop at 95.00, which came with a later add' });
-      expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '100 shares had no stop from 2025-01-15 10:02 ET' });
-      expect(text).toContain('Shares left without a stop: From 2025-01-15 10:02 ET, 100 of your shares had no working stop');
-      expect(grow).toMatchObject({ status: 'failed', detail: '100 shares of a trade on T had no stop from 2025-01-15 10:02 ET.' });
+      expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '100 shares had no stop from 1m after entry' });
+      expect(text).toContain('Shares left without a stop: 100 of your shares had no working stop from 1m after entry:');
+      expect(grow).toMatchObject({ status: 'failed', detail: '100 shares of a trade on T had no stop from 1m after entry.' });
     });
 
     it('says a stop that came with an add past the average entry locked in a gain, not that there was no stop', () => {
@@ -603,7 +603,7 @@ describe('learning review', () => {
       expect(text).toContain('No stop on your first entry: Your stop at 99.00 came with a later add, and it sat past your average entry of 90.91');
       expect(text).not.toContain('No stop loss');
       expect(text).not.toContain('Added past your stop');
-      expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '100 shares had no stop from 2025-01-15 10:02 ET' });
+      expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '100 shares had no stop from 1m after entry' });
     });
 
     it('measures planned R:R from the order’s price when the entry fills past its own target, and calls the exit the target', () => {
@@ -1420,9 +1420,40 @@ describe('stops placed after entry, and the risk over a trade’s life', () => {
       step(100, 100.1, 99.8, 100);
     });
     expect(review.unprotected).toBe(true);
-    expect(text).toContain('Shares left without a stop: From 2025-01-15 10:02 ET, 100 of your shares had no working stop');
-    expect(rule('Risk')).toMatchObject({ passed: false, detail: '100 shares had no stop from 2025-01-15 10:02 ET' });
-    expect(grow).toMatchObject({ status: 'failed', detail: '100 shares of a trade on T had no stop from 2025-01-15 10:02 ET.' });
+    expect(text).toContain('Shares left without a stop: 100 of your shares had no working stop from 1m after entry:');
+    expect(rule('Risk')).toMatchObject({ passed: false, detail: '100 shares had no stop from 1m after entry' });
+    expect(grow).toMatchObject({ status: 'failed', detail: '100 shares of a trade on T had no stop from 1m after entry.' });
+  });
+
+  it('says when shares were left without a stop as time after entry, never as a date a blind replay hides', () => {
+    const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
+    const bars: Bar[] = [];
+    const at = (hhmm: string, px: number) => {
+      bars.push(bar(et('2025-03-10', hhmm), px, px, px, px));
+      b.onBar('T', bars[bars.length - 1]);
+    };
+    at('09:49', 100);
+    b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 10, tif: 'gtc' }); // fills at 09:50
+    b.submit({ symbol: 'T', action: 'sell', type: 'stop', stopPrice: 99.5, quantity: 10, tif: 'gtc' });
+    at('15:58', 100.2);
+    b.cancel(b.workingOrders('T').find((o) => o.type === 'stop')!.id);
+    at('16:00', 100.1); // the first bar to begin with the shares unprotected
+    b.closePosition('T');
+    at('16:01', 100.1);
+    const st = b.state;
+    const t = st.roundTrips[0];
+    expect([t.entryTime, t.unprotectedAt]).toEqual([et('2025-03-10', '09:50'), et('2025-03-10', '16:00')]);
+    const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+    const grow = evaluateChallenge(CHALLENGES.find((c) => c.id === 'grow-20-1pct')!, { trips: st.roundTrips, fills: st.fills, equityCurve: st.equityCurve, startingBalance: 100_000, equity: b.account().equity, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+    expect(review.findings.find((f) => f.title === 'Shares left without a stop')!.detail).toMatch(/^10 of your shares had no working stop from 6h 10m after entry: /);
+    expect(review.rules.find((r) => r.rule.startsWith('Risk'))).toMatchObject({ passed: false, detail: '10 shares had no stop from 6h 10m after entry' });
+    expect(grow).toMatchObject({ status: 'failed', detail: '10 shares of a trade on T had no stop from 6h 10m after entry.' });
+    const stored = [...review.findings.map((f) => f.detail), ...review.rules.map((r) => r.detail), grow.detail].join('\n');
+    expect(stored).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}/);
+    // Within the first minute of the trade.
+    const quick = trip({ initialStop: 99, unprotectedAt: et('2025-01-15', '10:00') + 30, unprotectedQty: 50 });
+    const quickReview = reviewTrade({ trip: quick, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 100_000, allTrips: [quick], rules: DEFAULT_TRADING_RULES });
+    expect(quickReview.rules.find((r) => r.rule.startsWith('Risk'))!.detail).toBe('50 shares had no stop from less than a minute after entry');
   });
 
   it('lets an open trade without a stop wait for one, until it has lost more than 1% without it', () => {
@@ -1453,6 +1484,194 @@ describe('stops placed after entry, and the risk over a trade’s life', () => {
     expect(evaluateChallenge(ach, ctx(good))).toMatchObject({ status: 'passed', detail: 'Over 10 trades, average win 2.50R, average loss −1.00R: 2.50:1.' });
     expect(evaluateChallenge(ach, ctx(good.slice(0, 3)))).toMatchObject({ status: 'in_progress', progress: 0.3 });
     expect(evaluateChallenge(ach, ctx([trip({ pnl: 50 })]))).toMatchObject({ status: 'failed', detail: 'A trade on T had no stop its risk could be measured from, so its R is unknown.' });
+  });
+});
+
+describe('a first stop or target placed after entry, at or past the average entry', () => {
+  /** $10,000 trading X at zero cost from 09:30, one bar a minute; `result` reviews and scores the first trade. */
+  function setup() {
+    const broker = new SimBroker({ startingBalance: 10_000, config: ZERO_COST_CONFIG });
+    const bars: Bar[] = [];
+    let t = et('2025-01-15', '09:30');
+    const next = (o: number, h: number, l: number, c: number) => {
+      bars.push(bar(t, o, h, l, c, 5_000_000));
+      broker.onBar('X', bars[bars.length - 1]);
+      t += 60;
+    };
+    const result = (rules = DEFAULT_TRADING_RULES) => {
+      const st = broker.state;
+      const trip = st.roundTrips[0];
+      const review = reviewTrade({ trip, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules, now: t, ended: true });
+      const ctx: ChallengeContext = { trips: st.roundTrips, fills: st.fills, equityCurve: st.equityCurve, startingBalance: 10_000, equity: broker.account().equity, sessionFinished: false, rewound: false, rules };
+      const challenge = (id: string) => evaluateChallenge(CHALLENGES.find((c) => c.id === id)!, ctx);
+      const text = review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+      const rule = (name: string) => review.rules.find((r) => r.rule.startsWith(name));
+      return { trip, review, text, rule, challenge };
+    };
+    return { broker, next, result };
+  }
+  /** A buy limit at 49.80 that the next bars' open gaps through: it fills at 49.60. With `stopLoss`, a bracket stop. */
+  function gapFill(stopLoss?: number) {
+    const s = setup();
+    s.next(50, 50.1, 49.9, 50);
+    expect(s.broker.submit({ symbol: 'X', action: 'buy', type: 'limit', limitPrice: 49.8, quantity: 100, tif: 'day', ...(stopLoss !== undefined ? { stopLoss } : {}) }).ok).toBe(true);
+    s.next(50, 50.05, 49.85, 49.9);
+    s.next(49.6, 49.9, 49.55, 49.85);
+    return s;
+  }
+
+  it('cannot measure R from a breakeven stop placed after a limit entry filled better than its limit', () => {
+    const { broker, next, result } = gapFill();
+    next(49.85, 50.3, 49.8, 50.2);
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 49.6, quantity: 100, tif: 'day' }).ok).toBe(true);
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'limit', limitPrice: 51, quantity: 100, tif: 'day' }).ok).toBe(true);
+    next(50.2, 50.6, 50.1, 50.5);
+    next(50.5, 50.5, 49.5, 49.6); // the breakeven stop fills
+    const { trip: t, review, text, rule, challenge } = result();
+    expect(t).toMatchObject({ closed: true, avgEntry: 49.6, plannedEntry: 49.8, initialStop: 49.6, initialTarget: 51, lossBeforeStop: 5 });
+    expect(t.stopPlacedAt).toBeDefined();
+    expect(riskBasis(t)).toBeNull();
+    expect(entryPastStop(t)).toBe(false);
+    expect([review.rMultiple, review.riskDollars, review.riskPctOfEquity]).toEqual([null, null, null]);
+    expect(text).toContain("Risk not measurable: Your stop at 49.60, placed 2m after you entered, was at your average entry: it risked nothing before costs, so the trade's risk cannot be measured in R.");
+    expect(text).not.toContain('Entry filled past your stop');
+    expect(text).not.toContain('Stop distance');
+    expect(text).not.toMatch(/Risked/);
+    // The open loss before the stop is what the trade had at stake: within 1%.
+    expect(rule('Risk')).toMatchObject({ passed: true, detail: '0.05% at its largest, lost before its stop was placed' });
+    expect(rule('Planned reward:risk')).toMatchObject({ passed: false, detail: 'Not measurable: the stop sat at or past your average entry' });
+    expect(challenge('grow-20-1pct').status).toBe('in_progress');
+    expect(challenge('avg-rr-2')).toMatchObject({ status: 'failed', detail: 'The planned reward:risk of a trade on X could not be measured: its stop sat at or past its average entry.' });
+    expect(challenge('achieved-rr-2')).toMatchObject({ status: 'failed', detail: 'A trade on X had no stop its risk could be measured from, so its R is unknown.' });
+    // Analytics leaves it out of average R: nine 1R losses average −1R, not a huge win.
+    const losses = Array.from({ length: 9 }, () => trip({ initialStop: 99, pnl: -100 }));
+    expect(computeStats([...losses, t], [], 10_000).averageR).toBeCloseTo(-1, 9);
+  });
+
+  it('cannot measure R from a stop placed after entry that locked in a gain, rather than measuring it from the limit', () => {
+    const { broker, next, result } = gapFill();
+    next(49.85, 50.3, 49.8, 50.2);
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 49.7, quantity: 100, tif: 'day' }).ok).toBe(true);
+    next(50.2, 51, 50.1, 50.9);
+    broker.closePosition('X');
+    next(50.9, 51, 50.8, 50.9);
+    const { trip, review, text } = result();
+    expect(trip.pnl).toBeCloseTo(130, 6);
+    expect(riskBasis(trip)).toBeNull();
+    expect(review.rMultiple).toBeNull();
+    expect(text).toContain('Risk not measurable: Your stop at 49.70, placed 2m after you entered, sat past your average entry of 49.60: it locked in a gain rather than capping a loss');
+    expect(text).not.toContain('Entry filled past your stop');
+  });
+
+  it('never says you added past a stop that came after the adds', () => {
+    const { broker, next, result } = setup();
+    next(102, 102, 102, 102);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' });
+    next(102, 102, 99.9, 100);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' }); // average 101
+    next(100, 102.6, 100, 102.5);
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 101.5, quantity: 20, tif: 'day' }).ok).toBe(true);
+    next(102.5, 102.6, 101.4, 101.45);
+    const { trip, review, text, rule, challenge } = result({ ...DEFAULT_TRADING_RULES, minRewardRisk: 0 });
+    expect([trip.closed, trip.avgEntry, trip.bracketEntry, trip.initialStop, trip.lossBeforeStop]).toEqual([true, 101, 102, 101.5, 21]);
+    expect(riskBasis(trip)).toBeNull();
+    expect(review.rMultiple).toBeNull();
+    expect(review.addedPastStop).toBeUndefined();
+    expect(text).not.toContain('Added past your stop');
+    expect(text).toContain('Risk not measurable: Your stop at 101.50, placed 2m after you entered, sat past your average entry of 101.00: it locked in a gain rather than capping a loss');
+    expect(rule('Risk')).toMatchObject({ passed: true, detail: '0.21% at its largest, lost before its stop was placed' });
+    expect(challenge('grow-20-1pct').status).toBe('in_progress');
+    expect(challenge('rules-20').status).toBe('in_progress');
+  });
+
+  it('never says a short added past a stop that came after the adds', () => {
+    const { broker, next, result } = setup();
+    next(98, 98, 98, 98);
+    broker.submit({ symbol: 'X', action: 'short', type: 'market', quantity: 10, tif: 'day' });
+    next(98, 100.1, 98, 100);
+    broker.submit({ symbol: 'X', action: 'short', type: 'market', quantity: 10, tif: 'day' }); // average 99
+    next(100, 100, 97.4, 97.5);
+    expect(broker.submit({ symbol: 'X', action: 'cover', type: 'stop', stopPrice: 98.5, quantity: 20, tif: 'day' }).ok).toBe(true);
+    next(97.5, 98.6, 97.4, 98.55);
+    const { trip, review, text, rule, challenge } = result();
+    expect([trip.direction, trip.closed, trip.avgEntry, trip.bracketEntry, trip.initialStop]).toEqual(['short', true, 99, 98, 98.5]);
+    expect(riskBasis(trip)).toBeNull();
+    expect(review.addedPastStop).toBeUndefined();
+    expect(text).not.toContain('Added past your stop');
+    expect(text).toContain('Risk not measurable: Your stop at 98.50, placed 2m after you entered, sat past your average entry of 99.00: it locked in a gain rather than capping a loss');
+    expect(rule('Risk')!.detail).not.toContain('Added past your stop');
+    expect(challenge('grow-20-1pct').status).toBe('in_progress');
+  });
+
+  it('says so when shares added after a stop placed after entry took the average past it, and counts the risk to the stops', () => {
+    const { broker, next, result } = setup();
+    next(100, 100, 100, 100);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' });
+    next(100, 100.2, 99.9, 100);
+    // A stop with a loss to cap, then moved away, and an add with its own stop past the first one.
+    expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 98, quantity: 10, tif: 'day' }).ok).toBe(true);
+    expect(broker.modify(broker.workingOrders('X').find((o) => o.type === 'stop')!.id, { stopPrice: 95 }).ok).toBe(true);
+    next(100, 100, 96.5, 96.5);
+    expect(broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 20, tif: 'day', stopLoss: 95 }).ok).toBe(true); // average 97.67
+    next(96.5, 97, 96.4, 96.9);
+    broker.closePosition('X');
+    next(96.9, 97, 96.8, 96.9);
+    const { trip, review, text, rule, challenge } = result();
+    expect([trip.closed, trip.initialStop, trip.unprotectedAt, trip.maxRisk]).toEqual([true, 98, undefined, 80]);
+    expect(trip.avgEntry).toBeCloseTo(97.6667, 4);
+    expect(riskBasis(trip)).toBeNull();
+    expect(review.rMultiple).toBeNull();
+    expect(text).toContain(
+      "Risk not measurable: Your stop at 98.00 was placed 1m after you entered, below your average entry of 100.00 then, but shares added after it took your average entry to 97.67, past that stop, so the trade's risk cannot be measured in R.",
+    );
+    expect(text).not.toContain('locked in a gain');
+    // The most at risk to the working stops is what the risk rule and the 1% challenge count.
+    expect(rule('Risk')).toMatchObject({ passed: true, detail: '0.80% at its largest' });
+    expect(challenge('grow-20-1pct').status).toBe('in_progress');
+  });
+
+  it('measures a stop placed after a pyramid from the average, and does not call the first fill a gap past it', () => {
+    const { broker, next, result } = setup();
+    next(100, 100, 100, 100);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' });
+    next(100, 106, 100, 106);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' }); // average 103
+    next(106, 106.5, 105, 105.5);
+    broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 102, quantity: 20, tif: 'day' });
+    next(105.5, 105.5, 101.5, 101.8);
+    const { trip, review, text } = result();
+    expect(entryPastStop(trip)).toBe(false);
+    expect(riskBasis(trip)).toEqual({ entry: 103, risk: 1, from: 'average' });
+    expect(review.rMultiple).toBeCloseTo(-1, 9);
+    expect(text).not.toContain('Entry filled past your stop');
+  });
+
+  it('does not call a target placed after averaging down a gap past the first fill', () => {
+    const { broker, next, result } = setup();
+    next(100, 100, 100, 100);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' });
+    next(100, 100, 90, 90);
+    broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 10, tif: 'day' }); // average 95
+    next(90, 94, 90, 94);
+    broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 93, quantity: 20, tif: 'day' });
+    broker.submit({ symbol: 'X', action: 'sell', type: 'limit', limitPrice: 98, quantity: 20, tif: 'day' });
+    next(94, 98.5, 94, 98.2);
+    const { trip, review, text } = result();
+    expect(trip).toMatchObject({ closed: true, initialTarget: 98, avgEntry: 95 });
+    expect(entryPastTarget(trip)).toBe(false);
+    expect(review.plannedRR).toBeCloseTo(1.5, 9);
+    expect(text).not.toContain('Entry filled past your target');
+    expect(text).toContain('Target reached');
+  });
+
+  it('keeps a bracket stop that a gap carried the entry past measured from the order’s price', () => {
+    const { next, result } = gapFill(49.7);
+    next(49.85, 49.9, 49.5, 49.55);
+    const { trip, text } = result();
+    expect(trip.stopPlacedAt).toBeUndefined();
+    expect(entryPastStop(trip)).toBe(true);
+    expect(riskBasis(trip)).toEqual({ entry: 49.8, risk: expect.closeTo(0.1, 9), from: 'planned' });
+    expect(text).toContain('Entry filled past your stop: Price gapped through both your entry order at 49.80 and your stop at 49.70, so it filled at 49.60.');
   });
 });
 
@@ -1493,6 +1712,21 @@ describe('your own rules', () => {
     expect(evaluateChallenge(rulesChallenge, ctx(trips, marks))).toMatchObject({ status: 'passed', detail: '20 trades, every rule followed.' });
     marks.set(trips[4].id, { ...followed, [own[1]]: false });
     expect(evaluateChallenge(rulesChallenge, ctx(trips, marks))).toMatchObject({ status: 'failed', detail: 'Rule broken on a T trade: No revenge trades.' });
+  });
+
+  it('leave out of the rules challenge a trade whose journal entry was deleted, since it can no longer be marked', () => {
+    const marks = new Map(trips.slice(0, 18).map((t) => [t.id, followed]));
+    const deleted = new Set([trips[18].id, trips[19].id]);
+    expect(evaluateChallenge(rulesChallenge, { ...ctx(trips, marks), deletedEntries: deleted })).toMatchObject({
+      status: 'in_progress',
+      progress: 0.9,
+      detail: '18/20 trades, all rules followed so far. 2 trades whose journal entries were deleted do not count.',
+    });
+    expect(evaluateChallenge(rulesChallenge, { ...ctx(trips, marks), deletedEntries: new Set([trips[19].id]) })).toMatchObject({
+      detail: '18/20 trades, all rules followed so far. 1 more trade counts once you mark your own rules on its review (in the Journal). 1 trade whose journal entry was deleted does not count.',
+    });
+    // Without rules of your own nothing is marked, so such a trade counts as before.
+    expect(evaluateChallenge(rulesChallenge, { ...ctx(trips), rules: { ...rules, custom: [] }, deletedEntries: deleted }).status).toBe('passed');
   });
 
   it('are the ones the challenge started with: a mark on a rule added since does not count', () => {

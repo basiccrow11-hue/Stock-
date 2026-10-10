@@ -10,7 +10,7 @@ import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../typ
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, equityBeforeEntry, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
-import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, formatDuration, formatExchangeDateTime, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, formatDuration, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
 import { formatTick } from '../util/math';
 import { pctAgainst } from '../risk/risk';
 
@@ -197,6 +197,15 @@ export function riskOverLife(trip: RoundTrip, planned: number | null): LifeRisk 
     beforeStop: trip.lossBeforeStop !== undefined && trip.lossBeforeStop > atStops + 0.005,
     unprotected: trip.unprotectedAt !== undefined,
   };
+}
+
+/**
+ * When some of the trade's shares were first left with no working stop (RoundTrip.unprotectedAt), as
+ * time after its entry, never as a date: a blind replay hides the date, and this text is stored.
+ */
+export function unprotectedSince(trip: RoundTrip): string {
+  const s = (trip.unprotectedAt ?? trip.entryTime) - trip.entryTime;
+  return s < 60 ? 'less than a minute after entry' : `${formatDuration(s)} after entry`;
 }
 
 /** An excursion of `dollars` (open P/L), also per share, as % of the position and in R, at the trade's full size. */
@@ -416,16 +425,17 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     });
   }
 
+  const avgOf = (fs: Fill[]) => {
+    const n = fs.reduce((a, f) => a + f.quantity, 0);
+    return n > 0 ? fs.reduce((a, f) => a + f.price * f.quantity, 0) / n : undefined;
+  };
+  const entries = tripFills.filter((f): f is Fill => f?.action === 'buy' || f?.action === 'short');
+
   /**
    * Why the stop a later add brought sat past the trade's average entry: the shares bought before it were
    * already past it (it locked in a gain), the add itself filled past it, or later adds moved the average.
    */
   const stopPastAverage = (S: number): string => {
-    const avgOf = (fs: Fill[]) => {
-      const n = fs.reduce((a, f) => a + f.quantity, 0);
-      return n > 0 ? fs.reduce((a, f) => a + f.price * f.quantity, 0) / n : undefined;
-    };
-    const entries = tripFills.filter((f): f is Fill => f?.action === 'buy' || f?.action === 'short');
     const at = entries.findIndex((f) => f.orderId === stopOrder?.id);
     const before = avgOf(at > 0 ? entries.slice(0, at) : []);
     const add = avgOf(entries.filter((f) => f.orderId === stopOrder?.id));
@@ -441,6 +451,26 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     return `${lead}, and shares added after it took your average entry to ${formatTick(trip.avgEntry)}, past that stop, ${end}`;
   };
 
+  /**
+   * Why a stop placed on its own after entry sat at or past the trade's average entry: it was placed at the
+   * average (a breakeven stop) or past it (locking in a gain), or it was placed with a loss to cap and
+   * shares added after it took the average to it or past it.
+   */
+  const laterStopPastAverage = (S: number, placedAt: number): string => {
+    const sign = long ? 1 : -1;
+    const placed = formatDuration(placedAt - trip.entryTime);
+    const end = "so the trade's risk cannot be measured in R.";
+    const atAverage = formatTick(S) === formatTick(trip.avgEntry);
+    // The average of the shares held when it was placed: the entries known by then.
+    const then = avgOf(entries.filter((f) => (f.knownAt ?? f.time) <= placedAt));
+    if (then !== undefined && (then - S) * sign > 0 && formatTick(then) !== formatTick(S)) {
+      return `Your stop at ${formatTick(S)} was placed ${placed} after you entered, ${long ? 'below' : 'above'} your average entry of ${formatTick(then)} then, but shares added after it took your average entry to ${formatTick(trip.avgEntry)}, ${atAverage ? "the stop's own price" : 'past that stop'}, ${end}`;
+    }
+    return atAverage
+      ? `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was at your average entry: it risked nothing before costs, ${end}`
+      : `Your stop at ${formatTick(S)}, placed ${placed} after you entered, sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain rather than capping a loss, ${end}`;
+  };
+
   if (riskPerShare === null) {
     const worstText = `The worst point of the trade was ${money(mae.dollars)} against you${
       equityAtEntry > 0 ? ` (${((mae.dollars / equityAtEntry) * 100).toFixed(2)}% of the account)` : ''
@@ -449,11 +479,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       trip.initialStop === undefined
         ? { tone: 'bad', title: 'No stop loss', detail: `Your risk was undefined. ${worstText}` }
         : trip.stopPlacedAt !== undefined
-          ? {
-              tone: 'bad',
-              title: 'Risk not measurable',
-              detail: `Your stop at ${formatTick(trip.initialStop)}, placed ${formatDuration(trip.stopPlacedAt - trip.entryTime)} after you entered, sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain rather than capping a loss, so the trade's risk cannot be measured in R. ${worstText}`,
-            }
+          ? { tone: 'bad', title: 'Risk not measurable', detail: `${laterStopPastAverage(trip.initialStop, trip.stopPlacedAt)} ${worstText}` }
           : trip.stopFromAdd
           ? { tone: 'bad', title: 'No stop on your first entry', detail: `${stopPastAverage(trip.initialStop)} ${worstText}` }
           : { tone: 'bad', title: 'Risk not measurable', detail: `Your entry filled past your stop at ${formatTick(trip.initialStop)}, so the trade's risk cannot be measured in R. ${worstText}` },
@@ -702,7 +728,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: 'bad',
       title: 'Shares left without a stop',
-      detail: `From ${formatExchangeDateTime(trip.unprotectedAt!)}, ${trip.unprotectedQty} of your shares had no working stop: a stop was cancelled or expired, covered fewer shares than you held, or shares were bought without one. The loss on them was not limited.`,
+      detail: `${trip.unprotectedQty} of your shares had no working stop from ${unprotectedSince(trip)}: a stop was cancelled or expired, covered fewer shares than you held, or shares were bought without one. The loss on them was not limited.`,
     });
   }
 
@@ -734,7 +760,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
 
 const RR_GAP_DETAIL: Record<RRGap, string> = {
   no_stop_or_target: 'Needs both a stop and a target',
-  stop_past_average: 'Not measurable: the stop sat past your average entry',
+  stop_past_average: 'Not measurable: the stop sat at or past your average entry',
   entry_past_target: 'Not measurable: the entry filled past the target',
   average_past_target: 'Not measurable: your adds moved your average entry past the target',
 };
@@ -762,10 +788,10 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
     detail: addedPastStop
       ? 'Added past your stop: more than the planned risk'
       : life.unprotected
-        ? `${trip.unprotectedQty} shares had no stop from ${formatExchangeDateTime(trip.unprotectedAt!)}`
+        ? `${trip.unprotectedQty} shares had no stop from ${unprotectedSince(trip)}`
         : pct === null
           ? hasStop
-            ? 'Not measurable: the stop sat past your average entry'
+            ? 'Not measurable: the stop sat at or past your average entry'
             : 'Risk undefined without a stop'
           : pct !== riskPctOfEquity
             ? `${pctAgainst(pct, rules.maxRiskPctPerTrade)}% at its largest${riskPctOfEquity !== null ? ` (${riskPctOfEquity.toFixed(2)}% planned)` : life.beforeStop ? ', lost before its stop was placed' : ''}`
