@@ -15,7 +15,7 @@ import { isDriven, type StreamingDataProvider, type StreamUpdate, type Unsubscri
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
 import { reviewTrade, type TradeReview, type TradingRules } from '../../core/learning/review';
-import { CHALLENGES, evaluateChallenge } from '../../core/challenges/challenges';
+import { CHALLENGES, evaluateChallenge, type ChallengeDefinition } from '../../core/challenges/challenges';
 import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
 import { getProvider } from './dataRegistry';
 import { getSettings, useSettings } from './settingsStore';
@@ -120,6 +120,8 @@ interface Engines {
   /** Per symbol, every minute bar stream updates have touched since the chart last heard, in its latest state (oldest first). */
   streamTouched: Map<string, Map<number, Bar>>;
   processedTrips: Set<string>;
+  /** This session's trades whose journal entry was written: one no longer in the journal was deleted. */
+  journaledTrips: Set<string>;
   /** Journal entries whose review waits for price after the exit, with the timeframe and trading rules it was made with. */
   watching: Map<string, { timeframe: Timeframe; rules: TradingRules }>;
   /** Orders whose cancellation (a position the other way opened before they filled) was announced. */
@@ -145,6 +147,7 @@ const eng: Engines = {
   unsubscribe: null,
   streamTouched: new Map(),
   processedTrips: new Set(),
+  journaledTrips: new Set(),
   watching: new Map(),
   noticedConflicts: new Set(),
   timer: null,
@@ -511,6 +514,7 @@ function processClosedTrips(ended = false): Promise<void> {
             entry.snapshotMissing = 'failed';
           }
           await useJournal.getState().add(entry);
+          eng.journaledTrips.add(trip.id);
           // Only once the entry is in the journal: settling looks it up there.
           if (entry.review?.afterExitUntil !== undefined) eng.watching.set(entry.id, { timeframe, rules });
           recordTradeClosed();
@@ -590,6 +594,13 @@ function ownRuleMarks(sessionId: string): Map<string, Record<string, boolean>> {
   return out;
 }
 
+/** This session's trades whose journal entry was written and has since been deleted. */
+function deletedEntries(sessionId: string): Set<string> {
+  const kept = new Set<string>();
+  for (const e of useJournal.getState().entries) if (e.sessionId === sessionId) kept.add(e.trip.id);
+  return new Set([...eng.journaledTrips].filter((id) => !kept.has(id)));
+}
+
 /**
  * The rules this session's trades are reviewed against: during a challenge, the rules as they were when
  * it started, which it is scored on, so a review lists the rules the challenge checks; else Settings'.
@@ -597,6 +608,18 @@ function ownRuleMarks(sessionId: string): Map<string, Record<string, boolean>> {
 function reviewRules(sessionId: string): TradingRules {
   const active = useChallenges.getState().active;
   return active?.sessionId === sessionId && active.rules ? active.rules : getSettings().rules;
+}
+
+/**
+ * The active challenge that marking your own `rule` broken on a trade of session `sessionId` would fail at
+ * once, with no way back (the rules challenge, when the rule is one it is scored on), or null.
+ */
+export function challengeFailedByBrokenRule(sessionId: string, rule: string): ChallengeDefinition | null {
+  const active = useChallenges.getState().active;
+  if (!active || active.challengeId !== 'rules-20' || active.result.status !== 'in_progress') return null;
+  if (active.sessionId !== sessionId || sessionId !== useTrading.getState().session?.id) return null;
+  if (!((active.rules ?? getSettings().rules).custom ?? []).includes(rule)) return null;
+  return CHALLENGES.find((c) => c.id === active.challengeId) ?? null;
 }
 
 function evaluateActiveChallenge(): void {
@@ -619,6 +642,7 @@ function evaluateActiveChallenge(): void {
       rewound: (eng.replay?.rewinds ?? 0) > 0,
       rules: active.rules ?? getSettings().rules,
       ownRuleMarks: ownRuleMarks(active.sessionId),
+      deletedEntries: deletedEntries(active.sessionId),
     });
   } catch (e) {
     // Scoring a challenge must never stop trading or journaling: its last result stays until the next try.
@@ -752,6 +776,7 @@ function resetEngines(): void {
   eng.simBroker = null;
   eng.streamTouched = new Map();
   eng.processedTrips = new Set();
+  eng.journaledTrips = new Set();
   eng.noticedConflicts = new Set();
   eng.simCarry = 0;
   eng.prevClose = {};
@@ -981,7 +1006,8 @@ async function afterRewind(): Promise<void> {
   const b = broker();
   if (!session || !b) return;
   const alive = new Set(b.state.roundTrips.filter((t) => t.closed).map((t) => t.id));
-  // Journal entries for trades that no longer exist in this timeline are removed.
+  // Journal entries for trades that no longer exist in this timeline are removed (undone, not deleted).
+  eng.journaledTrips = new Set([...eng.journaledTrips].filter((id) => alive.has(id)));
   await useJournal.getState().removeWhere((e) => e.sessionId === session.id && !alive.has(e.trip.id));
   eng.processedTrips = new Set([...eng.processedTrips].filter((id) => alive.has(id)));
   // An order working again after the rewind is announced again if it is cancelled again.

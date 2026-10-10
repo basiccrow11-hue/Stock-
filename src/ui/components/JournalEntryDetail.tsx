@@ -9,6 +9,7 @@ import { loadSnapshot, useJournal } from '../state/journalStore';
 import { SourceBadge, Stat } from './common';
 import { money, pct, pnlClass, price, qty, signedMoney } from '../services/format';
 import { useEntryTime } from './useEntryTime';
+import { challengeFailedByBrokenRule } from '../state/tradingStore';
 import { formatDuration } from '../../core/time';
 import type { TradeReview } from '../../core/learning/review';
 import { pctAgainst } from '../../core/risk/risk';
@@ -212,7 +213,17 @@ export function JournalEntryDetail({
       {!entry.snapshotKey && entry.snapshotMissing && <p className="small muted">{NO_SNAPSHOT[entry.snapshotMissing]}</p>}
 
       {showReview && r && (
-        <ReviewView review={r} hasStop={entry.stopLoss !== undefined} checks={entry.ruleChecks} onCheck={(rule, followed) => void useJournal.getState().updateRuleCheck(entry.id, rule, followed)} />
+        <ReviewView
+          review={r}
+          hasStop={entry.stopLoss !== undefined}
+          checks={entry.ruleChecks}
+          onCheck={(rule, followed) => {
+            // A broken mark fails an active rules challenge at once, and that cannot be undone: ask first.
+            const fails = followed === false ? challengeFailedByBrokenRule(entry.sessionId, rule) : null;
+            if (fails && !window.confirm(`Marking “${rule}” as broken fails your challenge “${fails.title}”. A failed attempt cannot be undone.\n\nContinue?`)) return;
+            void useJournal.getState().updateRuleCheck(entry.id, rule, followed);
+          }}
+        />
       )}
 
       {notesEditor}
