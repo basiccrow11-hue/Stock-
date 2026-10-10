@@ -91,6 +91,8 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   triggeredAt?: UnixSeconds;
   /** The start of the bar where the stop fired with no room left under its volume cap, so none of it filled there. */
   noRoomBar?: UnixSeconds;
+  /** Placed by the app to close the position at the last price when the session ended (another one started). */
+  sessionEnd?: boolean;
   /** Bracket children reference their parent entry. */
   parentId?: string;
   /** One-cancels-other group id for bracket exits. */

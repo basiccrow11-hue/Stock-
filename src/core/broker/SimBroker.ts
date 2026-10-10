@@ -1058,8 +1058,9 @@ export class SimBroker {
 
   /**
    * Flatten a position with a market order. Its exit orders (brackets) are cancelled first, and so is
-   * the rest of any entry still filling into it (a market order, or one already partly filled), which
-   * would otherwise go on adding shares after the close. Entries that have not started stay working.
+   * the rest of any entry still filling into it (a market order, a stop that has fired, which is one
+   * now, or one already partly filled), which would otherwise go on adding shares after the close.
+   * Entries that have not started stay working.
    */
   closePosition(symbol: string): SubmitResult {
     const pos = this.position(symbol);
@@ -1068,7 +1069,7 @@ export class SimBroker {
     const notes: string[] = [];
     for (const o of this.workingOrders(symbol)) {
       if (!isOpeningAction(o.action)) this.cancel(o.id, 'Position closed manually');
-      else if (o.action === adding && (o.type === 'market' || o.filledQty > 0)) {
+      else if (o.action === adding && (o.type === 'market' || (o.type === 'stop' && o.triggered) || o.filledQty > 0)) {
         notes.push(`Cancelled the unfilled ${o.quantity - o.filledQty} of ${describe(o)}, so it cannot add to the position after the close.`);
         this.cancel(o.id, 'Position closed manually');
       } else if (o.action === adding && this.cfg.strictRisk.enabled) {
@@ -1080,6 +1081,46 @@ export class SimBroker {
     }
     const r = this.submit({ symbol, action: pos.quantity > 0 ? 'sell' : 'cover', type: 'market', quantity: Math.abs(pos.quantity), tif: 'day' });
     return notes.length ? { ...r, notes: [...(r.notes ?? []), ...notes] } : r;
+  }
+
+  /**
+   * The session is ending because another one starts: every working order is cancelled, and every open
+   * position closed at the last price as a market order would close it there (spread, slippage and
+   * commission as usual, all at once rather than under the volume cap), so each trade is complete and
+   * can be journaled. Returns the closing orders.
+   */
+  closeOut(): Order[] {
+    const time = this.s.clock;
+    for (const o of this.workingOrders()) this.cancel(o.id, 'Session ended');
+    const closing: Order[] = [];
+    for (const pos of Object.values(this.s.positions)) {
+      const last = this.s.lastPrice[pos.symbol];
+      if (pos.quantity === 0 || last === undefined) continue;
+      const o: Order = {
+        id: this.nextId('o'),
+        symbol: pos.symbol,
+        action: pos.quantity > 0 ? 'sell' : 'cover',
+        type: 'market',
+        quantity: Math.abs(pos.quantity),
+        tif: 'day',
+        extendedHours: false,
+        status: 'working',
+        filledQty: 0,
+        avgFillPrice: 0,
+        createdAt: time,
+        updatedAt: time,
+        triggered: false,
+        sessionEnd: true,
+      };
+      this.s.orders.push(o);
+      this.log('accepted', `${describe(o)} placed: the session ended`, o.id);
+      const ext = this.symbolSession(pos.symbol) !== 'regular';
+      this.execute(o, last, time, Infinity, this.s.lastBar[pos.symbol]?.volume ?? 0, ext, new Set(), 'placed', time);
+      closing.push(o);
+    }
+    this.recordEquity(time);
+    this.touch();
+    return closing;
   }
 
   /** Qty already committed to working exit orders; an OCO group counts once. */
@@ -1826,10 +1867,15 @@ export class SimBroker {
       return;
     }
     // The entry this exit came with, still filling (capped by a thin stock's volume) while other shares
-    // keep the trade open: the rest would be bought past this exit and get a bracket already through the
-    // market, to be sold again. It is cancelled, as when the trade closes (updateRoundTrip).
+    // keep the trade open, when its rest would be bought past this exit and get a bracket already through
+    // the market, to be sold again. It is cancelled, as when the trade closes (updateRoundTrip). Past a
+    // stop loss, any rest is bought there; past a take profit, only one at market (a market order, or a
+    // stop that has fired) or a limit at or beyond the target. A limit short of the target can only fill
+    // below it, and gets its own stop loss and take profit when it does, so it stays working.
     const parent = o.parentId ? this.openOrderById(o.parentId) : undefined;
-    if (parent && parent.filledQty > 0) {
+    const pastIt =
+      o.type !== 'limit' || parent?.limitPrice === undefined || (parent.limitPrice - o.limitPrice!) * (parent.action === 'buy' ? 1 : -1) >= 0;
+    if (parent && parent.filledQty > 0 && pastIt) {
       const kind = o.type === 'limit' ? 'take profit' : 'stop loss';
       const level = o.type === 'limit' ? o.limitPrice : o.stopPrice;
       this.autoCancel(

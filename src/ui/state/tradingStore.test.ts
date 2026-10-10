@@ -247,3 +247,59 @@ describe('Learning Mode', () => {
     await store.endSession();
   });
 });
+
+describe('starting another session', () => {
+  it('closes open positions at the last price and journals them as "Session ended", without stopping for a review', async () => {
+    const store = await import('./tradingStore');
+    const { useJournal } = await import('./journalStore');
+    const { useSettings } = await import('./settingsStore');
+    useSettings.getState().update({ learningMode: true });
+    useJournal.setState({ entries: [] });
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    store.stepForward();
+    const price = store.lastPrice('SPY')!;
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'limit', limitPrice: price - 5, quantity: 10 }).ok).toBe(true);
+    store.stepForward();
+    expect(store.sessionEndNotice()).toBe(
+      'Starting a new session ends this one. Your open position (SPY long 10) will be closed at the last price, as a market order would close it, and journaled with the exit reason "Session ended". Working orders are cancelled.',
+    );
+    // Where a market sell would fill now: the last price less half the spread and slippage.
+    const market = store.estimateFill({ symbol: 'SPY', action: 'sell', type: 'market', quantity: 10 })!;
+    expect(market).toBeLessThan(store.lastPrice('SPY')!);
+    const old = store.useTrading.getState().session!.id;
+
+    expect(await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 })).toBe(true);
+    const entries = useJournal.getState().entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ sessionId: old, symbol: 'SPY', quantity: 10 });
+    expect(entries[0].review?.exitReason).toBe('session_end');
+    expect(entries[0].avgExit).toBeCloseTo(market, 6);
+    expect(store.useTrading.getState().session?.mode).toBe('sim');
+    expect(store.useTrading.getState().reviewId).toBeNull();
+    expect(store.sessionEndNotice()).toBeNull();
+    await store.endSession();
+    useSettings.getState().update({ learningMode: false });
+  });
+
+  it('keeps the running session, paused and as it was, when the new one fails to load', async () => {
+    const store = await import('./tradingStore');
+    const { demoProvider } = await import('./dataRegistry');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    store.stepForward();
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    store.stepForward();
+    store.play();
+    const before = store.useTrading.getState().session;
+    const down = vi.spyOn(demoProvider, 'getBars').mockRejectedValue(new Error('The data service is down.'));
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'QQQ', date: '2024-03-13', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(false);
+    down.mockRestore();
+    const s = store.useTrading.getState();
+    expect(s.session).toBe(before);
+    expect(s.positions.map((p) => [p.symbol, p.quantity])).toEqual([['SPY', 10]]);
+    expect(s.playing).toBe(false);
+    expect(s.loading).toBe(false);
+    expect(s.error).toBe('The data service is down.');
+    await store.endSession();
+  });
+});

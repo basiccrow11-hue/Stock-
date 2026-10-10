@@ -21,7 +21,7 @@ const NOTE_FIELDS: { key: keyof JournalNotes; label: string }[] = [
   { key: 'other', label: 'Other notes' },
 ];
 
-const EXIT_LABEL: Record<string, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual exit', other: 'Other' };
+const EXIT_LABEL: Record<string, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual exit', session_end: 'Session ended', other: 'Other' };
 
 /** The note fields that differ from what the editor last took in from the store. */
 function edited(notes: JournalNotes, base: JournalNotes): Partial<JournalNotes> {

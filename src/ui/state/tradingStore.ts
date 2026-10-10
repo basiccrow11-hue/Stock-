@@ -342,7 +342,12 @@ function publish(force = false): void {
 /** Journal writes for closed trades, one batch after another, so reviews queue in the order trades closed. */
 let journaling: Promise<void> = Promise.resolve();
 
-function processClosedTrips(): Promise<void> {
+/**
+ * Journals trades that closed since the last call. `ended`: they closed because the session is ending
+ * (another one starts), so their reviews are final and Learning Mode does not stop to show them; they
+ * are in the journal.
+ */
+function processClosedTrips(ended = false): Promise<void> {
   const b = broker();
   const session = useTrading.getState().session;
   if (!b || !session) return journaling;
@@ -361,7 +366,7 @@ function processClosedTrips(): Promise<void> {
     eng.processedTrips.add(trip.id);
     const entry: JournalEntry = journalEntryFromTrip(trip, { sessionId: session.id, mode: session.mode, rewound: (eng.replay?.rewinds ?? 0) > 0, blind: session.blind });
     try {
-      entry.review = reviewOf(trip, timeframe, false, settings.rules);
+      entry.review = reviewOf(trip, timeframe, ended, settings.rules);
     } catch (e) {
       console.error('Review failed', e);
     }
@@ -376,7 +381,8 @@ function processClosedTrips(): Promise<void> {
     }
     return { trip, entry, snap };
   });
-  if (settings.learningMode) {
+  const showReviews = settings.learningMode && !ended;
+  if (showReviews) {
     pause();
     // Other dialogs (a streak celebration) wait for these reviews rather than open just before them.
     useTrading.setState((s) => ({ reviewsPending: s.reviewsPending + batch.length }));
@@ -400,7 +406,7 @@ function processClosedTrips(): Promise<void> {
           recordTradeClosed();
           const tone = trip.pnl >= 0 ? 'success' : 'error';
           toast(tone, `${trip.direction === 'long' ? 'Long' : 'Short'} ${trip.symbol} closed: ${trip.pnl >= 0 ? '+' : '−'}$${Math.abs(trip.pnl).toFixed(2)}. Journal entry created.`);
-          if (settings.learningMode) {
+          if (showReviews) {
             // A jump or a gap can close several trades at once: each gets its review, one after another.
             const { reviewId, reviewQueue } = useTrading.getState();
             if (reviewId) useTrading.setState({ reviewQueue: [...reviewQueue, entry.id] });
@@ -410,7 +416,7 @@ function processClosedTrips(): Promise<void> {
           // One entry that cannot be saved does not hold up the others.
           console.error('Journal update failed', e);
         } finally {
-          if (settings.learningMode) useTrading.setState((s) => ({ reviewsPending: Math.max(0, s.reviewsPending - 1) }));
+          if (showReviews) useTrading.setState((s) => ({ reviewsPending: Math.max(0, s.reviewsPending - 1) }));
         }
       }
       settleWatchedReviews();
@@ -575,64 +581,101 @@ function resetEngines(): void {
 /** Counts session starts and ends: a replay still loading when a newer one starts (or the session ends) is dropped. */
 let loadSeq = 0;
 
+/**
+ * What ending the running session does to its open positions, for the user to confirm before another
+ * session starts; null when nothing is open.
+ */
+export function sessionEndNotice(): string | null {
+  const open = broker()?.openPositions() ?? [];
+  if (!useTrading.getState().session || open.length === 0) return null;
+  const list = open.map((p) => `${p.symbol} ${p.quantity > 0 ? 'long' : 'short'} ${Math.abs(p.quantity)}`).join(', ');
+  return `Starting a new session ends this one. Your open ${open.length === 1 ? 'position' : 'positions'} (${list}) will be closed at the last price, as a market order would close ${open.length === 1 ? 'it' : 'them'}, and journaled with the exit reason "Session ended". Working orders are cancelled.`;
+}
+
+/**
+ * Ends the running session before another starts or it is ended: open positions are closed at the last
+ * price and journaled, and an active challenge attempt is scored on that and finished. Everything it
+ * journals is saved before it returns, so nothing from this session reaches the next one.
+ */
+async function endCurrent(): Promise<void> {
+  pause();
+  const b = broker();
+  if (b && useTrading.getState().session && b.openPositions().length > 0) {
+    b.closeOut();
+    publish(true);
+  }
+  await processClosedTrips(true);
+  if (useChallenges.getState().active) await useChallenges.getState().finishActive();
+}
+
+/**
+ * Loads a replay and, once it has loaded, ends the running session (endCurrent) and starts it. A load
+ * that fails leaves the running session as it was, paused. False when it failed (the error is in the
+ * store) or a newer start or end took its place.
+ */
 export async function startReplay(setup: ReplaySetup & { providerId: string; timeframe: Timeframe; speed: number; blind: boolean; challengeId?: string }): Promise<boolean> {
   const seq = ++loadSeq;
-  if (useChallenges.getState().active) await useChallenges.getState().finishActive();
-  if (seq !== loadSeq) return false;
-  resetEngines();
-  useTrading.setState({ ...EMPTY, loading: true, activeSymbol: setup.symbol.toUpperCase(), timeframe: setup.timeframe, speed: setup.speed });
   const provider = getProvider(setup.providerId);
   const reason = provider.unavailableReason();
   if (reason) {
     useTrading.setState({ loading: false, error: reason });
     return false;
   }
+  pause();
+  useTrading.setState({ loading: true, error: null });
   const id = newId('replay');
+  let loaded: Awaited<ReturnType<typeof ReplaySession.load>>;
   try {
-    const loaded = await ReplaySession.load(provider, setup, getSettings().execution, id);
-    if (seq !== loadSeq) return false;
-    const session = loaded.session;
-    // Blind mode hides the date, and a skipped symbol's message can carry it (ours or the vendor's).
-    const warnings = setup.blind ? loaded.warnings.map(withoutDates) : loaded.warnings;
-    eng.replay = session;
-    const meta: SessionMeta = {
-      id,
-      mode: 'replay',
-      source: session.broker.state.source,
-      symbols: session.symbols,
-      start: session.start,
-      end: session.end,
-      startDate: session.setup.date,
-      blind: setup.blind,
-      challengeId: setup.challengeId,
-      label: setup.blind ? `${session.symbol} · blind replay` : `${session.symbol} · ${session.setup.date}`,
-    };
-    useTrading.setState({ session: meta, loading: false, warnings, activeSymbol: session.symbol });
-    if (setup.challengeId) {
-      const def = CHALLENGES.find((c) => c.id === setup.challengeId);
-      useChallenges.getState().start({
-        id: newId('attempt'),
-        challengeId: setup.challengeId,
-        sessionId: id,
-        startedAt: Date.now(),
-        label: meta.label,
-        result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true },
-      });
-    }
-    emitChart({ type: 'reset' });
-    publish(true);
-    for (const w of warnings) toast('warning', w, 6000);
-    return true;
+    loaded = await ReplaySession.load(provider, setup, getSettings().execution, id);
   } catch (e) {
     if ((e as Error).name === 'AbortError' || seq !== loadSeq) return false;
     useTrading.setState({ loading: false, error: (e as Error).message });
     return false;
   }
+  if (seq !== loadSeq) return false;
+  await endCurrent();
+  if (seq !== loadSeq) return false;
+  resetEngines();
+  const session = loaded.session;
+  // Blind mode hides the date, and a skipped symbol's message can carry it (ours or the vendor's).
+  const warnings = setup.blind ? loaded.warnings.map(withoutDates) : loaded.warnings;
+  eng.replay = session;
+  const meta: SessionMeta = {
+    id,
+    mode: 'replay',
+    source: session.broker.state.source,
+    symbols: session.symbols,
+    start: session.start,
+    end: session.end,
+    startDate: session.setup.date,
+    blind: setup.blind,
+    challengeId: setup.challengeId,
+    label: setup.blind ? `${session.symbol} · blind replay` : `${session.symbol} · ${session.setup.date}`,
+  };
+  useTrading.setState({ ...EMPTY, session: meta, warnings, activeSymbol: session.symbol, timeframe: setup.timeframe, speed: setup.speed });
+  if (setup.challengeId) {
+    const def = CHALLENGES.find((c) => c.id === setup.challengeId);
+    useChallenges.getState().start({
+      id: newId('attempt'),
+      challengeId: setup.challengeId,
+      sessionId: id,
+      startedAt: Date.now(),
+      label: meta.label,
+      result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true },
+    });
+  }
+  emitChart({ type: 'reset' });
+  publish(true);
+  for (const w of warnings) toast('warning', w, 6000);
+  return true;
 }
 
-export function startSim(opts: { config: Partial<SimConfig>; startingBalance: number; speed: number; challengeId?: string }): void {
-  loadSeq++;
-  if (useChallenges.getState().active) void useChallenges.getState().finishActive();
+/** Ends the running session (endCurrent) and starts the simulated market. False when a newer start or end took its place. */
+export async function startSim(opts: { config: Partial<SimConfig>; startingBalance: number; speed: number; challengeId?: string }): Promise<boolean> {
+  const seq = ++loadSeq;
+  useTrading.setState({ loading: false });
+  await endCurrent();
+  if (seq !== loadSeq) return false;
   resetEngines();
   const today = new Date().toISOString().slice(0, 10);
   const startDate = isTradingDay(today) ? today : nextTradingDay(today);
@@ -660,11 +703,15 @@ export function startSim(opts: { config: Partial<SimConfig>; startingBalance: nu
   }
   emitChart({ type: 'reset' });
   publish(true);
+  return true;
 }
 
+/** Ends the running session (endCurrent): its open positions are closed at the last price and journaled. */
 export async function endSession(): Promise<void> {
-  loadSeq++;
-  if (useChallenges.getState().active) await useChallenges.getState().finishActive();
+  const seq = ++loadSeq;
+  useTrading.setState({ loading: false });
+  await endCurrent();
+  if (seq !== loadSeq) return;
   resetEngines();
   useTrading.setState({ ...EMPTY });
   emitChart({ type: 'reset' });

@@ -155,8 +155,9 @@ export function OrderTicket() {
     [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
   );
   const bracketId = useId();
-  // Screen readers hear a blocking bracket error once typing has settled, and again only when it changes
-  // kind: not while a half-typed price is briefly on the wrong side, nor at each new quote while playing.
+  // Screen readers hear a blocking bracket error once typing has settled (a second after the last edit
+  // to the ticket), and again only when it changes kind: not while a half-typed price is briefly on the
+  // wrong side, however slowly it is typed, nor at each new quote while playing.
   const [bracketSaid, setBracketSaid] = useState('');
   const bracketText = useRef('');
   bracketText.current = bracket.join(' ');
@@ -169,7 +170,7 @@ export function OrderTicket() {
       setBracketSaid(bracketText.current);
     }, 1000);
     return () => clearTimeout(id);
-  }, [bracketKind]);
+  }, [bracketKind, symbol, action, type, quantity, limit, stop, sl, tp, tif, ext]);
 
   if (!session) return null;
 

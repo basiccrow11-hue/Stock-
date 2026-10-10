@@ -36,7 +36,7 @@ export const DEFAULT_TRADING_RULES: TradingRules = {
   maxDailyLossPct: 3,
 };
 
-export type ExitReason = 'stop_loss' | 'take_profit' | 'manual' | 'other';
+export type ExitReason = 'stop_loss' | 'take_profit' | 'manual' | 'session_end' | 'other';
 
 export interface Excursion {
   perShare: number;
@@ -129,11 +129,13 @@ const isStop = (o: Order) => o.type === 'stop' || o.type === 'stop_limit';
 /**
  * How the trade was closed, by the order that closed most of it: a stop order (bracket or placed
  * separately) is the stop loss, a limit that took profit or filled at the original target is the
- * target, a market order is a manual exit, and any other limit is just an exit order.
+ * target, a market order is a manual exit (unless the app placed it when the session ended), and any
+ * other limit is just an exit order.
  */
 export function exitReasonOf(trip: RoundTrip, fills: readonly Fill[], orders: readonly Order[]): ExitReason {
   const main = mainExit(exitParts(trip, fills, orders));
   if (!main) return 'other';
+  if (main.order.sessionEnd) return 'session_end';
   if (isStop(main.order)) return 'stop_loss';
   if (main.order.type === 'limit') {
     const dir = trip.direction === 'long' ? 1 : -1;
@@ -353,11 +355,12 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     detail: `${long ? 'Long' : 'Short'} ${trip.maxQuantity} @ ${formatTick(trip.avgEntry)}, exited @ ${(trip.avgExit !== undefined ? formatTick(trip.avgExit) : '—')} ${
       parts.length > 1
         ? `in ${parts.length} parts`
-        : `via ${{ stop_loss: 'your stop loss', take_profit: 'your profit target', manual: 'a manual exit', other: 'an exit order' }[exitReason]}`
+        : `via ${{ stop_loss: 'your stop loss', take_profit: 'your profit target', manual: 'a manual exit', session_end: 'the close at the last price when the session ended', other: 'an exit order' }[exitReason]}`
     }. While open, the trade was at best ${signed(best)} and at worst ${signed(worst)} (before costs).`,
   });
   if (parts.length > 1) {
-    const how = (p: ExitPart) => (isStop(p.order) ? 'by your stop' : reachedTarget(p) ? 'at your target' : p.order.type === 'limit' ? 'by a limit order' : 'at market');
+    const how = (p: ExitPart) =>
+      p.order.sessionEnd ? 'when the session ended' : isStop(p.order) ? 'by your stop' : reachedTarget(p) ? 'at your target' : p.order.type === 'limit' ? 'by a limit order' : 'at market';
     findings.push({
       tone: 'neutral',
       title: 'Closed in parts',

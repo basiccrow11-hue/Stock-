@@ -1740,7 +1740,7 @@ describe('a bar whose volume cap is used up, an entry cancelled as a conflict, a
   });
 });
 
-describe('an add still filling when its own stop loss or take profit fills, and a Strict close that waits for the open', () => {
+describe('an add still filling when its own stop loss or take profit fills, and Close position', () => {
   it('cancels the rest of the add rather than buying past its own exit while other shares keep the trade open', () => {
     const cases = [
       { exit: { stopLoss: 19.9 }, open: 19.85, why: 'Its stop loss at 19.90 filled while it was still filling, so the rest was cancelled rather than bought past it.' },
@@ -1761,6 +1761,62 @@ describe('an add still filling when its own stop loss or take profit fills, and 
       expect(broker.state.fills.filter((f) => f.orderId === add.id)).toHaveLength(1);
       expect(broker.position(S).quantity).toBe(100);
     }
+  });
+
+  it('keeps a limit add that is short of its own take profit working when the target fills, and gives its later shares their own bracket', () => {
+    const cases = [
+      { add: { type: 'limit' as const, limitPrice: 19.8 }, takeProfit: 20.5, fill: [20, 20, 19.7, 19.75], rally: [19.9, 20.6, 19.85, 20.55], back: [20, 20, 19.7, 19.75], at: 19.8 },
+      { add: { type: 'stop_limit' as const, stopPrice: 20.1, limitPrice: 20.15 }, takeProfit: 20.6, fill: [20, 20.2, 19.98, 20.12], rally: [20.2, 20.7, 20.18, 20.65], back: [20.2, 20.2, 20.05, 20.1], at: 20.15 },
+    ];
+    for (const c of cases) {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 } });
+      const t0 = et('2025-01-15', '10:00');
+      broker.onBar(S, bar(t0, 20, 20, 20, 20, 1_000_000));
+      broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 19, tif: 'gtc' });
+      broker.onBar(S, bar(t0 + 60, 20, 20, 20, 20, 1000)); // thin from here: the cap is 250 shares
+      const add = broker.submit({ symbol: S, action: 'buy', quantity: 800, ...c.add, stopLoss: 19, takeProfit: c.takeProfit, tif: 'gtc' }).order!;
+      const [o1, h1, l1, c1] = c.fill;
+      broker.onBar(S, bar(t0 + 120, o1, h1, l1, c1, 1000));
+      expect(broker.state.orders.find((o) => o.id === add.id)!.filledQty).toBe(250);
+      const [o2, h2, l2, c2] = c.rally;
+      broker.onBar(S, bar(t0 + 180, o2, h2, l2, c2, 1000)); // its take profit fills; the first entry's stop holds the trade open
+      expect(broker.position(S).quantity).toBe(100);
+      expect(broker.state.orders.find((o) => o.id === add.id)).toMatchObject({ status: 'partially_filled', filledQty: 250 });
+      expect(broker.state.orders.find((o) => o.id === add.id)!.conflict).toBeFalsy();
+      const [o3, h3, l3, c3] = c.back;
+      broker.onBar(S, bar(t0 + 240, o3, h3, l3, c3, 1000)); // back under its limit: 250 more, never above its target
+      expect(broker.state.fills.filter((f) => f.orderId === add.id).map((f) => [f.quantity, f.price <= c.at])).toEqual([
+        [250, true],
+        [250, true],
+      ]);
+      expect(broker.position(S).quantity).toBe(350);
+      const exits = broker.state.orders.filter((o) => o.parentId === add.id && (o.status === 'working' || o.status === 'partially_filled'));
+      expect(exits.map((o) => [o.type, o.quantity, o.stopPrice ?? o.limitPrice])).toEqual([
+        ['stop', 250, 19],
+        ['limit', 250, c.takeProfit],
+      ]);
+    }
+  });
+
+  it('Close position cancels a stop add that fired with no room left in its bar, since it is a market order from then on', () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 } });
+    const t0 = et('2025-01-15', '10:00');
+    broker.onBar(S, bar(t0, 20, 20, 20, 20, 1_000_000));
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 300, tif: 'gtc' });
+    const first = broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 20.1, quantity: 600, tif: 'gtc' }).order!;
+    const second = broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 20.12, quantity: 200, tif: 'gtc' }).order!;
+    broker.onBar(S, bar(t0 + 60, 20, 20.15, 19.99, 20.05, 2000)); // the first takes the bar's 500, the second fires with none left
+    expect(broker.state.orders.find((o) => o.id === first.id)!.filledQty).toBe(500);
+    expect(broker.state.orders.find((o) => o.id === second.id)).toMatchObject({ triggered: true, filledQty: 0 });
+    const close = broker.closePosition(S);
+    expect(close.notes).toEqual([
+      "Fills are capped at 25% of a bar's volume (Data & Settings), so the rest fills from the next bars.",
+      'Cancelled the unfilled 100 of BUY 600 TEST STP 20.10, so it cannot add to the position after the close.',
+      'Cancelled the unfilled 200 of BUY 200 TEST STP 20.12, so it cannot add to the position after the close.',
+    ]);
+    for (let i = 2; i < 6; i++) broker.onBar(S, bar(t0 + 60 * i, 19.9, 19.95, 19.85, 19.9, 1_000_000));
+    expect(broker.position(S).quantity).toBe(0);
+    expect(broker.state.roundTrips.every((t) => t.closed)).toBe(true);
   });
 
   it('cancels a resting add at once under Strict when Close position waits for the open', () => {

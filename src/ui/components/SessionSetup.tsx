@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, SourceBadge, NumberField } from './common';
 import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
-import { REPLAY_SPEEDS, SIM_SPEEDS, play, startReplay, startSim, useTrading } from '../state/tradingStore';
+import { REPLAY_SPEEDS, SIM_SPEEDS, play, sessionEndNotice, startReplay, startSim, useTrading } from '../state/tradingStore';
+import { toast } from '../state/toasts';
 import { TIMEFRAMES, type Timeframe } from '../../core/types';
 import type { HistoricalDataProvider, SymbolInfo } from '../../core/data/provider';
 import { DEFAULT_LOOKBACK } from '../../core/replay/ReplaySession';
@@ -41,6 +42,9 @@ function randomTradingDay(from: string, to: string): string {
   return tradingDayOnOrBefore(d) < from ? nextTradingDay(from) : tradingDayOnOrBefore(d);
 }
 
+/** Replay forms open now: a start that fails after its own form was closed is shown in another, or as a toast. */
+let openReplayForms = 0;
+
 function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetChallenge?: string }) {
   const settings = useSettings();
   const r = settings.replay;
@@ -68,6 +72,24 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const [error, setError] = useState<string | null>(null);
   /** A start is under way: Start stays focusable while it loads, and presses are ignored. */
   const starting = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    openReplayForms++;
+    return () => {
+      mounted.current = false;
+      openReplayForms--;
+    };
+  }, []);
+  // A start that fails is shown here even when an earlier form, closed while it loaded, began it.
+  const wasLoading = useRef(loading);
+  useEffect(() => {
+    if (wasLoading.current && !loading) {
+      const failed = useTrading.getState().error;
+      if (failed) setError(failed);
+    }
+    wasLoading.current = loading;
+  }, [loading]);
 
   const provider: HistoricalDataProvider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
   const unavailable = provider.unavailableReason();
@@ -113,6 +135,11 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const validation = useMemo(() => {
     if (unavailable) return unavailable;
     if (!symbol.trim()) return 'Choose a ticker.';
+    const sym = symbol.trim().toUpperCase();
+    if ((providerId === 'demo' || providerId === 'csv') && symbols.length > 0 && !symbols.some((x) => x.symbol === sym)) {
+      const list = symbols.map((x) => x.symbol);
+      return `${providerId === 'demo' ? 'The demo data' : 'Your imported data'} has no ${sym}. Choose one of: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ', …' : ''}.`;
+    }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return 'Choose a date.';
     if (!isTradingDay(date)) return `${date} is not a trading day (weekend or NYSE holiday).`;
     if (range && (date < range.from || date > range.to)) return `Data for ${symbol.toUpperCase()} covers ${range.from} to ${range.to}.`;
@@ -128,13 +155,15 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     if (typeof balance !== 'number' || balance < 100) return 'Starting balance must be at least $100.';
     if (timeframe === '1D' && !multiDay) return 'The daily timeframe needs a multi-day replay.';
     return null;
-  }, [unavailable, symbol, date, range, days, startTime, endTime, multiDay, endDate, balance, timeframe]);
+  }, [unavailable, providerId, symbols, symbol, date, range, days, startTime, endTime, multiDay, endDate, balance, timeframe]);
 
   const extraSymbols = includeWatchlist ? settings.watchlist.filter((s) => s !== symbol.toUpperCase() && (providerId !== 'demo' && providerId !== 'csv' ? true : symbols.some((x) => x.symbol === s))) : [];
 
   const submit = async () => {
     // Also while a start from an earlier form (closed while it loaded) is still under way.
     if (validation || starting.current || useTrading.getState().loading) return;
+    const notice = sessionEndNotice();
+    if (notice && !window.confirm(notice)) return;
     starting.current = true;
     setError(null);
     // A blind replay's dates are not saved as the next default: the next form, here or in another
@@ -158,8 +187,15 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     }).finally(() => {
       starting.current = false;
     });
-    if (ok) onDone();
-    else setError(useTrading.getState().error ?? 'Could not start the replay.');
+    if (ok) {
+      onDone();
+      return;
+    }
+    // False with no error: a newer start (or end) took its place.
+    const failed = useTrading.getState().error;
+    if (!failed) return;
+    if (mounted.current) setError(failed);
+    else if (openReplayForms === 0) toast('error', `The replay did not start: ${failed}`, 10_000);
   };
 
   return (
@@ -323,10 +359,11 @@ function SimForm({ onDone, presetChallenge }: { onDone: () => void; presetChalle
 
   const start = () => {
     if (invalid) return;
+    const notice = sessionEndNotice();
+    if (notice && !window.confirm(notice)) return;
     const s = seed === '' ? Math.floor(Math.random() * 2 ** 31) : seed;
     settings.update({ sim: { ...sim, volatilityMultiplier: vol, eventFrequency: events, trendStrength: trend, marketRegime: regime, speed, startingBalance: balance as number } });
-    startSim({ config: { seed: s, volatilityMultiplier: vol, eventFrequency: events, trendStrength: trend, marketRegime: regime }, startingBalance: balance as number, speed, challengeId: challengeId || undefined });
-    play();
+    void startSim({ config: { seed: s, volatilityMultiplier: vol, eventFrequency: events, trendStrength: trend, marketRegime: regime }, startingBalance: balance as number, speed, challengeId: challengeId || undefined }).then((ok) => ok && play());
     onDone();
   };
 

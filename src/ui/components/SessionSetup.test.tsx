@@ -92,19 +92,59 @@ describe('the replay form for a challenge', () => {
 describe('a replay that fails to start', () => {
   it('announces the error and keeps the Start button focusable', async () => {
     const { useSettings } = await import('../state/settingsStore');
-    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'ZZZZ', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
+    const { demoProvider } = await import('../state/dataRegistry');
+    const down = vi.spyOn(demoProvider, 'getBars').mockRejectedValue(new Error('The data service is down.'));
+    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'SPY', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
     const form = await open();
     const start = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Start replay')!;
     const alert = () => [...document.querySelectorAll('[role="alert"]')].map((e) => e.textContent).join('');
     for (let attempt = 0; attempt < 2; attempt++) {
       start.focus();
       await act(async () => start.click());
-      await vi.waitFor(() => expect(alert()).toContain('Unknown demo symbol ZZZZ'));
+      await vi.waitFor(() => expect(alert()).toContain('The data service is down.'));
       // Never disabled while loading (aria-disabled instead), so focus is still on it after the failure.
       expect(start.disabled).toBe(false);
       expect(start.getAttribute('aria-disabled')).toBeNull();
       expect(document.activeElement).toBe(start);
     }
+    act(() => form.root.unmount());
+    down.mockRestore();
+  });
+
+  it('shows the error in a form opened while it loaded, or as a toast once every form is closed', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    const { useToasts } = await import('../state/toasts');
+    const { demoProvider } = await import('../state/dataRegistry');
+    let fail!: (e: Error) => void;
+    const down = vi.spyOn(demoProvider, 'getBars').mockImplementation(() => new Promise((_, reject) => (fail = reject)));
+    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'SPY', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
+    const toasts = () => useToasts.getState().toasts.map((t) => t.text);
+    for (const reopen of [true, false]) {
+      useToasts.setState({ toasts: [] });
+      const first = await open();
+      await act(async () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Start replay')!.click());
+      act(() => first.root.unmount()); // closed while it loads
+      document.body.innerHTML = '';
+      const second = reopen ? await open() : null;
+      await act(async () => fail(new Error('The data service is down.')));
+      if (second) {
+        await vi.waitFor(() => expect(document.querySelector('.alert.error')?.textContent).toBe('The data service is down.'));
+        expect([...document.querySelectorAll('[role="alert"]')].map((e) => e.textContent).join('')).toContain('The data service is down.');
+        expect(toasts()).toEqual([]);
+        act(() => second.root.unmount());
+      } else {
+        await vi.waitFor(() => expect(toasts()).toEqual(['The replay did not start: The data service is down.']));
+      }
+    }
+    down.mockRestore();
+  });
+
+  it('refuses a ticker the demo data does not have, and names the ones it does', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'NFLX', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
+    const form = await open();
+    await vi.waitFor(() => expect(document.querySelector('.alert.warn')?.textContent).toMatch(/^The demo data has no NFLX\. Choose one of: .*AAPL.*\.$/));
+    expect([...document.querySelectorAll('button')].find((b) => b.textContent === 'Start replay')!.disabled).toBe(true);
     act(() => form.root.unmount());
   });
 });
@@ -127,8 +167,9 @@ describe('starts that overlap', () => {
   it('drops a replay still loading when a newer session starts', async () => {
     const store = await import('../state/tradingStore');
     const replay = store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: [], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 0, timeframe: '1m', speed: 60, blind: false });
-    store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 });
+    const sim = store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 });
     expect(await replay).toBe(false);
+    expect(await sim).toBe(true);
     expect(store.useTrading.getState().session?.mode).toBe('sim');
     expect(store.useTrading.getState().loading).toBe(false);
     await store.endSession();

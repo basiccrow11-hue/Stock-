@@ -255,7 +255,7 @@ export function AnalyticsPage() {
                 }).sort((a, b) => a.key.localeCompare(b.key))}
               />
               <Breakdown title="By weekday" groups={groupBy(filtered, (e) => (dateHidden(e) ? 'Blind session (hidden)' : WEEKDAYS[weekdayOf(exchangeDate(e.entryTime))]))} />
-              <Breakdown title="By exit reason" groups={groupBy(filtered, (e) => ({ stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual', other: 'Other' })[e.review?.exitReason ?? 'other'])} />
+              <Breakdown title="By exit reason" groups={groupBy(filtered, (e) => ({ stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual', session_end: 'Session ended', other: 'Other' })[e.review?.exitReason ?? 'other'])} />
             </div>
           </>
         )}
