@@ -145,7 +145,7 @@ export function OrderTicket() {
     if (!opening || q <= 0 || !session) return null;
     const r = tradeRisk({ ...request(), quantity: q });
     return r && r.held + r.working > 0 ? r : null;
-  }, [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, brokerVersion]);
+  }, [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion]);
 
   if (!session) return null;
 

@@ -343,6 +343,8 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
   const [tab, setTab] = useState<'trades' | 'signals'>('trades');
   /** The run in progress: Cancel aborts its bar download, or stops the worker once it is running. */
   const runRef = useRef<{ controller: AbortController; started: number } | null>(null);
+  /** When Cancel was last pressed: the button turns back into Run at once, and a press right after is still part of Cancel. */
+  const cancelledAt = useRef(-Infinity);
   const activeRef = useRef(active);
   activeRef.current = active;
 
@@ -433,8 +435,15 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
   const cancel = (e: React.MouseEvent) => {
     const r = runRef.current;
     if (!r || e.detail > 1 || performance.now() - r.started < 500) return;
+    cancelledAt.current = performance.now();
     r.controller.abort();
     cancelBacktests();
+  };
+
+  /** Run, from the same button. Likewise the second click of a double-click on Cancel, or a press in the half second after it, carries on that Cancel. */
+  const runPressed = (e: React.MouseEvent) => {
+    if (e.detail > 1 || performance.now() - cancelledAt.current < 500) return;
+    void run();
   };
 
   const equityLines = useMemo<LineSpec[]>(() => {
@@ -592,7 +601,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
             <button
               className={running ? 'btn' : 'btn primary'}
               disabled={!running && !!validation}
-              onClick={running ? cancel : () => void run()}
+              onClick={running ? cancel : runPressed}
               onKeyDown={(e) => {
                 if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault();
               }}
