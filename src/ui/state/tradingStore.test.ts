@@ -83,7 +83,7 @@ describe('the simulated market on the chart', () => {
       const symbol = store.useTrading.getState().activeSymbol;
       const chart = store.getBaseBars(symbol);
       const off = store.onChartEvent((e) => {
-        if (e.type === 'reset') throw new Error('unexpected reset');
+        if (e.type === 'reset' || e.type === 'history') throw new Error(`unexpected ${e.type}`);
         if (e.symbol === symbol) mergeBars(chart, e.bars);
       });
       store.play();
@@ -301,5 +301,24 @@ describe('starting another session', () => {
     expect(s.loading).toBe(false);
     expect(s.error).toBe('The data service is down.');
     await store.endSession();
+  });
+});
+
+describe('history for higher timeframes on the chart', () => {
+  it('starts loading when a chart wants it and tells the chart when it arrives', async () => {
+    const store = await import('./tradingStore');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    // A 5-minute chart cannot be drawn from 30-minute bars: it asks for nothing.
+    expect(store.getChartHistory('SPY', '5m')).toMatchObject({ status: 'idle', wanted: false, bars: [] });
+    const events: string[] = [];
+    const off = store.onChartEvent((e) => events.push(e.type));
+    expect(store.getChartHistory('SPY', '1D')).toMatchObject({ status: 'loading', wanted: true });
+    await vi.waitFor(() => expect(events).toEqual(['history']), { timeout: 10_000 });
+    off();
+    const h = store.getChartHistory('SPY', '1D')!;
+    expect(h.status).toBe('ready');
+    expect(h.bars.length).toBeGreaterThan(150 * 13);
+    // All of it from before the replay's loaded bars, which the chart draws after it.
+    expect(h.bars[h.bars.length - 1].time).toBeLessThan(store.getBaseBars('SPY')[0].time);
   });
 });

@@ -6,9 +6,24 @@
  *
  * Keys are never hardcoded: they are read through a getter at request time.
  */
-import type { Bar, Timeframe, UnixSeconds } from '../types';
+import { TIMEFRAME_MINUTES, type Bar, type Timeframe, type UnixSeconds } from '../types';
 import { DataProviderError, type BarRequest, type HistoricalDataProvider, type SymbolInfo } from './provider';
 import { DEMO_TICKERS } from './demoProvider';
+import { aggregateBars } from './aggregate';
+
+/**
+ * The vendor bar size (in minutes) a chart's `timeframe` candles are built from. The vendors cut
+ * bars on the clock, so their hourly bars hold 09:00-10:00 while a chart's hour starts at the 09:30
+ * open: anything coarser than 30 minutes is built from 30-minute bars.
+ */
+function vendorMinutes(timeframe: Timeframe): number {
+  return Math.min(TIMEFRAME_MINUTES[timeframe], 30);
+}
+
+/** Vendor bars of `minutes` built up to `timeframe` candles where those are coarser. */
+function toTimeframe(bars: Bar[], minutes: number, timeframe: Timeframe): Bar[] {
+  return TIMEFRAME_MINUTES[timeframe] > minutes ? aggregateBars(bars, timeframe, '30m') : bars;
+}
 
 export interface VendorCredentials {
   polygonApiKey?: string;
@@ -93,9 +108,19 @@ export class PolygonProvider implements HistoricalDataProvider {
   }
 
   async getBars(req: BarRequest, signal?: AbortSignal): Promise<Bar[]> {
+    return this.aggregates(req, 1, signal);
+  }
+
+  async getCoarseBars(req: BarRequest, timeframe: Timeframe, signal?: AbortSignal): Promise<Bar[]> {
+    const minutes = vendorMinutes(timeframe);
+    return toTimeframe(await this.aggregates(req, minutes, signal), minutes, timeframe);
+  }
+
+  /** Polygon's aggregates of `minutes` minutes. */
+  private async aggregates(req: BarRequest, minutes: number, signal?: AbortSignal): Promise<Bar[]> {
     const key = this.creds().polygonApiKey;
     const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
-    let url: string | null = `${this.baseUrl}/v2/aggs/ticker/${encodeURIComponent(req.symbol.toUpperCase())}/range/1/minute/${req.from * 1000}/${req.to * 1000 - 1}?adjusted=true&sort=asc&limit=50000`;
+    let url: string | null = `${this.baseUrl}/v2/aggs/ticker/${encodeURIComponent(req.symbol.toUpperCase())}/range/${minutes}/minute/${req.from * 1000}/${req.to * 1000 - 1}?adjusted=true&sort=asc&limit=50000`;
     const out: Bar[] = [];
     for (let page = 0; url && page < 50; page++) {
       let res: Response;
@@ -154,6 +179,16 @@ export class AlpacaProvider implements HistoricalDataProvider {
   }
 
   async getBars(req: BarRequest, signal?: AbortSignal): Promise<Bar[]> {
+    return this.bars(req, 1, signal);
+  }
+
+  async getCoarseBars(req: BarRequest, timeframe: Timeframe, signal?: AbortSignal): Promise<Bar[]> {
+    const minutes = vendorMinutes(timeframe);
+    return toTimeframe(await this.bars(req, minutes, signal), minutes, timeframe);
+  }
+
+  /** Alpaca's bars of `minutes` minutes. */
+  private async bars(req: BarRequest, minutes: number, signal?: AbortSignal): Promise<Bar[]> {
     const c = this.creds();
     const headers: Record<string, string> = {};
     if (c.alpacaKeyId && c.alpacaSecret) {
@@ -164,7 +199,7 @@ export class AlpacaProvider implements HistoricalDataProvider {
     let token: string | undefined;
     for (let page = 0; page < 100; page++) {
       const qs = new URLSearchParams({
-        timeframe: '1Min',
+        timeframe: `${minutes}Min`,
         start: new Date(req.from * 1000).toISOString(),
         end: new Date((req.to - 1) * 1000).toISOString(),
         limit: '10000',

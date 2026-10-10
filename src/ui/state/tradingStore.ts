@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 import { bucketFor, ownCandles } from '../../core/data/aggregate';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
-import { ReplaySession, type ReplaySetup } from '../../core/replay/ReplaySession';
+import { ReplaySession, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
@@ -85,8 +85,10 @@ export interface TradingSnapshot {
 /**
  * `tick` carries the simulated 1m bars a step touched, oldest first, each in its latest state: the
  * forming bar is re-sent with cumulative values, and a fast step can finish several minutes at once.
+ * `history` says the bars from before a replay's loaded bars (getChartHistory) arrived for `symbol`,
+ * or failed to.
  */
-export type ChartEvent = { type: 'reset' } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bars: Bar[] };
+export type ChartEvent = { type: 'reset' } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bars: Bar[] } | { type: 'history'; symbol: string };
 type ChartListener = (e: ChartEvent) => void;
 const chartListeners = new Set<ChartListener>();
 export function onChartEvent(fn: ChartListener): () => void {
@@ -187,6 +189,22 @@ export function getBaseBars(symbol: string): Bar[] {
   if (eng.replay) return eng.replay.engineFor(symbol)?.visibleBaseBars() ?? [];
   if (eng.sim) return eng.sim.getHistory(symbol);
   return [];
+}
+
+/**
+ * What a `timeframe` chart of `symbol` draws from before the replay's loaded bars (ReplaySession.chartHistory),
+ * or null outside a replay. The first chart that wants it starts loading it (`retry`: again after a
+ * failure), and a 'history' chart event says when it has arrived.
+ */
+export function getChartHistory(symbol: string, timeframe: Timeframe, retry = false): ChartHistory | null {
+  const replay = eng.replay;
+  const h = replay?.chartHistory(symbol, timeframe);
+  if (!replay || !h) return null;
+  if (!h.wanted || !(h.status === 'idle' || (retry && h.status === 'failed'))) return h;
+  void replay.loadHistory(symbol).then(() => {
+    if (eng.replay === replay) emitChart({ type: 'history', symbol });
+  });
+  return replay.chartHistory(symbol, timeframe);
 }
 
 /** The size of `symbol`'s base bars: the replay's data, or the simulated market's 1-minute bars. */

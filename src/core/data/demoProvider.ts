@@ -10,6 +10,7 @@
  */
 import type { Bar, Timeframe, UnixSeconds } from '../types';
 import type { BarRequest, HistoricalDataProvider, SymbolInfo } from './provider';
+import { aggregateBars } from './aggregate';
 import { Rng, hashString } from '../util/random';
 import { roundToTick } from '../util/math';
 import {
@@ -53,6 +54,16 @@ export const DEMO_TICKERS: DemoTickerProfile[] = [
 export const DEMO_FIRST_DATE = '2019-01-02';
 const TRADING_DAYS_PER_YEAR = 252;
 const SUBTICKS = 4;
+/** Longest stretch of generating a request runs without letting the page draw (getBars). */
+const SLICE_MS = 40;
+/** Most days of coarse bars kept for getCoarseBars (a few dozen bars each). */
+const MAX_COARSE_DAYS = 5000;
+
+/**
+ * Lets the page handle input and draw. A timer, not scheduler.yield: Chromium resumes a yielded task
+ * ahead of drawing, so the page would not draw until the whole request was done.
+ */
+const yieldToPage = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 type Regime = 'bull' | 'bear' | 'chop';
 
@@ -157,6 +168,7 @@ export class DemoDataProvider implements HistoricalDataProvider {
   private plans = new Map<string, Map<string, DayPlan>>();
   private dayCache = new Map<string, Bar[]>();
   private dayCacheOrder: string[] = [];
+  private coarseCache = new Map<string, Bar[]>();
 
   constructor(now: Date = new Date(), private maxCachedDays = 400) {
     this.lastDate = lastCompletedTradingDay(now);
@@ -180,25 +192,75 @@ export class DemoDataProvider implements HistoricalDataProvider {
     return { from: exchangeTimeToUnix(DEMO_FIRST_DATE, PREMARKET_OPEN), to: exchangeTimeToUnix(this.lastDate, AFTERHOURS_CLOSE) };
   }
 
-  async getBars(req: BarRequest): Promise<Bar[]> {
-    return this.getBarsSync(req);
+  /**
+   * Generating a day takes a few milliseconds, so a long request (a multi-month replay) is generated
+   * in slices that let the page draw in between.
+   */
+  async getBars(req: BarRequest, signal?: AbortSignal): Promise<Bar[]> {
+    const profile = this.requireProfile(req.symbol);
+    const out: Bar[] = [];
+    let slice = performance.now();
+    for (const date of this.dates(req)) {
+      for (const b of this.dayBars(profile, date)) if (b.time >= req.from && b.time < req.to) out.push(b);
+      if (performance.now() - slice > SLICE_MS) {
+        await yieldToPage();
+        signal?.throwIfAborted();
+        slice = performance.now();
+      }
+    }
+    return out;
+  }
+
+  /** The days' minute bars aggregated as a chart does, generated in slices like getBars and kept for later requests. */
+  async getCoarseBars(req: BarRequest, timeframe: Timeframe, signal?: AbortSignal): Promise<Bar[]> {
+    const profile = this.requireProfile(req.symbol);
+    const out: Bar[] = [];
+    let slice = performance.now();
+    for (const date of this.dates(req)) {
+      const key = `${profile.symbol}|${date}|${timeframe}`;
+      let bars = this.coarseCache.get(key);
+      if (!bars) {
+        bars = aggregateBars(this.dayBars(profile, date), timeframe, '1m');
+        if (this.coarseCache.size >= MAX_COARSE_DAYS) this.coarseCache.delete(this.coarseCache.keys().next().value!);
+        this.coarseCache.set(key, bars);
+      }
+      for (const b of bars) if (b.time >= req.from && b.time < req.to) out.push({ ...b });
+      if (performance.now() - slice > SLICE_MS) {
+        await yieldToPage();
+        signal?.throwIfAborted();
+        slice = performance.now();
+      }
+    }
+    return out;
   }
 
   /** Synchronous variant (generation is pure CPU work); used by tests and the backtester. */
   getBarsSync(req: BarRequest): Bar[] {
-    const profile = this.profile(req.symbol);
-    if (!profile) throw new Error(`Unknown demo symbol ${req.symbol}`);
+    const profile = this.requireProfile(req.symbol);
     const out: Bar[] = [];
+    for (const date of this.dates(req)) {
+      for (const b of this.dayBars(profile, date)) {
+        if (b.time >= req.from && b.time < req.to) out.push(b);
+      }
+    }
+    return out;
+  }
+
+  /** The trading days with demo data that `req` touches. */
+  private *dates(req: BarRequest): Generator<string> {
     let date = exchangeDate(req.from);
     const lastDate = exchangeDate(req.to - 1);
     if (!isTradingDay(date)) date = nextTradingDay(date);
     while (date <= lastDate && date <= this.lastDate) {
-      for (const b of this.dayBars(profile, date)) {
-        if (b.time >= req.from && b.time < req.to) out.push(b);
-      }
+      yield date;
       date = nextTradingDay(date);
     }
-    return out;
+  }
+
+  private requireProfile(symbol: string): DemoTickerProfile {
+    const profile = this.profile(symbol);
+    if (!profile) throw new Error(`Unknown demo symbol ${symbol}`);
+    return profile;
   }
 
   private profile(symbol: string): DemoTickerProfile | undefined {

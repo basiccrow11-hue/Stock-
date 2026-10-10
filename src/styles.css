@@ -209,7 +209,14 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .chart-wrap.picking { cursor: crosshair; }
 .chart-wrap.picking .chart-canvas { outline: 1px dashed var(--accent); outline-offset: -1px; }
 .chart-canvas { position: absolute; inset: 0; }
-.chart-legend { position: absolute; top: 6px; left: 8px; display: flex; gap: 10px; font-size: 11px; font-family: var(--mono); pointer-events: none; z-index: 3; background: var(--legend-bg); color: var(--chart-text); padding: 2px 6px; border-radius: 4px; flex-wrap: wrap; }
+/* The legend: the candle's prices on the first row, then a row per overlay indicator; each lower
+   pane gets its own (.pane-legend) at its top. ChartLegend keeps it clear of the price axis. */
+.chart-legend { position: absolute; top: 6px; left: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; font-size: 11px; font-family: var(--mono); pointer-events: none; z-index: 3; background: var(--legend-bg); color: var(--chart-text); padding: 2px 6px; border-radius: 4px; }
+.chart-legend .legend-row, .chart-legend .legend-ind { display: flex; flex-wrap: wrap; gap: 0 10px; }
+.chart-legend .legend-ind { gap: 0 6px; }
+.chart-legend .legend-note { font-style: italic; }
+/* A short price pane: everything flows on as few lines as fit, so the candles stay in view. */
+.chart-legend.compact { flex-direction: row; flex-wrap: wrap; gap: 0 12px; }
 .chart-legend .legend-sym { font-weight: 700; color: var(--chart-strong); }
 .chart-legend b { font-weight: 500; color: var(--chart-strong); }
 .chart-legend .pos { color: var(--chart-pos); }

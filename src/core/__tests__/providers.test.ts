@@ -348,6 +348,50 @@ describe('vendor providers (mocked HTTP)', () => {
     expect(calls[0][0]).toContain('feed=iex');
   });
 
+  it('serve history for higher timeframes from 30-minute bars, cut into candles as a chart cuts them', async () => {
+    // 30-minute vendor bars at 09:30 and 10:00 (a chart's first hour), then at 15:30.
+    const t = et('2025-01-15', '09:30');
+    const late = et('2025-01-15', '15:30');
+    const raw = [
+      { time: t, o: 10, h: 12, l: 9, c: 11, v: 100 },
+      { time: t + 1800, o: 11, h: 13, l: 10, c: 12, v: 200 },
+      { time: late, o: 12, h: 12.5, l: 11.5, c: 12.2, v: 300 },
+    ];
+    const req = { symbol: 'AAPL', from: et('2025-01-15', '04:00'), to: et('2025-01-16', '04:00') };
+    const polygonUrls: string[] = [];
+    const polygon = new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', (async (url: string) => {
+      polygonUrls.push(url);
+      return new Response(JSON.stringify({ results: raw.map((b) => ({ t: b.time * 1000, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v })) }), { status: 200 });
+    }) as unknown as typeof fetch);
+    const alpacaUrls: string[] = [];
+    const alpaca = new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec', alpacaFeed: 'iex' }), '/api/alpaca', (async (url: string) => {
+      alpacaUrls.push(url);
+      return new Response(JSON.stringify({ bars: raw.map((b) => ({ t: new Date(b.time * 1000).toISOString(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v })), next_page_token: null }), { status: 200 });
+    }) as unknown as typeof fetch);
+    for (const p of [polygon, alpaca]) {
+      expect((await p.getCoarseBars(req, '30m')).map((b) => b.time)).toEqual(raw.map((b) => b.time));
+      expect((await p.getCoarseBars(req, '1h')).map((b) => [b.time, b.open, b.high, b.low, b.close, b.volume])).toEqual([
+        [t, 10, 13, 9, 12, 300],
+        [late, 12, 12.5, 11.5, 12.2, 300],
+      ]);
+      const days = await p.getCoarseBars(req, '1D');
+      expect(days).toHaveLength(1);
+      expect(days[0]).toMatchObject({ open: 10, high: 13, low: 9, close: 12.2, volume: 600 });
+    }
+    expect(polygonUrls).toHaveLength(3);
+    for (const url of polygonUrls) expect(url).toMatch(/\/range\/30\/minute\//);
+    expect(alpacaUrls).toHaveLength(3);
+    for (const url of alpacaUrls) expect(url).toContain('timeframe=30Min');
+  });
+
+  it('CSV: serves the imported bars as candles of a higher timeframe', async () => {
+    const p = new CsvDataProvider();
+    const t = et('2025-01-15', '09:30');
+    p.upsert({ symbol: 'ABC', name: 'ABC', baseTimeframe: '1m', importedAt: 0, fileName: 'a.csv', bars: [0, 1, 2].map((i) => ({ time: t + i * 60, open: 1 + i, high: 2 + i, low: i, close: 1.5 + i, volume: 10 })) });
+    const hours = await p.getCoarseBars({ symbol: 'ABC', from: t, to: t + 3600 }, '1h');
+    expect(hours).toEqual([{ time: t, open: 1, high: 4, low: 0, close: 3.5, volume: 30 }]);
+  });
+
   it('reports missing credentials instead of failing silently', () => {
     expect(new PolygonProvider(() => ({})).unavailableReason()).toMatch(/Polygon API key/);
     expect(new AlpacaProvider(() => ({ alpacaKeyId: 'x' })).unavailableReason()).toMatch(/Alpaca/);

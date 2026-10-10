@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../indicators/indicators';
+import { atr, bollinger, ema, indicatorStream, macd, rsi, sma, vwap, type IndicatorSpec } from '../indicators/indicators';
+import type { Bar } from '../types';
 import { bar, et, randomBars } from './helpers';
 
 describe('indicator values', () => {
@@ -93,6 +94,108 @@ describe('indicators are causal (no look-ahead)', () => {
             else expect(a).toBeCloseTo(b, 9);
           }
         });
+      }
+    });
+  }
+});
+
+describe('indicator streams (charts) match the batch functions exactly', () => {
+  /** The batch values a stream's lines must equal, in the stream's line order. */
+  function batch(spec: IndicatorSpec, bars: Bar[]): number[][] {
+    const closes = bars.map((b) => b.close);
+    switch (spec.type) {
+      case 'sma':
+        return [sma(closes, spec.period)];
+      case 'ema':
+        return [ema(closes, spec.period)];
+      case 'rsi':
+        return [rsi(closes, spec.period)];
+      case 'atr':
+        return [atr(bars, spec.period)];
+      case 'vwap':
+        return [vwap(bars)];
+      case 'bb': {
+        const b = bollinger(closes, spec.period, spec.mult);
+        return [b.upper, b.middle, b.lower];
+      }
+      case 'macd': {
+        const m = macd(closes, spec.fast, spec.slow, spec.signal);
+        return [m.histogram, m.macd, m.signal];
+      }
+    }
+  }
+
+  const specs: IndicatorSpec[] = [
+    { type: 'sma', period: 20 },
+    { type: 'sma', period: 1 },
+    { type: 'ema', period: 9 },
+    { type: 'ema', period: 21 },
+    { type: 'ema', period: 0 },
+    { type: 'bb', period: 20, mult: 2 },
+    { type: 'bb', period: 5, mult: 1.5 },
+    { type: 'rsi', period: 14 },
+    { type: 'rsi', period: 2 },
+    { type: 'macd', fast: 12, slow: 26, signal: 9 },
+    { type: 'macd', fast: 3, slow: 7, signal: 4 },
+    { type: 'atr', period: 14 },
+    { type: 'vwap' },
+  ];
+
+  /** A random chart session: new candles, a forming candle that keeps changing, rewinds and resets. */
+  function* session(seed: number): Generator<{ bars: Bar[]; from: number }> {
+    // 1m bars over several days, so VWAP crosses sessions.
+    const source = randomBars(1000, seed, et('2025-01-15', '09:30'));
+    let s = seed;
+    const rand = () => {
+      s = (s * 1664525 + 1013904223) % 4294967296;
+      return s / 4294967296;
+    };
+    const bars: Bar[] = [];
+    let next = 0;
+    while (next < source.length) {
+      const r = rand();
+      if (r < 0.45) {
+        // New candles: the forming one is final now, one to three more arrive.
+        const from = bars.length;
+        for (let k = 1 + Math.floor(rand() * 3); k > 0 && next < source.length; k--) bars.push({ ...source[next++] });
+        yield { bars, from };
+      } else if (r < 0.85 && bars.length) {
+        // The forming candle changes (a new base bar inside it, or a simulated tick).
+        const last = bars[bars.length - 1];
+        const close = last.close + (rand() - 0.5);
+        bars[bars.length - 1] = { ...last, close, high: Math.max(last.high, close), low: Math.min(last.low, close), volume: last.volume + Math.round(rand() * 500) };
+        yield { bars, from: bars.length - 1 };
+      } else if (r < 0.9) {
+        yield { bars, from: bars.length };
+      } else if (r < 0.95 && bars.length > 5) {
+        // Step back: the newest candles go.
+        bars.length -= 1 + Math.floor(rand() * 4);
+        next = bars.length;
+        yield { bars, from: bars.length };
+      } else {
+        // Anything else is redrawn from scratch.
+        yield { bars, from: 0 };
+      }
+    }
+  }
+
+  for (const spec of specs) {
+    it(`${JSON.stringify(spec)}: every update equals a full recomputation, bit for bit`, () => {
+      for (const seed of [3, 17]) {
+        const stream = indicatorStream(spec);
+        let updates = 0;
+        for (const { bars, from } of session(seed)) {
+          stream.update(bars, from);
+          updates++;
+          const full = batch(spec, bars);
+          expect(stream.lines.length).toBe(full.length);
+          full.forEach((line, k) => {
+            expect(stream.lines[k].length).toBe(bars.length);
+            // Only the tail can have changed, but the whole line is compared every time.
+            for (let i = 0; i < line.length; i++) if (!Object.is(stream.lines[k][i], line[i])) expect.fail(`line ${k} index ${i} after update ${updates}: ${stream.lines[k][i]} != ${line[i]}`);
+          });
+        }
+        expect(updates).toBeGreaterThan(500);
       }
     });
   }

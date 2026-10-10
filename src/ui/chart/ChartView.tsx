@@ -1,9 +1,13 @@
 /**
  * TradingView-style chart built on lightweight-charts (Apache-2.0, by TradingView).
  *
- * Data comes only from getBaseBars() (revealed bars) and incremental bus events, so the chart can
- * never show a candle that has not happened yet in the replay. Indicators are recomputed from the
- * revealed candles with the causal functions in core/indicators.
+ * Data comes only from getBaseBars() (revealed bars), getChartHistory() (history from before the
+ * replay's loaded bars, all complete before its start) and incremental bus events, so the chart can
+ * never show a candle that has not happened yet in the replay. Indicators are computed from those
+ * candles with the causal streams in core/indicators, which only compute the candles that changed.
+ *
+ * A long session has hundreds of thousands of candles: the chart is handed the newest few thousand,
+ * and older ones as the user scrolls back to them (the window), so redraws stay quick.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
@@ -26,20 +30,22 @@ import {
   TickMarkType,
 } from 'lightweight-charts';
 import type { Bar, Timeframe } from '../../core/types';
-import { roundToTick } from '../../core/util/math';
+import { lastIndexAtOrBefore, roundToTick } from '../../core/util/math';
 import { aggregateBars, candleFor, mergeBars, ownCandles } from '../../core/data/aggregate';
-import { atr, bollinger, ema, macd, rsi, sma, vwap } from '../../core/indicators/indicators';
-import { exchangeDate, exchangeOffsetSeconds } from '../../core/time';
+import { indicatorStream, type IndicatorSpec, type IndicatorStream } from '../../core/indicators/indicators';
+import type { ChartHistory } from '../../core/replay/ReplaySession';
+import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
-import { candleStartFor, getBaseBars, getBaseTimeframe, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
-import { CHART_LOCALE, compactVolume, price as fmtPrice } from '../services/format';
+import { candleStartFor, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
+import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
+import { ChartLegend, type LegendEntry, type LegendModel, type LegendSource } from './ChartLegend';
 import { useDrawings } from './drawings';
 import { addMainSeries, chartOptions, lastPriceColor, lastVisibleIndex, mainPoint, mainPriceFormat, mainSeriesOptions, priceScaleMode, valueDecimals, valueFormat, type MainSeries } from './chartTheme';
 import { useTheme } from '../theme/useTheme';
 import { onChart, type ChartPalette } from '../theme/themes';
-import { chartLabelFill, chartLabelText } from '../theme/color';
+import { chartLabelFill, chartLabelText, readable } from '../theme/color';
 
 /** lightweight-charts renders UTC; shift to exchange time so axes read in ET. `shift` moves a blind session's times (blindChartShift). */
 export function toChartTime(t: number, shift = 0): UTCTimestamp {
@@ -68,6 +74,16 @@ export function blindChartShift(sessionId: string): number {
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
+/** Candles handed to the chart at first; older ones follow as the user scrolls back to them. */
+const WINDOW = 2000;
+/** Scrolling to within this many candles of the oldest one handed over brings older ones. */
+const WINDOW_MARGIN = 300;
+/** Height of a legend row in pixels: past LEGEND_SHARE of the price pane, the legend flows compactly. */
+const LEGEND_ROW = 17;
+const LEGEND_SHARE = 0.4;
+/** Room left of the price axis for the names on indicator value labels ("BB upper"). */
+const LABEL_TITLE_ROOM = 76;
+
 interface IndicatorSeries {
   cfg: IndicatorConfig;
   series: ISeriesApi<'Line' | 'Histogram'>[];
@@ -77,6 +93,8 @@ interface IndicatorSeries {
   /** Label precision of an oscillator pane, from the largest value seen (see valueDecimals). */
   decimals: number;
   maxAbs: number;
+  /** Its values on every candle, kept up to date at the newest ones (null for volume). */
+  stream: IndicatorStream | null;
 }
 
 /** Line colour per series of an indicator (null for the MACD histogram, coloured per bar). */
@@ -86,30 +104,39 @@ function indicatorColors(cfg: IndicatorConfig, p: ChartPalette): (string | null)
   return cfg.type === 'bb' ? [c, c, c] : [c];
 }
 
-function computeIndicator(cfg: IndicatorConfig, candles: Bar[]): number[][] {
-  const closes = candles.map((c) => c.close);
+/** What to compute for an indicator; its lines come in the order of its series. */
+function indicatorSpec(cfg: IndicatorConfig): IndicatorSpec | null {
   switch (cfg.type) {
     case 'sma':
-      return [sma(closes, cfg.period ?? 20)];
     case 'ema':
-      return [ema(closes, cfg.period ?? 20)];
-    case 'vwap':
-      return [vwap(candles)];
-    case 'bb': {
-      const b = bollinger(closes, cfg.period ?? 20, cfg.mult ?? 2);
-      return [b.upper, b.middle, b.lower];
-    }
+      return { type: cfg.type, period: cfg.period ?? 20 };
     case 'rsi':
-      return [rsi(closes, cfg.period ?? 14)];
-    case 'macd': {
-      const m = macd(closes, cfg.fast ?? 12, cfg.slow ?? 26, cfg.signal ?? 9);
-      return [m.histogram, m.macd, m.signal];
-    }
     case 'atr':
-      return [atr(candles, cfg.period ?? 14)];
+      return { type: cfg.type, period: cfg.period ?? 14 };
+    case 'vwap':
+      return { type: 'vwap' };
+    case 'bb':
+      return { type: 'bb', period: cfg.period ?? 20, mult: cfg.mult ?? 2 };
+    case 'macd':
+      return { type: 'macd', fast: cfg.fast ?? 12, slow: cfg.slow ?? 26, signal: cfg.signal ?? 9 };
     case 'volume':
-      return [];
+      return null;
   }
+}
+
+/** An indicator's name with its parameters, as the legend shows it ("EMA 9", "MACD 12 26 9"). */
+export function indicatorName(cfg: IndicatorConfig): string {
+  const spec = indicatorSpec(cfg);
+  if (!spec) return cfg.type === 'volume' ? 'Volume' : String(cfg.type).toUpperCase();
+  const params = spec.type === 'bb' ? [spec.period, spec.mult] : spec.type === 'macd' ? [spec.fast, spec.slow, spec.signal] : spec.type === 'vwap' ? [] : [spec.period];
+  return [spec.type.toUpperCase(), ...params].join(' ');
+}
+
+/** The names on an indicator's value labels on the price axis, per series (none for the MACD histogram). */
+function seriesTitles(cfg: IndicatorConfig): string[] {
+  if (cfg.type === 'bb') return ['BB upper', 'BB basis', 'BB lower'];
+  if (cfg.type === 'macd') return ['', 'MACD', 'Signal'];
+  return [indicatorName(cfg)];
 }
 
 const OSCILLATORS = new Set(['rsi', 'macd', 'atr']);
@@ -128,12 +155,24 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const indicatorsRef = useRef<IndicatorSeries[]>([]);
   const baseRef = useRef<Bar[]>([]);
   const baseTfRef = useRef<Timeframe>('1m');
+  /** Every candle the chart can show, oldest first: those built from the history, then from the revealed bars. */
   const candlesRef = useRef<Bar[]>([]);
+  /** Index in candlesRef of the oldest candle handed to the chart: logical index 0 on its time scale. */
+  const windowStartRef = useRef(0);
+  /** The chart the window was sized on (symbol, timeframe, session): redrawing that chart keeps the size. */
+  const windowKeyRef = useRef('');
+  /** What the replay has from before its loaded bars, for the legend's note. */
+  const historyRef = useRef<ChartHistory | null>(null);
+  /** How many of candlesRef's candles, at its start, were built from that history. */
+  const historyCountRef = useRef(0);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null);
   const [geometryVersion, setGeometryVersion] = useState(0);
   /** Bumped when the main series is replaced (chart style change) so dependants re-attach. */
   const [seriesVersion, setSeriesVersion] = useState(0);
+  /** Bumped when the oldest candle handed to the chart changes, so markers are re-sent for the candles it holds. */
+  const [windowVersion, setWindowVersion] = useState(0);
+  const windowOldestRef = useRef<number | null>(null);
   const theme = useTheme();
   const pal = theme.chart;
   const palRef = useRef(pal);
@@ -143,7 +182,27 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const percentBaseRef = useRef<number | null>(null);
   /** Direction of the newest bar, for the hollow-candle last-price line. */
   const lastUpRef = useRef(true);
-  const [legend, setLegend] = useState<{ bar: Bar; change: number } | null>(null);
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
+  /** Index in candlesRef of the candle under the crosshair, or null: the legend then shows the newest. */
+  const hoverRef = useRef<number | null>(null);
+  /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
+  const paneTopsRef = useRef<number[]>([]);
+  const priceHeightRef = useRef(0);
+  const paneObserverRef = useRef<ResizeObserver | null>(null);
+  const legendState = useRef({ version: 0, listeners: new Set<() => void>() }).current;
+  const readLegendRef = useRef<() => LegendModel | null>(() => null);
+  const legendSource = useMemo<LegendSource>(
+    () => ({
+      subscribe: (onChange) => {
+        legendState.listeners.add(onChange);
+        return () => legendState.listeners.delete(onChange);
+      },
+      version: () => legendState.version,
+      read: () => readLegendRef.current(),
+    }),
+    [legendState],
+  );
 
   const indicators = useSettings((s) => s.indicators);
   const indicatorsNowRef = useRef(indicators);
@@ -180,16 +239,20 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // drop the data-source watermark attached to it.
     chart.panes()[0].setPreserveEmptyPane(true);
 
+    // The legend follows the crosshair on its own: moving it never re-renders the chart.
     chart.subscribeCrosshairMove((param) => {
-      if (!param.time || !param.seriesData) {
-        setLegend(null);
-        return;
+      const candles = candlesRef.current;
+      let i = -1;
+      if (param.time !== undefined && param.logical !== undefined) {
+        // Logical indexes count from the oldest candle handed to the chart; the time confirms it.
+        i = windowStartRef.current + Math.round(param.logical);
+        if (!candles[i] || ct(candles[i].time) !== param.time) i = lastIndexAtOrBefore(candles, param.time as number, (c) => ct(c.time));
+        if (i >= 0 && ct(candles[i].time) !== param.time) i = -1;
       }
-      const idx = candlesRef.current.findIndex((c) => ct(c.time) === param.time);
-      if (idx < 0) return;
-      const bar = candlesRef.current[idx];
-      const prev = idx > 0 ? candlesRef.current[idx - 1].close : bar.open;
-      setLegend({ bar, change: ((bar.close - prev) / prev) * 100 });
+      const hover = i >= 0 ? i : null;
+      if (hover === hoverRef.current) return;
+      hoverRef.current = hover;
+      emitLegend();
     });
     chart.subscribeClick((param) => {
       const series = candleRef.current;
@@ -211,10 +274,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     el.addEventListener('pointerup', bumpSoon);
     el.addEventListener('dblclick', bumpSoon);
     el.addEventListener('wheel', bumpSoon, { passive: true });
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    let extendFrame = 0;
+    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       bump();
       syncPercentBase();
       syncLastDirection();
+      // Scrolled back near the oldest candle handed over: hand over older ones. Not from inside this
+      // callback, as setData moves the range again.
+      if (range && range.from < WINDOW_MARGIN && windowStartRef.current > 0 && !extendFrame) {
+        extendFrame = requestAnimationFrame(() => ((extendFrame = 0), extendWindow()));
+      }
     });
     // The container, and the price pane itself: dragging a pane separator resizes the price pane
     // (and rescales its prices) without any other event, and drawings must follow.
@@ -222,6 +291,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     ro.observe(el);
     const pricePane = chart.panes()[0].getHTMLElement();
     if (pricePane) ro.observe(pricePane);
+    // Every pane (see observePanes): resizing one moves the tops of those below it.
+    const paneObserver = new ResizeObserver(measurePanes);
+    paneObserverRef.current = paneObserver;
+    paneObserver.observe(el);
 
     // In the one-column layout the page scrolls: a vertical swipe on the chart scrolls the page
     // instead of dragging the price scale (horizontal swipes still pan, pinch still zooms).
@@ -238,12 +311,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     return () => {
       registerSnapshotProvider(null);
       cancelAnimationFrame(frame);
+      cancelAnimationFrame(extendFrame);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', bumpSoon);
       el.removeEventListener('dblclick', bumpSoon);
       el.removeEventListener('wheel', bumpSoon);
       stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
+      paneObserver.disconnect();
+      paneObserverRef.current = null;
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
@@ -275,7 +351,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     styleRef.current = pal.style;
     candleRef.current = series;
     markersRef.current = createSeriesMarkers(series, []);
-    series.setData(candlesRef.current.map(candlePoint) as never);
+    series.setData(shownCandles().map(candlePoint) as never);
     setSeriesVersion((v) => v + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pal.style]);
@@ -295,8 +371,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const frame = requestAnimationFrame(() => setGeometryVersion((v) => v + 1));
     restyleIndicators();
     // Volume and MACD histogram colours are per point, so their data is re-sent.
-    volumeRef.current?.setData(candlesRef.current.map(volumePoint));
-    setIndicatorData(0);
+    volumeRef.current?.setData(shownCandles().map(volumePoint));
+    for (const ind of indicatorsRef.current) setIndicatorWindow(ind);
     return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pal, seriesVersion]);
@@ -401,6 +477,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       const priceFormat = pane === 0 ? overlayFormat : valueFormat(2);
       const p = palRef.current;
       const colors = indicatorColors(cfg, p);
+      const titles = seriesTitles(cfg);
       const line = (k: number, width: 1 | 2 = 1, style = LineStyle.Solid) =>
         chart.addSeries(
           LineSeries,
@@ -412,6 +489,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
             lineStyle: style,
             priceLineVisible: false,
             lastValueVisible: true,
+            // Names the value label on the price axis, as in TradingView.
+            title: titles[k] ?? '',
             crosshairMarkerVisible: false,
             priceFormat,
           },
@@ -427,7 +506,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
         bands.push(series[0].createPriceLine({ price: 70, color: p.bandDown, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
         bands.push(series[0].createPriceLine({ price: 30, color: p.bandUp, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' }));
       }
-      indicatorsRef.current.push({ cfg, series, pane, bands, decimals: 2, maxAbs: 0 });
+      const spec = indicatorSpec(cfg);
+      indicatorsRef.current.push({ cfg, series, pane, bands, decimals: 2, maxAbs: 0, stream: spec ? indicatorStream(spec) : null });
     }
     for (const ind of indicatorsRef.current) if (ind.pane > 0) chart.panes()[ind.pane]?.setStretchFactor(heights.get(ind.cfg.id) ?? 0.35);
     // The price pane's dragged height only means something next to the panes it was dragged
@@ -435,13 +515,22 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const kept = indicatorsRef.current.some((ind) => ind.pane > 0 && heights.has(ind.cfg.id));
     chart.panes()[0].setStretchFactor(kept ? mainHeight : 1);
     applyPriceScale();
-    fullRedraw();
-    // fullRedraw and applyPriceScale are stable for the lifetime of the component (refs only).
+    // The candles are current (bus events keep them so): only the new series need their data.
+    computeIndicators(0);
+    volumeRef.current?.setData(shownCandles().map(volumePoint));
+    for (const ind of indicatorsRef.current) setIndicatorWindow(ind);
+    // The panes' elements may only be laid out on the chart's next frame.
+    observePanes();
+    const frame = requestAnimationFrame(observePanes);
+    emitLegend();
+    return () => cancelAnimationFrame(frame);
+    // These helpers read refs only, so they are the same for the lifetime of the component.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [indicatorKey]);
 
   useEffect(() => {
     restyleIndicators();
+    emitLegend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [indicatorColorKey]);
 
@@ -455,6 +544,91 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       ind.bands[0]?.applyOptions({ color: p.bandDown });
       ind.bands[1]?.applyOptions({ color: p.bandUp });
     }
+  }
+
+  // ---------------------------------------------------------------- legend
+  function emitLegend(): void {
+    legendState.version++;
+    for (const onChange of legendState.listeners) onChange();
+  }
+
+  /** Watch every pane's size, after the panes have changed (see measurePanes). */
+  function observePanes(): void {
+    const chart = chartRef.current;
+    const el = containerRef.current;
+    const ro = paneObserverRef.current;
+    if (!chart || !el || !ro) return;
+    ro.disconnect();
+    ro.observe(el);
+    for (const pane of chart.panes()) {
+      const pe = pane.getHTMLElement();
+      if (pe) ro.observe(pe);
+    }
+  }
+
+  /** Re-read the panes' tops; the lower panes' titles follow when one has moved. */
+  function measurePanes(): void {
+    const chart = chartRef.current;
+    const el = containerRef.current;
+    if (!chart || !el) return;
+    const top = el.getBoundingClientRect().top;
+    const tops = chart.panes().map((pane) => Math.round((pane.getHTMLElement()?.getBoundingClientRect().top ?? top) - top));
+    const height = chart.panes()[0].getHeight();
+    const old = paneTopsRef.current;
+    if (height === priceHeightRef.current && tops.length === old.length && tops.every((t, i) => t === old[i])) return;
+    paneTopsRef.current = tops;
+    priceHeightRef.current = height;
+    emitLegend();
+  }
+
+  /** What the legend shows: the candle under the crosshair (else the newest) and the indicators' values on it. */
+  readLegendRef.current = (): LegendModel | null => {
+    const candles = candlesRef.current;
+    if (!candles.length) return null;
+    const hover = hoverRef.current;
+    const i = hover !== null && hover < candles.length ? hover : candles.length - 1;
+    const bar = candles[i];
+    const p = palRef.current;
+    const overlays: LegendEntry[] = [];
+    const panes: (LegendEntry & { top: number })[] = [];
+    for (const ind of indicatorsRef.current) {
+      if (!ind.stream) continue;
+      const colors = indicatorColors(ind.cfg, p);
+      const format = ind.pane === 0 ? fmtPrice : valueFormat(ind.decimals).formatter;
+      const values = ind.stream.lines.map((line, k) => {
+        const v = line[i];
+        // The MACD histogram is coloured by its sign, like its bars.
+        const color = colors[k] ? readable(colors[k], p.background) : v >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)';
+        return { text: v === undefined || Number.isNaN(v) ? '—' : format(v), color };
+      });
+      const entry = { id: ind.cfg.id, name: indicatorName(ind.cfg), values };
+      if (ind.pane === 0) overlays.push(entry);
+      else if (paneTopsRef.current[ind.pane] !== undefined) panes.push({ ...entry, top: paneTopsRef.current[ind.pane] });
+    }
+    const note = historyNote(historyRef.current, candles[0]);
+    const rows = 1 + overlays.length + (note ? 1 : 0);
+    return {
+      symbol,
+      timeframe,
+      bar,
+      prevClose: i > 0 ? candles[i - 1].close : bar.open,
+      dayLabel: blind && hover !== null ? blindDayLabel(bar.time) : null,
+      overlays,
+      panes,
+      note,
+      compact: priceHeightRef.current > 0 && rows * LEGEND_ROW > priceHeightRef.current * LEGEND_SHARE,
+      right: (chartRef.current?.priceScale('right', 0).width() ?? 0) + (indicatorsRef.current.length ? LABEL_TITLE_ROOM : 0) + 8,
+    };
+  };
+
+  /** The legend's note on the history: loading, failed, or the data has nothing earlier to show. */
+  function historyNote(h: ChartHistory | null, first: Bar): string | null {
+    if (!h) return null;
+    if (h.status === 'loading') return 'Loading earlier history…';
+    if (h.status === 'failed') return `Earlier history did not load: ${blind ? withoutDates(h.error ?? '') : h.error}`;
+    if (!h.dataStart || exchangeDate(first.time) > h.dataStart) return null;
+    const label = blind ? blindDayLabel(exchangeTimeToUnix(h.dataStart, REGULAR_OPEN)) : h.dataStart;
+    return `No data before ${label}`;
   }
 
   // ---------------------------------------------------------------- price scale
@@ -479,10 +653,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     if (!chart || !series) return;
     const percent = palRef.current.priceScale === 'percent';
     const candles = candlesRef.current;
+    const start = windowStartRef.current;
     let base: number | null = null;
-    if (percent && candles.length) {
+    if (percent && candles.length > start) {
       const r = chart.timeScale().getVisibleLogicalRange();
-      const i = r ? Math.min(candles.length - 1, Math.max(0, Math.ceil(r.from))) : 0;
+      const i = r ? Math.min(candles.length - 1, start + Math.max(0, Math.ceil(r.from))) : start;
       base = candles[i].close;
     }
     if (!force && base === percentBaseRef.current) return;
@@ -500,7 +675,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
    */
   function lastUp(): boolean {
     const c = candlesRef.current;
-    const b = c[lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, c.length)];
+    const start = windowStartRef.current;
+    const i = lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, c.length - start);
+    const b = i < 0 ? undefined : c[start + i];
     return !b || b.close >= b.open;
   }
 
@@ -514,40 +691,85 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   // ---------------------------------------------------------------- data
-  function setIndicatorData(fromIndex: number): void {
+  /** The candles handed to the chart: those from the window's start on. */
+  function shownCandles(): Bar[] {
+    return candlesRef.current.slice(windowStartRef.current);
+  }
+
+  /** Bring every indicator's values up to date after the candles from index `from` on changed. */
+  function computeIndicators(from: number): void {
     const candles = candlesRef.current;
     for (const ind of indicatorsRef.current) {
-      const values = computeIndicator(ind.cfg, candles);
-      if (ind.pane > 0) syncDecimals(ind, values, fromIndex);
-      ind.series.forEach((s, k) => {
-        const vals = values[k];
-        if (!vals) return;
-        const isHist = ind.cfg.type === 'macd' && k === 0;
-        // VWAP resets each session. lightweight-charts colours the segment from point i to i+1 with
-        // point i's colour (whitespace does not break a line), so the last point of a session gets a
-        // transparent colour to avoid drawing a jump into the next session.
-        const endsSession = (i: number) =>
-          ind.cfg.type === 'vwap' && timeframe !== '1D' && i + 1 < candles.length && exchangeDate(candles[i + 1].time) !== exchangeDate(candles[i].time);
-        const point = (i: number) =>
-          Number.isNaN(vals[i])
-            ? { time: ct(candles[i].time) }
-            : isHist
-              ? { time: ct(candles[i].time), value: vals[i], color: vals[i] >= 0 ? palRef.current.histUp : palRef.current.histDown }
-              : endsSession(i)
-                ? { time: ct(candles[i].time), value: vals[i], color: 'rgba(0,0,0,0)' }
-                : { time: ct(candles[i].time), value: vals[i] };
-        // update() can only touch the newest point, so when a new session starts (which changes how
-        // the previous point is drawn) the series is reset instead. That happens once per day.
-        if (fromIndex <= 0 || endsSession(fromIndex - 1)) s.setData(candles.map((_, i) => point(i)) as never);
-        else for (let i = fromIndex; i < candles.length; i++) s.update(point(i) as never);
-      });
+      if (!ind.stream) continue;
+      ind.stream.update(candles, from);
+      if (ind.pane > 0) syncDecimals(ind, from);
     }
   }
 
+  /**
+   * VWAP resets each session. lightweight-charts colours the segment from point i to i+1 with point
+   * i's colour (whitespace does not break a line), so the last point of a session gets a transparent
+   * colour to avoid drawing a jump into the next session.
+   */
+  function endsSession(ind: IndicatorSeries, i: number): boolean {
+    const candles = candlesRef.current;
+    return ind.cfg.type === 'vwap' && timeframeRef.current !== '1D' && i + 1 < candles.length && exchangeDate(candles[i + 1].time) !== exchangeDate(candles[i].time);
+  }
+
+  /** The point of an indicator's series `k` on candle `i`. */
+  function indicatorPoint(ind: IndicatorSeries, k: number, i: number) {
+    const time = ct(candlesRef.current[i].time);
+    const v = ind.stream!.lines[k][i];
+    if (Number.isNaN(v)) return { time };
+    if (ind.cfg.type === 'macd' && k === 0) return { time, value: v, color: v >= 0 ? palRef.current.histUp : palRef.current.histDown };
+    if (endsSession(ind, i)) return { time, value: v, color: 'rgba(0,0,0,0)' };
+    return { time, value: v };
+  }
+
+  /** Hand an indicator's series their values on the window's candles. */
+  function setIndicatorWindow(ind: IndicatorSeries): void {
+    if (!ind.stream) return;
+    const n = candlesRef.current.length;
+    ind.series.forEach((s, k) => {
+      const points = [];
+      for (let i = windowStartRef.current; i < n; i++) points.push(indicatorPoint(ind, k, i));
+      s.setData(points as never);
+    });
+  }
+
+  /** Hand the chart the window's candles, volume and indicator values. */
+  function setWindowData(): void {
+    const series = candleRef.current;
+    if (!series) return;
+    const shown = shownCandles();
+    series.setData(shown.map(candlePoint) as never);
+    volumeRef.current?.setData(shown.map(volumePoint));
+    for (const ind of indicatorsRef.current) setIndicatorWindow(ind);
+  }
+
+  /** Hands the chart older candles, as many again as it has, once the user scrolls near the oldest. */
+  function extendWindow(): void {
+    const start = windowStartRef.current;
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    if (!range || start === 0 || range.from >= WINDOW_MARGIN) return;
+    windowStartRef.current = Math.max(0, start - Math.max(WINDOW, candlesRef.current.length - start));
+    // The chart keeps its place counted from the newest candle, so the view does not move.
+    setWindowData();
+    syncWindowVersion();
+    setGeometryVersion((v) => v + 1);
+  }
+
+  function syncWindowVersion(): void {
+    const oldest = candlesRef.current[windowStartRef.current]?.time ?? null;
+    if (oldest === windowOldestRef.current) return;
+    windowOldestRef.current = oldest;
+    setWindowVersion((v) => v + 1);
+  }
+
   /** Oscillator label precision follows the size of its values (RSI and most MACDs: 2 decimals). */
-  function syncDecimals(ind: IndicatorSeries, values: number[][], fromIndex: number): void {
+  function syncDecimals(ind: IndicatorSeries, fromIndex: number): void {
     if (fromIndex <= 0) ind.maxAbs = 0;
-    for (const vals of values) for (let i = Math.max(0, fromIndex); i < vals.length; i++) if (Number.isFinite(vals[i])) ind.maxAbs = Math.max(ind.maxAbs, Math.abs(vals[i]));
+    for (const vals of ind.stream?.lines ?? []) for (let i = Math.max(0, fromIndex); i < vals.length; i++) if (Number.isFinite(vals[i])) ind.maxAbs = Math.max(ind.maxAbs, Math.abs(vals[i]));
     const d = valueDecimals(ind.maxAbs);
     if (d === ind.decimals) return;
     ind.decimals = d;
@@ -562,18 +784,50 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     return mainPoint(styleRef.current, ct(c.time), c);
   }
 
-  function fullRedraw(): void {
-    const series = candleRef.current;
-    if (!series) return;
+  /**
+   * Rebuild every candle from the revealed bars and the history before them, and hand the chart the
+   * newest. `retry` loads the history again if it failed before (a new look at this chart).
+   */
+  function fullRedraw(retry = false): void {
+    if (!candleRef.current) return;
     baseRef.current = getBaseBars(symbol);
     baseTfRef.current = getBaseTimeframe(symbol);
-    candlesRef.current = aggregateBars(baseRef.current, timeframe, baseTfRef.current);
-    series.setData(candlesRef.current.map(candlePoint) as never);
-    volumeRef.current?.setData(candlesRef.current.map(volumePoint));
-    setIndicatorData(0);
+    // At the data's own bar size each bar is a candle: getBaseBars already gave copies.
+    const candles = ownCandles(timeframe, baseTfRef.current) ? baseRef.current.slice() : aggregateBars(baseRef.current, timeframe, baseTfRef.current);
+    drawCandles(candles, getChartHistory(symbol, timeframe, retry));
+  }
+
+  /** The history arrived (or failed): only the candles before those of the revealed bars change. */
+  function addHistory(): void {
+    if (!candleRef.current) return;
+    drawCandles(candlesRef.current.slice(historyCountRef.current), getChartHistory(symbol, timeframe));
+  }
+
+  /** Put the history's candles before `candles` (those of the revealed bars) and hand the chart the newest. */
+  function drawCandles(candles: Bar[], history: ChartHistory | null): void {
+    historyRef.current = history;
+    const earlier = history?.bars.length ? aggregateBars(history.bars, timeframe, history.timeframe) : [];
+    // The history ends where the revealed bars begin; should a candle of it overlap them, it is left out.
+    let n = earlier.length;
+    while (n > 0 && candles.length && earlier[n - 1].time >= candles[0].time) n--;
+    // Redrawing the same chart (new bars after a jump, history arriving) keeps the view where it is,
+    // counted from the newest candle: the window keeps as many candles as reach back to the oldest on screen.
+    const key = `${symbol}|${timeframe}|${useTrading.getState().session?.id ?? ''}`;
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const onScreen = range ? candlesRef.current.length - windowStartRef.current - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN : 0;
+    const shown = key === windowKeyRef.current ? Math.max(WINDOW, onScreen) : WINDOW;
+    windowKeyRef.current = key;
+    candlesRef.current = n ? earlier.slice(0, n).concat(candles) : candles;
+    historyCountRef.current = n;
+    windowStartRef.current = Math.max(0, candlesRef.current.length - shown);
+    hoverRef.current = null;
+    computeIndicators(0);
+    setWindowData();
     syncLastDirection();
     syncPercentBase();
     setGeometryVersion((v) => v + 1);
+    syncWindowVersion();
+    emitLegend();
   }
 
   /** Re-aggregate from the bucket containing base index `from` and push updates. */
@@ -587,29 +841,47 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     while (start > 0 && candleOf(base[start - 1].time).key === key) start--;
     const bucketStart = candleOf(base[start].time).start;
     const candles = candlesRef.current;
+    const before = candles.length;
     // Only the forming (last) candle can change; drop it and rebuild from its first base bar.
     while (candles.length && candles[candles.length - 1].time >= bucketStart) candles.pop();
     const firstChanged = candles.length;
-    const tail = aggregateBars(base.slice(start), timeframe, baseTfRef.current);
-    for (const c of tail) {
-      candles.push(c);
-      series.update(candlePoint(c) as never);
-      volumeRef.current?.update(volumePoint(c));
+    for (const c of aggregateBars(base.slice(start), timeframe, baseTfRef.current)) candles.push(c);
+    computeIndicators(firstChanged);
+    const first = Math.max(firstChanged, windowStartRef.current);
+    for (let i = first; i < candles.length; i++) {
+      series.update(candlePoint(candles[i]) as never);
+      volumeRef.current?.update(volumePoint(candles[i]));
     }
-    setIndicatorData(firstChanged);
+    for (const ind of indicatorsRef.current) {
+      if (!ind.stream) continue;
+      ind.series.forEach((s, k) => {
+        // A candle starting a new session changes how the one before it is drawn: update that in place.
+        if (first >= before && first > windowStartRef.current && endsSession(ind, first - 1)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
+        for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
+      });
+    }
     syncLastDirection();
     syncPercentBase();
+    emitLegend();
   }
 
   useEffect(() => {
-    fullRedraw();
+    fullRedraw(true);
     useDrawings.getState().setSymbol(symbol);
     return onChartEvent((e) => {
+      // A symbol or timeframe switch also resets: the chart is about to show the new one (this effect
+      // draws it), so the old one is not drawn again first.
+      const now = useTrading.getState();
+      const shown = now.activeSymbol === symbol && now.timeframe === timeframe;
       if (e.type === 'reset') {
-        fullRedraw();
+        if (shown) fullRedraw();
         return;
       }
       if (e.symbol !== symbol) return;
+      if (e.type === 'history') {
+        if (shown) addHistory();
+        return;
+      }
       // Replay appends new bars; a sim tick re-sends the forming bar with cumulative values. Bars the
       // chart already holds are skipped: the series throws on them ("Cannot update oldest data").
       const from = mergeBars(baseRef.current, e.bars);
@@ -623,11 +895,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const m = markersRef.current;
     if (!m) return;
     const markers: SeriesMarker<Time>[] = [];
+    // lightweight-charts puts a marker on the nearest candle it has: leave out those before the window.
+    const oldest = candlesRef.current[windowStartRef.current]?.time ?? Infinity;
     for (const f of fills) {
       if (f.symbol !== symbol) continue;
+      const time = candleStartFor(symbol, f.time, timeframe);
+      if (time < oldest) continue;
       const buy = f.side === 'buy';
       markers.push({
-        time: ct(candleStartFor(symbol, f.time, timeframe)),
+        time: ct(time),
         position: buy ? 'belowBar' : 'aboveBar',
         shape: buy ? 'arrowUp' : 'arrowDown',
         color: buy ? pal.markerBuy : pal.markerSell,
@@ -635,8 +911,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       });
     }
     for (const ev of getSimEventsFor(symbol)) {
+      const time = candleStartFor(symbol, ev.time, timeframe);
+      if (time < oldest) continue;
       markers.push({
-        time: ct(candleStartFor(symbol, ev.time, timeframe)),
+        time: ct(time),
         position: 'aboveBar',
         shape: 'circle',
         color: ev.impactPct >= 0 ? pal.markerUp : pal.markerDown,
@@ -645,7 +923,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     m.setMarkers(markers);
-  }, [fills, symbol, timeframe, simEventCount, seriesVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
+  }, [fills, symbol, timeframe, simEventCount, seriesVersion, windowVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
   useEffect(() => {
@@ -689,6 +967,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       chart,
       series,
       candles: () => candlesRef.current,
+      firstIndex: () => windowStartRef.current,
       // The candles' own size: at the data's bar size or finer, each bar of the data is a candle.
       timeframe: ownCandles(timeframe, baseTfRef.current) ? baseTfRef.current : timeframe,
       paneHeight: () => chart.panes()[0]?.getHeight() ?? 0,
@@ -699,25 +978,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeframe, geometryVersion, seriesVersion]);
 
-  const lb = legend?.bar ?? candlesRef.current[candlesRef.current.length - 1];
   return (
     <div className={`chart-wrap${pickTarget ? ' picking' : ''}`}>
       <div ref={containerRef} className="chart-canvas" />
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
       {geometry && <DeleteDrawingButton left={geometry.paneWidth() - 8} top={geometry.paneHeight() - 8} />}
-      {lb && (
-        <div className="chart-legend">
-          <span className="legend-sym">{symbol}</span>
-          <span className="muted">{timeframe}</span>
-          {legend && <span className="muted">{blind ? blindDayLabel(lb.time) : ''}</span>}
-          <span>O <b>{fmtPrice(lb.open)}</b></span>
-          <span>H <b>{fmtPrice(lb.high)}</b></span>
-          <span>L <b>{fmtPrice(lb.low)}</b></span>
-          <span>C <b className={lb.close >= lb.open ? 'pos' : 'neg'}>{fmtPrice(lb.close)}</b></span>
-          <span>V <b>{compactVolume(lb.volume)}</b></span>
-          {legend && <span className={legend.change >= 0 ? 'pos' : 'neg'}>{legend.change >= 0 ? '+' : ''}{legend.change.toFixed(2)}%</span>}
-        </div>
-      )}
+      <ChartLegend source={legendSource} />
       {pickTarget && <div className="pick-hint">Click the chart to set the {pickTarget === 'stopLoss' ? 'stop loss' : pickTarget === 'takeProfit' ? 'take profit' : `${pickTarget} price`} · Esc to cancel</div>}
     </div>
   );

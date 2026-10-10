@@ -37,6 +37,14 @@ export interface HistoricalDataProvider extends MarketDataProvider {
   baseTimeframe(symbol: string): Timeframe;
   /** Chronologically sorted bars with open time in [from, to). */
   getBars(req: BarRequest, signal?: AbortSignal): Promise<Bar[]>;
+  /**
+   * Chronologically sorted bars of `timeframe` (coarser than the base timeframe) with open time in
+   * [from, to), covering the same minutes as the app's own aggregation of the base bars (intraday
+   * candles start from the 09:30 open), so a chart builds the same candles from either. Replays load
+   * a higher timeframe's months of history this way instead of as 1-minute bars; without it they
+   * aggregate getBars.
+   */
+  getCoarseBars?(req: BarRequest, timeframe: Timeframe, signal?: AbortSignal): Promise<Bar[]>;
   /** Earliest/latest data available for a symbol, if known. */
   availableRange(symbol: string): Promise<{ from: UnixSeconds; to: UnixSeconds } | null>;
   /** Trading days (YYYY-MM-DD, exchange time) that have bars, when the data can have gaps between them (imported files). */

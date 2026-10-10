@@ -14,14 +14,16 @@
  * goes back to the newest checkpoint at or before the target and feeds the broker the bars from
  * there to the target again. Whatever is left on the chart is exactly what the account has seen.
  */
-import type { Bar, OrderRequest, Timeframe, UnixSeconds } from '../types';
-import type { HistoricalDataProvider } from '../data/provider';
+import { TIMEFRAMES, type Bar, type OrderRequest, type Timeframe, type UnixSeconds } from '../types';
+import type { BarRequest, HistoricalDataProvider } from '../data/provider';
+import { aggregateBars } from '../data/aggregate';
 import type { ExecutionConfig } from '../broker/config';
 import { SimBroker, type BrokerCheckpoint, type SubmitResult } from '../broker/SimBroker';
-import { ReplayEngine } from './ReplayEngine';
+import { ReplayEngine, barEndTime } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
+  exchangeDate,
   exchangeTimeToUnix,
   formatExchangeTime,
   parseHHMM,
@@ -41,7 +43,11 @@ export interface ReplaySetup {
   endDate?: string;
   endTime: string;
   startingBalance: number;
-  /** Trading days of history loaded before the start for chart context and indicator warm-up. */
+  /**
+   * Trading days of history loaded before the start for chart context and indicator warm-up. Data
+   * finer than 30 minutes is loaded at its own resolution for at most BASE_LOOKBACK_LIMIT of them;
+   * charts of higher timeframes get their longer history from loadHistory.
+   */
   lookbackDays: number;
 }
 
@@ -54,6 +60,58 @@ export const DEFAULT_LOOKBACK: Record<Timeframe, number> = {
   '4h': 80,
   '1D': 200,
 };
+
+/**
+ * The bar size of the history loaded for higher timeframes (ReplaySession.loadHistory): 30 minutes,
+ * or the data's own bars when those are coarser. 30-minute bars build every candle from 30m to 1D just
+ * as the 1-minute bars would (intraday candles start from the 09:30 open), with a thirtieth of the bars.
+ */
+export function historyTimeframe(base: Timeframe): Timeframe {
+  return TIMEFRAMES.indexOf(base) > TIMEFRAMES.indexOf('30m') ? base : '30m';
+}
+
+/**
+ * Most trading days loaded before the start at the data's own resolution when it is finer than the
+ * history's: enough for 1m to 15m charts. Longer lookbacks come from the history.
+ */
+export const BASE_LOOKBACK_LIMIT = DEFAULT_LOOKBACK['15m'];
+
+/** Trading days before the start the history reaches back (a daily chart's lookback, or a longer one asked for). */
+const HISTORY_DAYS = DEFAULT_LOOKBACK['1D'];
+
+/** What a chart can draw from before a symbol's loaded bars (ReplaySession.chartHistory). */
+export interface ChartHistory {
+  /**
+   * Bars from before the symbol's loaded bars, oldest first, each complete before the replay's start:
+   * empty until loaded, and when the chart's candles cannot be built from them (a 5m chart of 30m bars).
+   */
+  bars: readonly Bar[];
+  /** Their bar size (historyTimeframe). */
+  timeframe: Timeframe;
+  /** 'idle' until a chart asks for it (loadHistory), then 'loading', then 'ready' or 'failed' (see `error`). */
+  status: 'idle' | 'loading' | 'ready' | 'failed';
+  error: string | null;
+  /** Whether the chart wants more history than the loaded bars cover (its timeframe's DEFAULT_LOOKBACK) and can use it. */
+  wanted: boolean;
+  /** The trading day the data begins on, when the chart wants history from before it and the data has none. */
+  dataStart: string | null;
+}
+
+interface SymbolHistory {
+  bars: readonly Bar[];
+  timeframe: Timeframe;
+  status: ChartHistory['status'];
+  error: string | null;
+  /** The trading day the loaded bars were asked from (their range starts at its pre-market). */
+  baseFrom: string;
+  /** Trading days before the start the loaded bars were asked to cover. */
+  baseDays: number;
+  /** The trading day of the first loaded bar. */
+  baseStart: string;
+  /** The trading day the data begins on, once a request for earlier days came back without them. */
+  dataStart: string | null;
+  loading: Promise<void> | null;
+}
 
 /** A revealed bar tagged with its symbol. */
 export interface RevealedBar {
@@ -80,6 +138,9 @@ export class ReplaySession {
   rewinds = 0;
   /** Oldest first. The first is the clean start, which Restart returns to. */
   private checkpoints: Checkpoint[] = [];
+  /** Where history for higher timeframes comes from (set by load; sessions built from bars have none). */
+  private provider: HistoricalDataProvider | null = null;
+  private histories = new Map<string, SymbolHistory>();
 
   constructor(
     engines: ReplayEngine | ReplayEngine[],
@@ -113,22 +174,31 @@ export class ReplaySession {
   ): Promise<{ session: ReplaySession; warnings: string[] }> {
     const symbol = setup.symbol.toUpperCase();
     const date = tradingDayOnOrBefore(setup.date);
-    let from = date;
-    for (let i = 0; i < setup.lookbackDays; i++) from = prevTradingDay(from);
     const start = exchangeTimeToUnix(date, parseHHMM(setup.startTime));
     const endDate = setup.endDate && setup.endDate >= date ? setup.endDate : date;
     const end = exchangeTimeToUnix(endDate, parseHHMM(setup.endTime));
     if (end <= start) throw new Error('End time must be after the start time.');
-    const range = { from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: Math.max(end, exchangeTimeToUnix(endDate, AFTERHOURS_CLOSE)) };
+    const to = Math.max(end, exchangeTimeToUnix(endDate, AFTERHOURS_CLOSE));
 
     const symbols = [symbol, ...(setup.extraSymbols ?? []).map((s) => s.toUpperCase()).filter((s) => s !== symbol)];
     const warnings: string[] = [];
     const engines: ReplayEngine[] = [];
+    const histories = new Map<string, SymbolHistory>();
     for (const sym of symbols) {
       try {
-        const bars = await provider.getBars({ symbol: sym, ...range }, signal);
+        const base = provider.baseTimeframe(sym);
+        const timeframe = historyTimeframe(base);
+        // Months of 1-minute bars would take long to load and chart: past a few weeks, history comes coarser.
+        const baseDays = timeframe === base ? setup.lookbackDays : Math.min(setup.lookbackDays, BASE_LOOKBACK_LIMIT);
+        let from = date;
+        for (let i = 0; i < baseDays; i++) from = prevTradingDay(from);
+        const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to }, signal);
         if (bars.length === 0) throw new Error(`No ${sym} data for ${date}. Pick another date or data source.`);
-        engines.push(new ReplayEngine({ symbol: sym, start, end, baseTimeframe: provider.baseTimeframe(sym) }, bars));
+        engines.push(new ReplayEngine({ symbol: sym, start, end, baseTimeframe: base }, bars));
+        const baseStart = exchangeDate(bars.reduce((t, b) => Math.min(t, b.time), Infinity));
+        // Data that begins after the first day asked for has nothing earlier to load either.
+        const dataStart = baseStart > from ? baseStart : null;
+        histories.set(sym, { bars: [], timeframe, status: dataStart ? 'ready' : 'idle', error: null, baseFrom: from, baseDays, baseStart, dataStart, loading: null });
       } catch (e) {
         if ((e as Error).name === 'AbortError') throw e;
         if (sym === symbol) throw e;
@@ -137,7 +207,83 @@ export class ReplaySession {
     }
     const source = provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL';
     const session = new ReplaySession(engines, { ...setup, symbol, date, endDate }, config, sessionId, source);
+    session.provider = provider;
+    session.histories = histories;
     return { session, warnings };
+  }
+
+  /** Trading days before the start the history reaches back. */
+  private historyDays(): number {
+    return Math.max(HISTORY_DAYS, this.setup.lookbackDays);
+  }
+
+  /**
+   * What a `timeframe` chart of `symbol` can draw from before the loaded bars (null for a session
+   * without a data provider, or an unknown symbol). The bars are all complete before the replay's
+   * start, so they never show anything a trader at the replay's clock could not have seen.
+   */
+  chartHistory(symbol: string, timeframe: Timeframe): ChartHistory | null {
+    const sym = symbol.toUpperCase();
+    const h = this.histories.get(sym);
+    const engine = this.engines.get(sym);
+    if (!h || !engine) return null;
+    // The size of the chart's candles: its timeframe, or the data's bars when those are coarser.
+    const shown = TIMEFRAMES[Math.max(TIMEFRAMES.indexOf(timeframe), TIMEFRAMES.indexOf(engine.baseTimeframe))];
+    const fits = TIMEFRAMES.indexOf(shown) >= TIMEFRAMES.indexOf(h.timeframe);
+    const days = DEFAULT_LOOKBACK[shown];
+    let wantedFrom = this.setup.date;
+    for (let i = 0; i < days; i++) wantedFrom = prevTradingDay(wantedFrom);
+    return {
+      bars: fits ? h.bars : [],
+      timeframe: h.timeframe,
+      status: h.status,
+      error: h.error,
+      wanted: fits && days > h.baseDays,
+      dataStart: h.dataStart !== null && h.dataStart > wantedFrom ? h.dataStart : null,
+    };
+  }
+
+  /**
+   * Loads `symbol`'s history for higher timeframes: bars of historyTimeframe from HISTORY_DAYS trading
+   * days before the start (or the setup's longer lookback) up to the loaded bars. Only bars that end
+   * before the loaded bars begin, and so before the start, are kept, whatever the data source returns.
+   * A load already under way is shared; a failed one can be tried again.
+   */
+  loadHistory(symbol: string, signal?: AbortSignal): Promise<void> {
+    const sym = symbol.toUpperCase();
+    const h = this.histories.get(sym);
+    const engine = this.engines.get(sym);
+    const provider = this.provider;
+    if (!h || !engine || !provider || h.status === 'ready') return Promise.resolve();
+    if (h.loading) return h.loading;
+    let from = h.baseFrom;
+    for (let i = h.baseDays; i < this.historyDays(); i++) from = prevTradingDay(from);
+    const req: BarRequest = { symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(h.baseFrom, PREMARKET_OPEN) };
+    if (req.from >= req.to) {
+      h.status = 'ready';
+      return Promise.resolve();
+    }
+    h.status = 'loading';
+    h.error = null;
+    const base = engine.baseTimeframe;
+    h.loading = (async () => {
+      try {
+        const raw =
+          h.timeframe === base ? await provider.getBars(req, signal) : provider.getCoarseBars ? await provider.getCoarseBars(req, h.timeframe, signal) : aggregateBars(await provider.getBars(req, signal), h.timeframe, base);
+        const limit = Math.min(req.to, this.start);
+        const bars = raw.filter((b) => b.time >= req.from && barEndTime(b, h.timeframe) <= limit).sort((a, b) => a.time - b.time);
+        h.bars = Object.freeze(bars.map((b) => Object.freeze({ ...b })));
+        h.status = 'ready';
+        const first = bars.length ? exchangeDate(bars[0].time) : h.baseStart;
+        if (first > from) h.dataStart = first;
+      } catch (e) {
+        h.status = 'failed';
+        h.error = (e as Error).name === 'AbortError' ? 'Loading was cancelled.' : (e as Error).message;
+      } finally {
+        h.loading = null;
+      }
+    })();
+    return h.loading;
   }
 
   /** The primary symbol's engine. */
