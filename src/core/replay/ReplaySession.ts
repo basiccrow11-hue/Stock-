@@ -410,10 +410,9 @@ export class ReplaySession {
     return t;
   }
 
-  /** Reveal the next base bar (the earliest across symbols, e.g. one minute). */
+  /** Reveal the next base bar (the earliest across symbols, e.g. one minute), or go to the end time when no bar is left before it. */
   step(): RevealedBar[] {
-    const t = this.nextRevealTime();
-    return t === null ? [] : this.advanceAll(t);
+    return this.advanceAll(this.nextRevealTime() ?? this.end);
   }
 
   /** Reveal one full candle of `timeframe` on `symbol` (default: primary); others follow the clock. */

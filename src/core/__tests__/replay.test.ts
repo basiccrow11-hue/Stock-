@@ -825,6 +825,87 @@ describe('Play through quiet stretches', () => {
     s.advance(60);
     expect(s.now).toBe(et('2024-12-02', '09:30'));
   });
+
+  /** Regular-hours 1m bars: Jan 14 whole, Jan 15 to 15:39 (a halt into the close), and with `late` one more bar at 15:59. */
+  const haltedIntoClose = (late = false) => {
+    const bars = [...minuteBars('2025-01-14', '09:30', flat(390, 100)), ...minuteBars('2025-01-15', '09:30', flat(370, 100)), ...(late ? minuteBars('2025-01-15', '15:59', flat(1, 101)) : [])];
+    const e = new ReplayEngine({ symbol: 'H', start: et('2025-01-15', '09:30'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, bars);
+    return new ReplaySession(e, { symbol: 'H', date: '2025-01-15', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'h', 'HISTORICAL');
+  };
+
+  it('ends at the end time, not when the data runs out, so a halt into the close plays to 16:00 too', () => {
+    const halted = haltedIntoClose();
+    const traded = haltedIntoClose(true);
+    for (const s of [halted, traded]) s.jumpTo(et('2025-01-15', '15:40'));
+    // The 15:39 bar is the last: whether another comes is not told before the clock gets there.
+    expect(halted.engine.lastBar()!.time).toBe(et('2025-01-15', '15:39'));
+    expect(halted.engine.finished).toBe(false);
+    expect(halted.finished).toBe(traded.finished);
+    expect(halted.finished).toBe(false);
+    const clocks: string[] = [];
+    while (!halted.finished && clocks.length < 100) {
+      halted.advance(60);
+      clocks.push(formatExchangeTime(halted.now));
+    }
+    // Minute by minute at the chosen speed, and over at 16:00, never past it.
+    expect(clocks).toHaveLength(20);
+    expect(clocks[0]).toBe('15:41');
+    expect(clocks[19]).toBe('16:00');
+    expect(halted.advance(60)).toEqual([]);
+    expect(halted.now).toBe(et('2025-01-15', '16:00'));
+  });
+
+  it('steps to the end time when no bar is left before it, a bar or a candle at a time', () => {
+    const steps: [string, (s: ReplaySession) => unknown[]][] = [
+      ['step', (s) => s.step()],
+      ['+1 5m', (s) => s.stepCandle('5m')],
+    ];
+    for (const [name, step] of steps) {
+      const s = haltedIntoClose();
+      s.jumpTo(et('2025-01-15', '15:40'));
+      expect(step(s), name).toEqual([]);
+      expect(s.now, name).toBe(et('2025-01-15', '16:00'));
+      expect(s.finished, name).toBe(true);
+    }
+    // With a bar left, a step goes to it, as before.
+    const s = haltedIntoClose(true);
+    s.jumpTo(et('2025-01-15', '15:40'));
+    expect(s.step().map((r) => r.bar.time)).toEqual([et('2025-01-15', '15:59')]);
+    expect(s.now).toBe(et('2025-01-15', '16:00'));
+    // The engine alone does the same, with nothing to step to.
+    const bars = [...minuteBars('2025-01-14', '09:30', flat(390, 100)), ...minuteBars('2025-01-15', '09:30', flat(370, 100))];
+    for (const step of [(e: ReplayEngine) => e.step(), (e: ReplayEngine) => e.stepCandle('5m')]) {
+      const e = new ReplayEngine({ symbol: 'H', start: et('2025-01-15', '09:30'), end: et('2025-01-15', '16:00'), baseTimeframe: '1m' }, bars);
+      e.advanceTo(et('2025-01-15', '15:40'));
+      expect(e.finished).toBe(false);
+      const out = step(e);
+      expect(out === null || (Array.isArray(out) && out.length === 0)).toBe(true);
+      expect(e.now).toBe(et('2025-01-15', '16:00'));
+      expect(e.finished).toBe(true);
+      expect(e.revealedCount).toBe(bars.length);
+    }
+  });
+
+  it('plays a replay whose data ends days before its end date on to the end time, skipping the nights', () => {
+    const bars = [...minuteBars('2025-01-14', '09:30', flat(390, 100)), ...minuteBars('2025-01-15', '09:30', flat(390, 100))];
+    const s = new ReplaySession(
+      new ReplayEngine({ symbol: 'G', start: et('2025-01-15', '09:30'), end: et('2025-01-17', '16:00'), baseTimeframe: '1m' }, bars),
+      { symbol: 'G', date: '2025-01-15', startTime: '09:30', endDate: '2025-01-17', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 },
+      ZERO_COST_CONFIG,
+      'g',
+      'HISTORICAL',
+    );
+    const clocks: UnixSeconds[] = [];
+    while (!s.finished && clocks.length < 1000) {
+      s.advance(600);
+      clocks.push(s.now);
+    }
+    expect(s.now).toBe(et('2025-01-17', '16:00'));
+    // Three sessions of 39 ten-minute steps, and a step from each close to the next open.
+    expect(clocks).toHaveLength(3 * 39 + 2);
+    expect(clocks.filter((t) => exchangeDate(t) === '2025-01-16')).toHaveLength(40);
+    for (const t of clocks) expect(formatExchangeTime(t) >= '09:30' && formatExchangeTime(t) <= '16:00', formatExchangeTime(t)).toBe(true);
+  });
 });
 
 describe('History for higher timeframes', () => {

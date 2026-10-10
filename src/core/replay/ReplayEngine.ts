@@ -66,8 +66,13 @@ export class ReplayEngine {
     return this.#now;
   }
 
+  /**
+   * Whether the replay has reached its end time. Decided by the clock alone, never by whether more bars
+   * exist: data that stops early (a halt into the close, a thin stock) is not told before the clock gets
+   * there, and time passes to the end time as through any halt.
+   */
   get finished(): boolean {
-    return this.#cursor >= this.#bars.length - 1 || this.#now >= this.end;
+    return this.#now >= this.end;
   }
 
   /** Fraction of the session window elapsed (0..1). Based on time only, not on future data. */
@@ -116,11 +121,12 @@ export class ReplayEngine {
 
   /**
    * Reveal the next base bar. Returns it (or null at the end). A bar that completes after the end
-   * time is never revealed, as with advanceTo: the clock stops at the end instead.
+   * time is never revealed, as with advanceTo: the clock stops at the end instead, as it does when no
+   * bar is left before the end.
    */
   step(): Bar | null {
     if (this.finished) return null;
-    if (this.#ends[this.#cursor + 1] > this.end) {
+    if (this.#cursor + 1 >= this.#bars.length || this.#ends[this.#cursor + 1] > this.end) {
       this.#now = Math.max(this.#now, this.end);
       return null;
     }
@@ -151,9 +157,14 @@ export class ReplayEngine {
   stepCandle(timeframe: Timeframe): Bar[] {
     const out: Bar[] = [];
     if (this.finished) return out;
+    // No bar left before the end: the clock goes to the end, as step does.
+    if (this.#cursor + 1 >= this.#bars.length) {
+      this.step();
+      return out;
+    }
     // The candle the next bar belongs to: the one currently forming, or the next one.
     const key = candleFor(this.#bars[this.#cursor + 1].time, timeframe, this.baseTimeframe).key;
-    while (!this.finished && candleFor(this.#bars[this.#cursor + 1].time, timeframe, this.baseTimeframe).key === key) {
+    while (!this.finished && this.#cursor + 1 < this.#bars.length && candleFor(this.#bars[this.#cursor + 1].time, timeframe, this.baseTimeframe).key === key) {
       const b = this.step();
       if (!b) break;
       out.push(b);

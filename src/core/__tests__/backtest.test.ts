@@ -419,6 +419,42 @@ describe('backtester: indicator warm-up', () => {
     }
   });
 
+  it('trades a signal on the last warm-up candle at the first bar of the test, as when the warm-up comes as bars', () => {
+    const all = demoBars('AAPL', '2025-02-24', '2025-03-05');
+    const tradeFrom = et('2025-03-03', '00:00');
+    const always = (sizing: StrategyDefinition['sizing']): StrategyDefinition => ({
+      name: 'always long',
+      rules: [{ id: 'b', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'value', value: 0 } }] }],
+      sizing,
+      exitAtSessionEnd: false,
+      regularHoursOnly: true,
+    });
+    const sizings: StrategyDefinition['sizing'][] = [
+      { mode: 'percent_equity', percent: 50 },
+      { mode: 'shares', shares: 10 },
+    ];
+    for (const sizing of sizings) {
+      for (const timeframe of ['1h', '1D'] as const) {
+        const strategy = always(sizing);
+        const whole = runBacktest(params(all, strategy, { timeframe, tradeFrom }));
+        const warmupCandles = warmupCandlesFrom(all.filter((b) => b.time < tradeFrom), strategy, timeframe, '1m');
+        const split = runBacktest(params(all.filter((b) => b.time >= tradeFrom), strategy, { timeframe, tradeFrom, warmupCandles }));
+        const what = `${sizing.mode} ${timeframe}`;
+        // The rule fires on the warm-up's last candle (the 28th's), and the entry fills at the 3rd's open.
+        expect(exchangeDate(split.signals[0].candleTime), what).toBe('2025-02-28');
+        expect(split.signals[0].executed, what).toBe(true);
+        expect(split.fills[0]?.time, what).toBe(et('2025-03-03', '09:30'));
+        expect(split.signals, what).toEqual(whole.signals);
+        expect(split.fills, what).toEqual(whole.fills);
+        expect(split.trades, what).toEqual(whole.trades);
+        // The warm-up's price adds nothing to the curve, which starts with the test, nor to the statistics.
+        expect(split.equityCurve, what).toEqual(whole.equityCurve);
+        expect(split.equityCurve[0].time, what).toBeGreaterThan(tradeFrom);
+        expect(split.stats, what).toEqual(whole.stats);
+      }
+    }
+  });
+
   it('warms up SMA 200 on daily candles from the history before the test, and says when the history was too short', () => {
     // Daily bars (stamped at the open, as imported daily files are) on a slow wave that crosses its SMA 200 every few months.
     const days: string[] = [];
