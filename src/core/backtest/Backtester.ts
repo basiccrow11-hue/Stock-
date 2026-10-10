@@ -11,6 +11,11 @@
  * Indicator series are computed once over the full candle array for speed. That is safe ONLY because
  * every series is causal (value[i] depends on candles[0..i]); tests enforce both causality and that
  * perturbing future bars cannot change earlier trades.
+ *
+ * Warm-up history can come as base bars before `tradeFrom`, or as candles already built from them
+ * (warmupCandlesFrom), so a long warm-up need not hold its minute bars in memory. When the history is
+ * shorter than the rules' indicators need (strategyWarmup), the result says which ones and when they
+ * first had values.
  */
 import type { Bar, DataSourceKind, EquityPoint, Fill, OrderAction, RoundTrip, Timeframe, UnixSeconds } from '../types';
 import type { ExecutionConfig } from '../broker/config';
@@ -19,14 +24,19 @@ import { aggregateBars, candleFor } from '../data/aggregate';
 import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
 import { roundToTick } from '../util/math';
-import { exchangeDate, exchangeTimeToUnix, marketSession, regularCloseMinute } from '../time';
+import { exchangeDate, exchangeTimeToUnix, formatExchangeDateTime, marketSession, regularCloseMinute } from '../time';
 import { barEnds } from '../replay/ReplayEngine';
-import { computeSeries, evalCondition, seriesKey, type StrategyDefinition } from './strategy';
+import { computeSeries, evalCondition, seriesKey, seriesLabel, seriesWarmup, strategyWarmup, type StrategyDefinition } from './strategy';
 
 export interface BacktestParams {
   symbol: string;
-  /** Chronological base bars (1m) including warm-up history before `tradeFrom`. */
+  /** Chronological base bars (1m), which may include warm-up history before `tradeFrom`. */
   bars: readonly Bar[];
+  /**
+   * Completed `timeframe` candles from before the first of `bars`, built by warmupCandlesFrom: more
+   * warm-up history for the indicators, without the base bars it was built from.
+   */
+  warmupCandles?: readonly Bar[];
   baseTimeframe: Timeframe;
   timeframe: Timeframe;
   /** Signals before this time are ignored (bars before it only warm up indicators). */
@@ -61,23 +71,79 @@ export interface BacktestResult {
 
 const EXIT_ORDER: OrderAction[] = ['sell', 'cover', 'buy', 'short'];
 
+/** Whether the strategy trades on a bar: every bar, or with "Regular hours only" the regular session's. */
+const inStrategyHours = (strategy: StrategyDefinition, b: Bar) => !strategy.regularHoursOnly || marketSession(b.time) === 'regular';
+
+/**
+ * Warm-up candles for BacktestParams.warmupCandles, built from base bars exactly as runBacktest builds
+ * its own (the same hours kept, the same candles). Candles never span two trading days, so history
+ * loaded a few days at a time and built piece by piece gives the same candles as all of it at once.
+ */
+export function warmupCandlesFrom(bars: readonly Bar[], strategy: StrategyDefinition, timeframe: Timeframe, baseTimeframe: Timeframe): Bar[] {
+  return aggregateBars(bars.filter((b) => inStrategyHours(strategy, b)), timeframe, baseTimeframe);
+}
+
+/** Regular-session candles in a full trading day at each signal timeframe. Extended hours only add candles, so a warm-up counted in these is never short. */
+const CANDLES_PER_DAY: Record<Timeframe, number> = { '1m': 390, '5m': 78, '15m': 26, '30m': 13, '1h': 7, '4h': 2, '1D': 1 };
+
+/** Trading days of history a test needs before its start for the rules' indicators to warm up (strategyWarmup), with a day to spare for a half day. */
+export function warmupTradingDays(strategy: StrategyDefinition, timeframe: Timeframe): number {
+  return Math.ceil(strategyWarmup(strategy) / CANDLES_PER_DAY[timeframe]) + 1;
+}
+
+/**
+ * Says which indicators the history before the test was too short for (`before` candles, less than
+ * their seriesWarmup): those with no value yet when the first signals were evaluated, and when they
+ * first had one, and those whose values were still settling.
+ */
+function warmupWarning(p: BacktestParams, series: Map<string, number[]>, candles: readonly Bar[], before: number): string | null {
+  const when = (c: Bar) => (p.timeframe === '1D' ? exchangeDate(c.time) : formatExchangeDateTime(c.time));
+  const seen = new Set<string>();
+  const notes: string[] = [];
+  for (const rule of p.strategy.rules) {
+    for (const c of rule.conditions) {
+      for (const s of [c.left, c.right]) {
+        const key = seriesKey(s);
+        const need = seriesWarmup(s);
+        if (need <= 1 || before >= need || seen.has(key)) continue;
+        seen.add(key);
+        const first = series.get(key)!.findIndex((v) => !Number.isNaN(v));
+        const name = `${seriesLabel(s)} (needs ${need})`;
+        if (first < 0) notes.push(`${name} never had a value, so rules using it could not fire.`);
+        else if (first >= before) notes.push(`${name} first had a value on the ${when(candles[first])} candle, so rules using it could not fire before then.`);
+        else notes.push(`${name} had values from the start, but they were still settling, so early signals may differ from a chart with more history.`);
+      }
+    }
+  }
+  if (!notes.length) return null;
+  const had = `${before.toLocaleString('en-US')} ${p.timeframe} ${before === 1 ? 'candle' : 'candles'}`;
+  return `Not enough history before ${exchangeDate(p.tradeFrom)} to warm up the indicators: the data had ${had} before it. ${notes.join(' ')}`;
+}
+
 export function runBacktest(p: BacktestParams): BacktestResult {
   const { strategy, symbol } = p;
   const warnings: string[] = [];
-  const keep = (b: Bar) => !strategy.regularHoursOnly || marketSession(b.time) === 'regular';
+  const keep = (b: Bar) => inStrategyHours(strategy, b);
   const base = p.bars.filter(keep);
   // When each bar ends, from the whole tape: a short bar ends as the next one (kept or not) opens.
   const allEnds = barEnds(p.bars, p.baseTimeframe);
   const ends = allEnds.filter((_, i) => keep(p.bars[i]));
   if (base.length === 0) throw new Error('No bars in the selected range.');
   if (strategy.rules.length === 0) throw new Error('Add at least one rule.');
+  // A daily candle is a whole session, with no close inside it to flatten before. Daily data and a 1D
+  // signal timeframe on intraday data are treated alike, so a strategy holds overnight on both.
+  const flattenEachDay = strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && p.timeframe !== '1D';
   if (strategy.exitAtSessionEnd && p.baseTimeframe === '1D') warnings.push('Flatten before the close does not apply to daily bars: each bar is a whole session, so positions are held overnight.');
+  else if (strategy.exitAtSessionEnd && p.timeframe === '1D') warnings.push('Flatten before the close does not apply to the 1D signal timeframe: each candle is a whole session, so positions are held overnight, as on daily bars.');
   if (strategy.sizing.mode === 'risk_percent' && !strategy.stopLossPct) {
     throw new Error('Risk-based sizing needs a stop loss %.');
   }
 
-  // Pass 1: completed candles + causal indicator series.
-  const candles = aggregateBars(base, p.timeframe, p.baseTimeframe);
+  // Pass 1: completed candles, warm-up candles first, + causal indicator series.
+  const tested = aggregateBars(base, p.timeframe, p.baseTimeframe);
+  // Warm-up candles end before the first bar's candle (one that reached it would be counted twice).
+  const warmup = (p.warmupCandles ?? []).filter((c) => c.time < tested[0].time);
+  const candles = warmup.length ? warmup.concat(tested) : tested;
   const series = new Map<string, number[]>();
   for (const rule of strategy.rules) {
     for (const c of rule.conditions) {
@@ -91,6 +157,9 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   // Keyed as the base bars are below: at the data's own bar size each bar is its own candle (hourly
   // bars on the clock hour, a 09:30-10:00 first bar), coarser candles are 09:30-anchored buckets.
   candles.forEach((c, i) => candleIndex.set(candleFor(c.time, p.timeframe, p.baseTimeframe).key, i));
+  const before = candles.findIndex((c) => c.time >= p.tradeFrom);
+  const short = warmupWarning(p, series, candles, before < 0 ? candles.length : before);
+  if (short) warnings.push(short);
 
   const broker = new SimBroker({
     startingBalance: p.startingBalance,
@@ -100,7 +169,8 @@ export function runBacktest(p: BacktestParams): BacktestResult {
   });
   const signals: SignalRecord[] = [];
   let pendingEntry: { action: OrderAction; candleTime: UnixSeconds; ref: number } | null = null;
-  let currentKey = '';
+  // The last warm-up candle has closed by the first bar, which evaluates it as a bar of its own day would.
+  let currentKey = warmup.length ? candleFor(warmup[warmup.length - 1].time, p.timeframe, p.baseTimeframe).key : '';
   let firstTradePrice: number | null = null;
   // For the flatten before the close: the last regular session a bar was seen in, the last one whose
   // end has been acted on, the session whose position still has to be closed (until the book is flat),
@@ -162,7 +232,7 @@ export function runBacktest(p: BacktestParams): BacktestResult {
     // would. Decided by the clock reaching this bar, never by looking ahead, and before this bar's
     // signals, which wait for the book to be flat.
     let flattening = false;
-    if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D') {
+    if (flattenEachDay) {
       const past = (date: string) => marketSession(b.time) !== 'regular' || exchangeDate(b.time) !== date;
       if (regularDate && regularDate !== endedDate && past(regularDate)) flatten(regularDate);
       if (owedDate && past(owedDate)) {
@@ -223,11 +293,11 @@ export function runBacktest(p: BacktestParams): BacktestResult {
 
     // Day-trading flatten in the regular session's last bar: the one that ends at the close (the final
     // minute on 1-minute data, 15:55 on 5-minute data). Decided by the clock alone, never by whether the
-    // data has more bars, so it cannot peek ahead. Daily bars are whole sessions and are left out.
+    // data has more bars, so it cannot peek ahead. Daily candles are whole sessions and are left out.
     if (marketSession(b.time) === 'regular') {
       const date = exchangeDate(b.time);
       regularDate = date;
-      if (strategy.exitAtSessionEnd && p.baseTimeframe !== '1D' && ends[j] >= exchangeTimeToUnix(date, regularCloseMinute(date))) flatten(date);
+      if (flattenEachDay && ends[j] >= exchangeTimeToUnix(date, regularCloseMinute(date))) flatten(date);
     }
 
     broker.onBar(symbol, b, ends[j] - b.time);

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { TopBar, type View } from "./components/TopBar";
 import { Watchlist } from "./components/Watchlist";
 import { ChartPanel } from "./components/ChartPanel";
@@ -9,29 +9,21 @@ import { TradeReviewModal } from "./components/TradeReviewModal";
 import { Toasts } from "./components/common";
 import { StreakCelebration, StreakModal } from "./components/Streak";
 import { requestAppearanceFocus } from "./components/Appearance";
+import { ErrorBoundary, retryableLazy } from "./components/ErrorBoundary";
 import { requestFocus } from "./services/focusRequest";
-// Secondary pages load on first visit to keep the trading screen's initial bundle small.
-const BacktestPage = lazy(() =>
-  import("./pages/BacktestPage").then((m) => ({ default: m.BacktestPage })),
-);
-const JournalPage = lazy(() =>
-  import("./pages/JournalPage").then((m) => ({ default: m.JournalPage })),
-);
-const AnalyticsPage = lazy(() =>
-  import("./pages/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })),
-);
-const ChallengesPage = lazy(() =>
-  import("./pages/ChallengesPage").then((m) => ({ default: m.ChallengesPage })),
-);
-const SettingsPage = lazy(() =>
-  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
-);
+// Secondary pages load on first visit to keep the trading screen's initial bundle small. A download
+// that fails (a dropped connection, or a new version of the app replaced the files) can be tried again.
+const BacktestPage = retryableLazy(() => import("./pages/BacktestPage"), "BacktestPage");
+const JournalPage = retryableLazy(() => import("./pages/JournalPage"), "JournalPage");
+const AnalyticsPage = retryableLazy(() => import("./pages/AnalyticsPage"), "AnalyticsPage");
+const ChallengesPage = retryableLazy(() => import("./pages/ChallengesPage"), "ChallengesPage");
+const SettingsPage = retryableLazy(() => import("./pages/SettingsPage"), "SettingsPage");
 import { useJournal } from "./state/journalStore";
 import { useChallenges } from "./state/challengeStore";
 import { useCredentials } from "./state/credentials";
 import { loadCsvDatasets } from "./state/dataRegistry";
-import { startPracticeTracker } from "./state/streakStore";
-import { useTrading } from "./state/tradingStore";
+import { dismissCelebration, openStreakPanel, startPracticeTracker } from "./state/streakStore";
+import { closeReview, useTrading } from "./state/tradingStore";
 
 export function App() {
   const [view, setView] = useState<View>("trade");
@@ -71,9 +63,13 @@ export function App() {
     [],
   );
 
+  // Each page, panel and dialog fails on its own: what failed says so in its place, and the rest of
+  // the app, the running session included, carries on.
   return (
     <div className="app">
-      <TopBar view={view} onView={setView} />
+      <ErrorBoundary what="The top bar" layout="bar">
+        <TopBar view={view} onView={setView} />
+      </ErrorBoundary>
       {/* Pages cover the terminal instead of replacing it. */}
       <div className="views">
         {/* The terminal stays mounted so the chart and drawings survive page switches, and laid out */}
@@ -85,21 +81,30 @@ export function App() {
           data-focus-home=""
           aria-label="Trading terminal"
         >
-          <Watchlist />
-          <ChartPanel
-            onNewSession={(mode) => setSetup({ mode })}
-            onOpenSettings={openAppearance}
-            active={view === "trade"}
-          />
-          <RightPanel />
-          <BottomPanel
-            onOpenJournal={(id) => {
-              // The terminal hides; the journal takes focus on that trade's row.
-              requestFocus("journal");
-              setJournalFocus(id);
-              setView("journal");
-            }}
-          />
+          <ErrorBoundary what="The watchlist" layout="panel" className="panel area-watch">
+            <Watchlist />
+          </ErrorBoundary>
+          {/* The replay controls are part of the chart panel: playback pauses if it fails. */}
+          <ErrorBoundary what="The chart" layout="panel" className="panel area-chart" pausesPlayback>
+            <ChartPanel
+              onNewSession={(mode) => setSetup({ mode })}
+              onOpenSettings={openAppearance}
+              active={view === "trade"}
+            />
+          </ErrorBoundary>
+          <ErrorBoundary what="The order ticket" layout="panel" className="panel area-right">
+            <RightPanel />
+          </ErrorBoundary>
+          <ErrorBoundary what="The positions and orders panel" layout="panel" className="panel area-bottom">
+            <BottomPanel
+              onOpenJournal={(id) => {
+                // The terminal hides; the journal takes focus on that trade's row.
+                requestFocus("journal");
+                setJournalFocus(id);
+                setView("journal");
+              }}
+            />
+          </ErrorBoundary>
         </main>
         <Suspense
           fallback={
@@ -107,32 +112,56 @@ export function App() {
           }
         >
           {/* The backtester stays mounted once opened, so its strategy, results and a run in progress survive a page switch. */}
-          {(view === "backtest" || backtestOpened) && (
-            <BacktestPage active={view === "backtest"} />
+          <ErrorBoundary what="The Backtest page" layout="page" hidden={view !== "backtest"} onRetry={BacktestPage.retry}>
+            {(view === "backtest" || backtestOpened) && (
+              <BacktestPage active={view === "backtest"} />
+            )}
+          </ErrorBoundary>
+          {view === "journal" && (
+            <ErrorBoundary what="The Journal page" layout="page" onRetry={JournalPage.retry}>
+              <JournalPage focusId={journalFocus} />
+            </ErrorBoundary>
           )}
-          {view === "journal" && <JournalPage focusId={journalFocus} />}
-          {view === "analytics" && <AnalyticsPage />}
+          {view === "analytics" && (
+            <ErrorBoundary what="The Analytics page" layout="page" onRetry={AnalyticsPage.retry}>
+              <AnalyticsPage />
+            </ErrorBoundary>
+          )}
           {view === "challenges" && (
-            <ChallengesPage
-              onStart={(challengeId, mode) => {
-                setView("trade");
-                setSetup({ mode, challengeId });
-              }}
-            />
+            <ErrorBoundary what="The Challenges page" layout="page" onRetry={ChallengesPage.retry}>
+              <ChallengesPage
+                onStart={(challengeId, mode) => {
+                  setView("trade");
+                  setSetup({ mode, challengeId });
+                }}
+              />
+            </ErrorBoundary>
           )}
-          {view === "settings" && <SettingsPage />}
+          {view === "settings" && (
+            <ErrorBoundary what="The Data & Settings page" layout="page" onRetry={SettingsPage.retry}>
+              <SettingsPage />
+            </ErrorBoundary>
+          )}
         </Suspense>
       </div>
       {setup && (
-        <SessionSetup
-          mode={setup.mode}
-          presetChallenge={setup.challengeId}
-          onClose={() => setSetup(null)}
-        />
+        <ErrorBoundary what="The new session form" layout="dialog" onClose={() => setSetup(null)}>
+          <SessionSetup
+            mode={setup.mode}
+            presetChallenge={setup.challengeId}
+            onClose={() => setSetup(null)}
+          />
+        </ErrorBoundary>
       )}
-      <TradeReviewModal />
-      <StreakModal />
-      <StreakCelebration view={view} />
+      <ErrorBoundary what="The trade review" layout="dialog" onClose={closeReview}>
+        <TradeReviewModal />
+      </ErrorBoundary>
+      <ErrorBoundary what="The daily practice panel" layout="dialog" onClose={() => openStreakPanel(false)}>
+        <StreakModal />
+      </ErrorBoundary>
+      <ErrorBoundary what="The milestone celebration" layout="dialog" onClose={dismissCelebration}>
+        <StreakCelebration view={view} />
+      </ErrorBoundary>
       <Toasts />
     </div>
   );
