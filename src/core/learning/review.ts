@@ -256,6 +256,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         text: `Your ${name}${at} filled in ${parts} parts, each capped at a share of a bar's volume (Data & Settings), and the later parts filled past your ${what} at ${formatTick(level)}, for an average of ${formatTick(price)}.`,
       };
     }
+    // A stop entry that fired after earlier fills had used its bar's volume cap waited for the next bar.
+    if (fill && order?.type === 'stop' && order.triggeredAt !== undefined && fill.time > order.triggeredAt) {
+      return {
+        gap: true,
+        text: `Your ${name}${at} fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so it filled from the next bar's open, at ${formatTick(fill.price)}, already past your ${what} at ${formatTick(level)}${parts > 1 ? `, for an average of ${formatTick(price)}` : ''}.`,
+      };
+    }
     if (!fill?.at || fill.at === 'open') {
       return {
         gap: true,
@@ -427,12 +434,18 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     // A stop that fired is a market order: when the volume cap let only part of it trade there, the
     // rest filled over the next bars, here after price had come back past the stop.
     const stopParts = main!.order.type === 'stop' ? input.fills.filter((f) => f.orderId === main!.order.id) : [];
-    if (!pastStop && stopParts.length > 1 && (exitPx - stopAt) * dir > 0) {
-      const first = stopParts[0];
+    const first = stopParts[0];
+    // It fired after earlier fills had used its bar's volume cap, so none of it filled on that bar.
+    const noneThere = first !== undefined && main!.order.triggeredAt !== undefined && first.time > main!.order.triggeredAt;
+    if (!pastStop && (stopParts.length > 1 || noneThere) && (exitPx - stopAt) * dir > 0) {
+      const Stop = `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)}`;
+      const after = `That helped this time; had price kept going, ${noneThere ? 'they' : 'the rest'} would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`;
       findings.push({
         tone: 'neutral',
-        title: 'Your stop fired, and the rest filled after price came back',
-        detail: `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${formatTick(first.price)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. That helped this time; had price kept going, the rest would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`,
+        title: noneThere ? 'Your stop fired, and it filled after price came back' : 'Your stop fired, and the rest filled after price came back',
+        detail: noneThere
+          ? `${Stop} fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so none of its ${main!.qty} shares could ${long ? 'sell' : 'be bought back'} there. A stop that has fired is a market order, so ${stopParts.length > 1 ? `they ${long ? 'sold' : 'were bought back'} over the next bars as price came back, the first ${first.quantity} at ${formatTick(first.price)}, for an average of ${formatTick(exitPx)}` : `they ${long ? 'sold' : 'were bought back'} at the next bar's open, ${formatTick(exitPx)}, after price had come back`}. ${after}`
+          : `${Stop} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${formatTick(first.price)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. ${after}`,
       });
     }
     if (pastStop) {

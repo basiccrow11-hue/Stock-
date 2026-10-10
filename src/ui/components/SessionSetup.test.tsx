@@ -88,3 +88,23 @@ describe('the replay form for a challenge', () => {
   });
 });
 
+
+describe('a replay that fails to start', () => {
+  it('announces the error and keeps the Start button focusable', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    useSettings.getState().updateReplay({ date: '2024-03-12', blind: false, providerId: 'demo', symbol: 'ZZZZ', multiDay: false, startTime: '10:00', endTime: '16:00', includeWatchlist: false });
+    const form = await open();
+    const start = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Start replay')!;
+    const alert = () => [...document.querySelectorAll('[role="alert"]')].map((e) => e.textContent).join('');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      start.focus();
+      await act(async () => start.click());
+      await vi.waitFor(() => expect(alert()).toContain('Unknown demo symbol ZZZZ'));
+      // Never disabled while loading (aria-disabled instead), so focus is still on it after the failure.
+      expect(start.disabled).toBe(false);
+      expect(start.getAttribute('aria-disabled')).toBeNull();
+      expect(document.activeElement).toBe(start);
+    }
+    act(() => form.root.unmount());
+  });
+});

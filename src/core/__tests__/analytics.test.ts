@@ -418,6 +418,50 @@ describe('learning review', () => {
       expect(half.review.outcome).toBe('breakeven');
       expect(half.find('Stop did its job')).toContain('It closed 500 of 1000 shares where you planned.');
       expect(half.find('Stop did its job')).not.toContain('loss');
+
+      // The target used the bar's volume cap before the dip crossed the stop: none of the stop filled on that bar.
+      const none = thin((next) => {
+        next(100, 102.5, 97.5, 98.5, 800); // the target takes 200 at 102, then the stop at 98 fires with nothing left
+        next(101, 101.2, 100.8, 101, 100_000); // and sells the other 800 at this bar's open
+      });
+      expect(none.review.exitReason).toBe('stop_loss');
+      expect(none.find('Your stop fired, and the rest filled after price came back')).toBeUndefined();
+      expect(none.find('Your stop fired, and it filled after price came back')).toBe(
+        "Your stop at 98.00 fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so none of its 800 shares could sell there. A stop that has fired is a market order, so they sold at the next bar's open, 101.00, after price had come back. That helped this time; had price kept going, they would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.",
+      );
+      const noneParts = thin((next) => {
+        next(100, 102.5, 97.5, 98.5, 800);
+        next(101, 101.2, 100.8, 101, 1600); // 400 at this bar's open
+        next(101.4, 101.6, 101.2, 101.4, 100_000); // and the last 400 at this one's
+      });
+      expect(noneParts.find('Your stop fired, and it filled after price came back')).toContain(
+        'so none of its 800 shares could sell there. A stop that has fired is a market order, so they sold over the next bars as price came back, the first 400 at 101.00, for an average of 101.20.',
+      );
+    });
+
+    it('says a stop entry that fired once its bar was out of volume filled at the next open, not that price gapped', () => {
+      const b = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25 } });
+      const t0 = et('2025-01-15', '10:00');
+      const bars: Bar[] = [];
+      const next = (o: number, h: number, l: number, c: number, v: number) => {
+        bars.push(bar(t0 + 60 * bars.length, o, h, l, c, v));
+        b.onBar('T', bars[bars.length - 1]);
+      };
+      next(20, 20, 20, 20, 8000);
+      expect(b.submit({ symbol: 'T', action: 'short', type: 'market', quantity: 2000, stopLoss: 20.2, tif: 'gtc' }).order!.filledQty).toBe(2000);
+      next(20, 20, 20, 20, 80_000);
+      expect(b.submit({ symbol: 'T', action: 'short', type: 'stop', stopPrice: 19.7, quantity: 1000, stopLoss: 19.9, tif: 'gtc' }).ok).toBe(true);
+      // The first short's stop covers 2,000 at 20.20, using the bar's cap; the dip then crosses 19.70.
+      next(20, 20.25, 19.6, 19.92, 8000);
+      // No gap: the next bar opens at 19.94, already past the second short's stop at 19.90.
+      for (let i = 0; i < 3; i++) next(19.94, 19.97, 19.9, 19.95, 8000);
+      const st = b.state;
+      const t = st.roundTrips[1];
+      expect([t.closed, t.avgEntry]).toEqual([true, 19.94]);
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+      const past = review.findings.find((f) => f.title === 'Entry filled past your stop')!.detail;
+      expect(past).toContain("Your entry order at 19.70 fired on a bar whose volume cap (Data & Settings) your earlier fills had already used, so it filled from the next bar's open, at 19.94, already past your stop at 19.90.");
+      expect(past).not.toContain('gapped');
     });
 
     it('measures risk from the order price when a gap fills the entry past its own stop', () => {

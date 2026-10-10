@@ -88,16 +88,17 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: 
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
 }
-.btn:hover:not(:disabled) { background: var(--hover); border-color: var(--hover-border); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:hover:not(:disabled):not([aria-disabled='true']) { background: var(--hover); border-color: var(--hover-border); }
+.btn:disabled,
+.btn[aria-disabled='true'] { opacity: 0.45; cursor: not-allowed; }
 .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: var(--on-accent); }
-.btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.primary:hover:not(:disabled):not([aria-disabled='true']) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn.buy { background: var(--buy-bg); border-color: var(--buy-border); color: #fff; }
-.btn.buy:hover:not(:disabled) { background: var(--buy-hover); border-color: var(--buy-border); }
+.btn.buy:hover:not(:disabled):not([aria-disabled='true']) { background: var(--buy-hover); border-color: var(--buy-border); }
 .btn.sell { background: var(--sell-bg); border-color: var(--sell-border); color: #fff; }
-.btn.sell:hover:not(:disabled) { background: var(--sell-hover); border-color: var(--sell-border); }
+.btn.sell:hover:not(:disabled):not([aria-disabled='true']) { background: var(--sell-hover); border-color: var(--sell-border); }
 .btn.ghost { background: transparent; border-color: transparent; }
-.btn.ghost:hover:not(:disabled) { background: var(--panel-3); }
+.btn.ghost:hover:not(:disabled):not([aria-disabled='true']) { background: var(--panel-3); }
 .btn.sm { padding: 3px 7px; font-size: 12px; }
 .btn.icon { padding: 5px 8px; min-width: 32px; }
 .btn.active { border-color: var(--accent); color: var(--on-selected); background: var(--selected); }

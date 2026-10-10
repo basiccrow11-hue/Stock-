@@ -1311,14 +1311,17 @@ export class SimBroker {
     let seg = 0;
     // The whole path is walked even once the volume cap is used up: nothing more fills in this bar, but
     // a stop it crosses still fires and an order it reaches counts as reached (see execute).
+    // Orders done for this bar (filled, cancelled, or out of its volume) are not reached again at its
+    // later points, so a waiting order counts once, where the path first reaches it.
+    const done = new Set<string>();
     for (; seg < path.length - 1; seg++) {
       let pos = path[seg];
       const end = path[seg + 1];
-      const skip = new Set<string>();
       // Orders that start later in the bar sit this part of the path out.
-      for (const [id, f] of startsAt) if (f > points[seg].f) skip.add(id);
+      const notYet = new Set<string>();
+      for (const [id, f] of startsAt) if (f > points[seg].f) notYet.add(id);
       for (let guard = 0; guard < 200; guard++) {
-        const trig = this.nextTrigger(symbol, pos, end, session, skip);
+        const trig = this.nextTrigger(symbol, pos, end, session, done, notYet);
         if (!trig) break;
         pos = trig.level;
         const segLen = Math.abs(end - path[seg]);
@@ -1327,7 +1330,7 @@ export class SimBroker {
         reach(pos);
         // At the very start of the bar, for an order placed before it began: the bar's open set the price.
         const atOpen = seg === 0 && pos === path[0] && !startsAt.has(trig.order.id);
-        const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, skip, atOpen ? 'open' : 'bar', bar.time + barSeconds);
+        const used = this.execute(trig.order, pos, t, capacity, bar.volume, ext, done, atOpen ? 'open' : 'bar', bar.time + barSeconds);
         capacity -= used;
         traded += used;
         // A trade opened (or reversed into) here starts at this level.
@@ -1389,12 +1392,12 @@ export class SimBroker {
    * entry) closes the shares first, so the entry then opens a new trade instead of adding past the stop
    * or being cancelled.
    */
-  private nextTrigger(symbol: string, from: number, to: number, session: MarketSession, skip: Set<string>): Trigger | null {
+  private nextTrigger(symbol: string, from: number, to: number, session: MarketSession, done: Set<string>, notYet: Set<string>): Trigger | null {
     let best: Trigger | null = null;
     let bestLate = false;
     const ext = session !== 'regular';
     for (const o of this.liveOrders()) {
-      if (o.symbol !== symbol || o.status === 'pending' || !isOpen(o) || skip.has(o.id)) continue;
+      if (o.symbol !== symbol || o.status === 'pending' || !isOpen(o) || done.has(o.id) || notYet.has(o.id)) continue;
       if (!this.eligible(o, session)) continue;
       const level = this.triggerLevel(o, from, to, ext);
       if (level === null) continue;
@@ -1498,7 +1501,7 @@ export class SimBroker {
     // fires: a stop is a market order from then on, a stop-limit a limit, filled from the next bar.
     if (capacity <= 0) {
       if (o.type === 'stop_limit' && !o.triggered) return this.fireStopLimit(o, x, time);
-      if (o.type === 'stop') o.triggered = true;
+      if (o.type === 'stop' && !o.triggered) this.fireStop(o, time);
       skip.add(o.id);
       return 0;
     }
@@ -1520,7 +1523,7 @@ export class SimBroker {
     }
 
     if (o.type === 'stop_limit' && !o.triggered) return this.fireStopLimit(o, x, time);
-    if (o.type === 'stop') o.triggered = true;
+    if (o.type === 'stop' && !o.triggered) this.fireStop(o, time);
 
     // Exits can never exceed the current position (protects against orphaned exit orders).
     let remaining = o.quantity - o.filledQty;
@@ -1565,9 +1568,16 @@ export class SimBroker {
     return qty;
   }
 
+  /** A stop fired: it is a market order from now on. */
+  private fireStop(o: Order, time: UnixSeconds): void {
+    o.triggered = true;
+    o.triggeredAt = time;
+  }
+
   /** A stop-limit's stop fired at path price `x`: it is a limit from now on, re-evaluated from this point on the path. */
   private fireStopLimit(o: Order, x: number, time: UnixSeconds): number {
     o.triggered = true;
+    o.triggeredAt = time;
     o.updatedAt = time;
     this.log('triggered', `${describe(o)} triggered at ${formatTick(x)}; now a limit at ${formatTick(o.limitPrice!)}`, o.id);
     return 0;

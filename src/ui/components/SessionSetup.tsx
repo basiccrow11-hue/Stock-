@@ -1,5 +1,5 @@
 /** New-session dialog: historical replay setup or simulated market setup. */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, SourceBadge, NumberField } from './common';
 import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
@@ -66,6 +66,8 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   // Imported data can be separate days (several files added together): the days that have bars.
   const [days, setDays] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** A start is under way: Start stays focusable while it loads, and presses are ignored. */
+  const starting = useRef(false);
 
   const provider: HistoricalDataProvider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
   const unavailable = provider.unavailableReason();
@@ -131,7 +133,8 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const extraSymbols = includeWatchlist ? settings.watchlist.filter((s) => s !== symbol.toUpperCase() && (providerId !== 'demo' && providerId !== 'csv' ? true : symbols.some((x) => x.symbol === s))) : [];
 
   const submit = async () => {
-    if (validation) return;
+    if (validation || starting.current) return;
+    starting.current = true;
     setError(null);
     // A blind replay's dates are not saved as the next default: the next form, here or in another
     // tab, would show them while the replay is still hiding them. A blind multi-day replay clears the
@@ -151,6 +154,8 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
       speed,
       blind,
       challengeId: challengeId || undefined,
+    }).finally(() => {
+      starting.current = false;
     });
     if (ok) onDone();
     else setError(useTrading.getState().error ?? 'Could not start the replay.');
@@ -281,9 +286,14 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
       {extraSymbols.length > 0 && <div className="small muted">Also loading: {extraSymbols.slice(0, 7).join(', ')}</div>}
       {validation && <div className="alert warn">{validation}</div>}
       {error && <div className="alert error">{error}</div>}
+      {/* Cleared at each start, so a failed start is announced, the same error again included. */}
+      <div className="sr-only" role="alert">
+        {error ?? ''}
+      </div>
       <div className="row">
         <div className="spacer" />
-        <button className="btn primary" disabled={!!validation || loading} onClick={() => void submit()}>
+        {/* While loading it stays focusable (aria-disabled), so focus is still here if the start fails. */}
+        <button className="btn primary" disabled={!!validation} aria-disabled={loading || undefined} onClick={() => void submit()}>
           {loading ? 'Loading data…' : 'Start replay'}
         </button>
       </div>

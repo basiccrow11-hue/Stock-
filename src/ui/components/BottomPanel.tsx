@@ -167,8 +167,10 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState<string>('');
   /** Why the last change was refused: shown under the price until it changes or is edited again. */
-  const [error, setError] = useState<{ text: string; val: string } | null>(null);
+  const [error, setError] = useState<{ text: string; val: string; n: number } | null>(null);
   const errorId = useId();
+  /** Refusals so far: each one is announced, the same reason again included. */
+  const refusals = useRef(0);
   /** The box holds a price just refused, unchanged since: leaving the box must not send it again. */
   const refused = useRef(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -204,7 +206,7 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
   if (done && !editing) return <span className="mono">{price(current)}</span>;
   const refusal = error && (
     <span id={errorId} className="price-error error small" role="alert">
-      {error.text}
+      <span key={error.n}>{error.text}</span>
     </span>
   );
   if (!editing)
@@ -251,7 +253,7 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       setError(null);
       return close();
     }
-    setError({ text: r.error ?? 'Modify failed', val });
+    setError({ text: r.error ?? 'Modify failed', val, n: ++refusals.current });
     refused.current = true;
     return stay ? false : close();
   };

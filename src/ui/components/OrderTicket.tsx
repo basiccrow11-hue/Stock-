@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
 import { assessRisk, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
@@ -154,6 +154,7 @@ export function OrderTicket() {
     () => (opening && session ? bracketErrors({ ...request(), quantity: Math.max(1, q) }) : []),
     [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
   );
+  const bracketId = useId();
 
   if (!session) return null;
 
@@ -191,6 +192,8 @@ export function OrderTicket() {
   };
 
   const submit = () => {
+    // A stop loss or take profit on the wrong side: the button stays focusable to say why, but does nothing.
+    if (bracket.length > 0) return;
     const r = submitOrder({ ...request(), quantity: q, tag: tag.trim() || undefined });
     if (!r.ok) {
       setResult({ tone: 'error', text: r.error ?? 'Rejected' });
@@ -375,10 +378,14 @@ export function OrderTicket() {
         <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
       </div>
       {bracket.map((e) => (
-        <div key={e} className="alert error">
+        <div key={e} className="alert error" aria-hidden="true">
           {e}
         </div>
       ))}
+      {/* Screen readers hear why the order can't be placed as soon as it can't, and again on the button. */}
+      <div id={bracketId} className="sr-only" role="status">
+        {bracket.join(' ')}
+      </div>
       {risk?.warnings.map((w) => (
         <div key={w} className="alert warn">
           {w}
@@ -389,7 +396,7 @@ export function OrderTicket() {
           Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
-      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || bracket.length > 0}>
+      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracketId : undefined}>
         {label}
       </button>
       {result && (

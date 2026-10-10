@@ -1712,4 +1712,29 @@ describe('a bar whose volume cap is used up, an entry cancelled as a conflict, a
     expect(broker.modify(tp.id, { limitPrice: 19.7 }).ok).toBe(true);
     expect(broker.position(S).quantity).toBe(1000);
   });
+
+  it("counts an order waiting for volume once in a bar, not again at the bar's high and low", () => {
+    // Strict's daily limit at 1%: 99,000 on a 100,000 account. The same entry on a thin and a liquid dip bar.
+    const run = (dipVolume: number) => {
+      const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 3, requireStopLoss: true, maxDailyLossPct: 1, maxPositionPctOfEquity: 400 };
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25, strictRisk } });
+      const t0 = et('2025-01-15', '10:00');
+      broker.onBar(S, bar(t0, 20, 20, 20, 20, 1_000_000));
+      broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 19, tif: 'gtc' });
+      broker.onBar(S, bar(t0 + 60, 19.4, 19.4, 19.4, 19.4, 1_000_000));
+      broker.closePosition(S); // down 600 on the day
+      broker.onBar(S, bar(t0 + 120, 20, 20, 20, 20, 2000)); // a thin stock now: the cap is 500
+      const entry = broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 19.2, tif: 'gtc' }).order!;
+      expect(entry.filledQty).toBe(500);
+      // The rest of the entry is reached at the open; the dip to 19.30 reaches no order, and the bar closes back up.
+      broker.onBar(S, bar(t0 + 180, 20, 20.02, 19.3, 19.99, dipVolume));
+      broker.onBar(S, bar(t0 + 240, 19.99, 20, 19.98, 19.99, 1_000_000));
+      return { entry: broker.state.orders.find((o) => o.id === entry.id)!, next: broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 19.9, quantity: 10, stopLoss: 19.5, tif: 'day' }) };
+    };
+    for (const dipVolume of [400, 1_000_000]) {
+      const { entry, next } = run(dipVolume);
+      expect(entry).toMatchObject({ status: 'filled', filledQty: 1000 });
+      expect(next.ok).toBe(true);
+    }
+  });
 });

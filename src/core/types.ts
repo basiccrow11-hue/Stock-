@@ -87,6 +87,8 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   updatedAt: UnixSeconds;
   /** True once the stop has fired: a stop_limit then rests as a limit, a stop fills at market (the rest of one capped by bar volume fills from the next bars). */
   triggered: boolean;
+  /** When the stop fired. One that fired after its bar's volume cap was used fills from the next bar. Unset on orders saved before this was recorded. */
+  triggeredAt?: UnixSeconds;
   /** Bracket children reference their parent entry. */
   parentId?: string;
   /** One-cancels-other group id for bracket exits. */
