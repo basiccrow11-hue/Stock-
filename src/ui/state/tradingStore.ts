@@ -24,6 +24,7 @@ import { toast } from './toasts';
 import { recordTradeClosed } from './streakStore';
 import { setLiveBlind } from './liveBlind';
 import { newId } from '../../core/util/ids';
+import type { ChartScene } from '../chart/offscreenSnapshot';
 
 export type SessionMode = 'replay' | 'sim';
 
@@ -360,6 +361,53 @@ function publish(force = false): void {
 /** Journal writes for closed trades, one batch after another, so reviews queue in the order trades closed. */
 let journaling: Promise<void> = Promise.resolve();
 
+/** A journal snapshot, and whether it was drawn off screen rather than taken from the chart on screen. */
+type Snapshot = { img: string; offscreen: boolean };
+
+/**
+ * What `trip`'s symbol had shown by the moment its exit became known, for a snapshot drawn off screen:
+ * its bars, fills and simulated news up to then and none after. `later`: bars have been revealed since
+ * (a fast step or a jump can reveal several before the trade is journaled), so the chart on screen is past it.
+ */
+function sceneAtClose(trip: RoundTrip, timeframe: Timeframe, session: SessionMeta): { scene: ChartScene; later: boolean } {
+  const st = broker()!.state;
+  const exit = st.fills.find((f) => f.id === trip.fills[trip.fills.length - 1]);
+  const at = exit?.knownAt ?? trip.exitTime!;
+  const engine = eng.replay?.engineFor(trip.symbol);
+  let bars: Bar[];
+  let later: boolean;
+  if (engine) {
+    // A replay shows a bar once it has ended: those that had ended by then.
+    const shown = engine.revealedCountAt(at);
+    bars = engine.revealedBars(0, shown);
+    later = engine.revealedCount > bars.length;
+  } else {
+    // The simulated market's minute bars, the one forming at the exit included.
+    const all = getBaseBars(trip.symbol);
+    bars = all.filter((b) => b.time <= trip.exitTime!);
+    later = all.length > bars.length;
+  }
+  const scene: ChartScene = {
+    symbol: trip.symbol,
+    timeframe,
+    baseTimeframe: getBaseTimeframe(trip.symbol),
+    bars,
+    fills: st.fills.filter((f) => f.symbol === trip.symbol && (f.knownAt ?? f.time) <= at),
+    news: getSimEventsFor(trip.symbol).filter((e) => e.time <= at),
+    entryTime: trip.entryTime,
+    source: trip.source,
+    blind: session.blind ? { sessionId: session.id, startDate: session.startDate } : null,
+  };
+  return { scene, later };
+}
+
+/** `scene` drawn off screen (chart/offscreenSnapshot, loaded the first time it is needed). */
+async function drawOffscreen(scene: ChartScene): Promise<Snapshot | null> {
+  const { offscreenSnapshot } = await import('../chart/offscreenSnapshot');
+  const img = await offscreenSnapshot(scene);
+  return img ? { img, offscreen: true } : null;
+}
+
 /**
  * Journals trades that closed since the last call. `ended`: they closed because the session is ending
  * (another one starts), so their reviews are final and Learning Mode does not stop to show them; they
@@ -375,8 +423,9 @@ function processClosedTrips(ended = false): Promise<void> {
     settleWatchedReviews();
     return journaling;
   }
-  // Claimed, reviewed and pictured now, as they closed. Learning Mode stops playback before anything
-  // is awaited, so the replay does not run on while the journal is written.
+  // Claimed, reviewed and pictured now, as they closed (a picture drawn off screen is drawn later, one
+  // at a time, from what was shown now). Learning Mode stops playback before anything is awaited, so
+  // the replay does not run on while the journal is written.
   const settings = getSettings();
   const rules = reviewRules(session.id);
   const timeframe = useTrading.getState().timeframe;
@@ -389,14 +438,29 @@ function processClosedTrips(ended = false): Promise<void> {
     } catch (e) {
       console.error('Review failed', e);
     }
-    let snap: Promise<string | null> | null = null;
-    if (settings.autoSnapshot && snapshotFn && useTrading.getState().activeSymbol === trip.symbol) {
-      if (!picture) {
-        // Publishing is throttled while playing; the picture shows the moment the trade closed.
-        publish(true);
-        picture = snapshotFn().catch(() => null);
+    let snap: (() => Promise<Snapshot | null>) | null = null;
+    if (!settings.autoSnapshot) entry.snapshotMissing = 'off';
+    else {
+      try {
+        const { scene, later } = sceneAtClose(trip, timeframe, session);
+        const offscreen = () => drawOffscreen(scene);
+        // The chart on screen shows the moment of the close only when it is on the trade's symbol and
+        // nothing has been revealed since.
+        if (snapshotFn && !later && useTrading.getState().activeSymbol === trip.symbol) {
+          if (!picture) {
+            // Publishing is throttled while playing; the picture shows the moment the trade closed.
+            publish(true);
+            picture = snapshotFn().catch(() => null);
+          }
+          const onScreen = picture;
+          // A chart that is not laid out gives no picture: one is drawn off screen instead.
+          snap = () => onScreen.then((img) => (img ? { img, offscreen: false } : offscreen()));
+        } else snap = offscreen;
+      } catch (e) {
+        // Never in the way of journaling the trade.
+        console.warn('Chart snapshot failed', e);
+        entry.snapshotMissing = 'failed';
       }
-      snap = picture;
     }
     return { trip, entry, snap };
   });
@@ -410,14 +474,18 @@ function processClosedTrips(ended = false): Promise<void> {
     .then(async () => {
       for (const { trip, entry, snap } of batch) {
         try {
+          // The snapshot is best effort: without one, the entry says why.
           try {
-            const img = snap && (await snap);
-            if (img) {
-              entry.snapshotKey = `snap:${entry.id}`;
-              await saveSnapshot(entry.snapshotKey, img);
-            }
-          } catch {
-            /* snapshot is best effort */
+            const shot = snap && (await snap());
+            if (shot) {
+              const key = `snap:${entry.id}`;
+              await saveSnapshot(key, shot.img);
+              entry.snapshotKey = key;
+              if (shot.offscreen) entry.snapshotOffscreen = true;
+            } else if (snap) entry.snapshotMissing = 'failed';
+          } catch (e) {
+            console.warn('Chart snapshot failed', e);
+            entry.snapshotMissing = 'failed';
           }
           await useJournal.getState().add(entry);
           // Only once the entry is in the journal: settling looks it up there.

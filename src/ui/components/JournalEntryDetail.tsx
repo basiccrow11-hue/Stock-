@@ -22,6 +22,12 @@ const NOTE_FIELDS: { key: keyof JournalNotes; label: string }[] = [
   { key: 'other', label: 'Other notes' },
 ];
 
+/** Why an entry has no chart snapshot, when it says (older entries do not). */
+const NO_SNAPSHOT: Record<NonNullable<JournalEntry['snapshotMissing']>, string> = {
+  off: 'No chart snapshot: snapshots were turned off (Data & Settings, "Save a chart snapshot with each journal entry") when this trade closed.',
+  failed: 'No chart snapshot: the picture of the chart could not be drawn or saved when this trade closed.',
+};
+
 const EXIT_LABEL: Record<string, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual exit', session_end: 'Session ended', other: 'Other' };
 
 /** The note fields that differ from what the editor last took in from the store. */
@@ -193,7 +199,17 @@ export function JournalEntryDetail({
         <Stat k="Commission" v={money(entry.commission)} />
       </div>
 
-      {snapshot && <img className="snapshot-img" src={snapshot} alt={`Chart when the ${entry.symbol} trade closed`} />}
+      {snapshot && (
+        <figure className="stack" style={{ margin: 0, gap: 4 }}>
+          <img className="snapshot-img" src={snapshot} alt={`Chart when the ${entry.symbol} trade closed`} />
+          {entry.snapshotOffscreen && (
+            <figcaption className="small muted">
+              {entry.symbol} was not on the chart when this trade closed (or the replay had already moved past the close), so this picture was drawn from the bars shown up to the close. Your drawings are not on it.
+            </figcaption>
+          )}
+        </figure>
+      )}
+      {!entry.snapshotKey && entry.snapshotMissing && <p className="small muted">{NO_SNAPSHOT[entry.snapshotMissing]}</p>}
 
       {showReview && r && (
         <ReviewView review={r} hasStop={entry.stopLoss !== undefined} checks={entry.ruleChecks} onCheck={(rule, followed) => void useJournal.getState().updateRuleCheck(entry.id, rule, followed)} />

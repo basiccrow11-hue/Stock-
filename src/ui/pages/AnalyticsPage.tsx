@@ -4,9 +4,9 @@ import { useJournal } from '../state/journalStore';
 import { useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { computeStats, rMultiple, type PerformanceStats } from '../../core/analytics/stats';
-import type { EquityPoint, RoundTrip } from '../../core/types';
+import type { DataSourceKind, EquityPoint, RoundTrip } from '../../core/types';
 import type { JournalEntry } from '../../core/journal';
-import { EmptyState, Stat } from '../components/common';
+import { EmptyState, SourceBadge, Stat } from '../components/common';
 import { useDateHidden } from '../components/useEntryTime';
 import { LineChart, type LineSpec } from '../chart/LineChart';
 import { blindChartShift } from '../chart/ChartView';
@@ -16,6 +16,9 @@ import { exchangeDate, exchangeMinuteOfDay, formatDuration, weekdayOf } from '..
 
 type SourceFilter = 'all' | 'DEMO' | 'HISTORICAL' | 'SIMULATED';
 
+/** Gross profit over gross loss; without losses, infinite when anything was won. */
+const profitFactor = (s: PerformanceStats) => (s.profitFactor === null ? (s.grossProfit > 0 ? '∞ (no losses)' : '—') : s.profitFactor.toFixed(2));
+
 export function StatsGrid({ s }: { s: PerformanceStats }) {
   const r = (v: number | null, suffix = 'R') => (v === null ? '—' : `${v.toFixed(2)}${suffix}`);
   return (
@@ -24,7 +27,11 @@ export function StatsGrid({ s }: { s: PerformanceStats }) {
       <Stat k="Total return" v={`${s.totalReturnPct.toFixed(2)}%`} cls={pnlClass(s.totalReturnPct)} />
       <Stat k="Trades" v={`${s.totalTrades} (${s.longTrades}L / ${s.shortTrades}S)`} />
       <Stat k="Win rate" v={s.totalTrades ? `${s.winRate.toFixed(1)}%` : '—'} />
-      <Stat k="Profit factor" v={s.profitFactor === null ? (s.grossProfit > 0 ? '∞ (no losses)' : '—') : s.profitFactor.toFixed(2)} />
+      <Stat k="Winning trades" v={String(s.winningTrades)} />
+      <Stat k="Losing trades" v={String(s.losingTrades)} />
+      {/* A trade that made exactly nothing after costs is neither; the win rate counts it as not a win. */}
+      {s.breakevenTrades > 0 && <Stat k="Breakeven trades" v={String(s.breakevenTrades)} />}
+      <Stat k="Profit factor" v={profitFactor(s)} />
       <Stat k="Expectancy / trade" v={signedMoney(s.expectancy)} cls={pnlClass(s.expectancy)} />
       <Stat k="Average R" v={r(s.averageR)} cls={pnlClass(s.averageR)} />
       <Stat k="Avg planned R:R" v={r(s.averagePlannedRR, ':1')} />
@@ -114,6 +121,91 @@ function Breakdown({ title, groups }: { title: string; groups: Group[] }) {
         </table>
       </div>
     </div>
+  );
+}
+
+/** Data sources in the order the Data source menu lists them, and the kind of prices each has. */
+const SOURCE_ORDER: DataSourceKind[] = ['HISTORICAL', 'DEMO', 'SIMULATED', 'LIVE'];
+const PRICE_KIND: Record<DataSourceKind, string> = { HISTORICAL: 'real', DEMO: 'synthetic', SIMULATED: 'fictional', LIVE: 'live' };
+
+/** "a", "a and b", "a, b and c". */
+function listed(words: string[]): string {
+  return words.length < 2 ? (words[0] ?? '') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+}
+
+/**
+ * Which data sources the trades in view come from. Several are added together in the curve and the
+ * numbers below, so then it says so and shows what each source's trades come to on their own.
+ */
+function SourceMix({ entries, base }: { entries: JournalEntry[]; base: number }) {
+  // Worked out once per filter change: the page redraws often while a session plays.
+  const rows = useMemo(() => {
+    // A source the menu does not list (none today) goes last rather than being left out.
+    const rank = (s: DataSourceKind) => (SOURCE_ORDER.includes(s) ? SOURCE_ORDER.indexOf(s) : SOURCE_ORDER.length);
+    const sources = [...new Set(entries.map((e) => e.source))].sort((a, b) => rank(a) - rank(b));
+    return sources.map((source) => ({ source, s: computeStats(entries.filter((e) => e.source === source).map((e) => e.trip), [], base) }));
+  }, [entries, base]);
+  const sources = rows.map((r) => r.source);
+  const badges = sources.map((s) => <SourceBadge key={s} source={s} />);
+  if (sources.length < 2)
+    return (
+      <div className="row wrap small" style={{ gap: 6 }}>
+        <span className="muted">Data source:</span>
+        {badges}
+      </div>
+    );
+  const breakeven = rows.some((r) => r.s.breakevenTrades > 0);
+  return (
+    <>
+      <div className="alert warn stack" style={{ gap: 6 }}>
+        <div className="row wrap" style={{ gap: 6 }}>
+          <span>This view adds together trades from {sources.length} data sources:</span>
+          {badges}
+        </div>
+        <span>
+          Their prices are {listed(sources.map((s) => PRICE_KIND[s] ?? 'unknown'))}, so the curve and the numbers below mix them. The table shows each source on its own; choose one under Data source to see only it.
+        </span>
+      </div>
+      <div>
+        <h3 style={{ marginBottom: 8 }}>By data source</h3>
+        <div className="table-scroll">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th className="num">Trades</th>
+                <th className="num">Won</th>
+                <th className="num">Lost</th>
+                {breakeven && <th className="num">Breakeven</th>}
+                <th className="num">Win %</th>
+                <th className="num">Avg R</th>
+                <th className="num">Profit factor</th>
+                <th className="num">Expectancy</th>
+                <th className="num">Net P/L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ source, s }) => (
+                <tr key={source}>
+                  <td>
+                    <SourceBadge source={source} />
+                  </td>
+                  <td className="num">{s.totalTrades}</td>
+                  <td className="num">{s.winningTrades}</td>
+                  <td className="num">{s.losingTrades}</td>
+                  {breakeven && <td className="num">{s.breakevenTrades}</td>}
+                  <td className="num">{s.winRate.toFixed(1)}%</td>
+                  <td className={`num ${pnlClass(s.averageR)}`}>{s.averageR === null ? '—' : s.averageR.toFixed(2)}</td>
+                  <td className="num">{profitFactor(s)}</td>
+                  <td className={`num ${pnlClass(s.expectancy)}`}>{signedMoney(s.expectancy)}</td>
+                  <td className={`num ${pnlClass(s.netPnl)}`}>{signedMoney(s.netPnl)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -214,6 +306,7 @@ export function AnalyticsPage() {
             <div className="section-title">
               <h2>Current session</h2>
               <span className="muted small">{session.label}</span>
+              <SourceBadge source={session.source} />
             </div>
             {sessionCurve.length > 1 ? <LineChart lines={sessionLines} height={220} format={money} hideDates={session.blind} shift={session.blind ? blindChartShift(session.id) : 0} /> : <p className="muted small">The equity curve appears once the session has run for a while.</p>}
             <StatsGrid s={sessionStats} />
@@ -231,6 +324,7 @@ export function AnalyticsPage() {
             <EmptyState title="No trades match">Closed trades from replays and the simulated market show up here automatically.</EmptyState>
           ) : (
             <>
+              <SourceMix entries={filtered} base={base} />
               <LineChart lines={lines} height={240} format={money} xLabel={tradeLabel} />
               <StatsGrid s={stats} />
             </>

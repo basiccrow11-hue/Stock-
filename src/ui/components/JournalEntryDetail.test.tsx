@@ -177,3 +177,55 @@ describe('your own rules on a trade review', () => {
     act(() => root.unmount());
   });
 });
+
+describe('chart snapshot', () => {
+  const t = 1_700_000_000;
+  const base = {
+    ...{ id: 't2', sessionId: 's1', mode: 'sim', source: 'SIMULATED', symbol: 'NOVA', direction: 'long', entryTime: t, exitTime: t + 600 },
+    ...{ avgEntry: 100, avgExit: 99, quantity: 10, pnl: -10, returnPct: -1, holdingSeconds: 600, commission: 0, rewound: false, createdAt: 1 },
+    ...{ tag: '', notes: { ...EMPTY_NOTES } },
+  } as unknown as JournalEntry;
+
+  /** The entry's detail once its snapshot (if any) has loaded. */
+  async function show(entry: JournalEntry) {
+    vi.resetModules();
+    const { JournalEntryDetail } = await import('./JournalEntryDetail');
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(JournalEntryDetail, { entry, showReview: false })));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    return { host, done: () => act(() => root.unmount()) };
+  }
+
+  it('says when a picture was drawn off screen, and that drawings are not on it', async () => {
+    db.set('snap:t2', 'data:image/jpeg;base64,BB==');
+    const v = await show({ ...base, snapshotKey: 'snap:t2', snapshotOffscreen: true });
+    expect(v.host.querySelector('img.snapshot-img')?.getAttribute('src')).toBe('data:image/jpeg;base64,BB==');
+    expect(v.host.querySelector('figcaption')?.textContent).toContain('NOVA was not on the chart when this trade closed');
+    expect(v.host.querySelector('figcaption')?.textContent).toContain('Your drawings are not on it.');
+    v.done();
+  });
+
+  it('has no caption on a picture of the chart on screen', async () => {
+    db.set('snap:t2', 'data:image/jpeg;base64,AA==');
+    const v = await show({ ...base, snapshotKey: 'snap:t2' });
+    expect(v.host.querySelector('img.snapshot-img')).not.toBeNull();
+    expect(v.host.querySelector('figcaption')).toBeNull();
+    v.done();
+  });
+
+  it('says why there is no picture when the entry knows, and nothing on older entries', async () => {
+    const off = await show({ ...base, snapshotMissing: 'off' });
+    expect(off.host.textContent).toContain('No chart snapshot: snapshots were turned off');
+    expect(off.host.querySelector('img')).toBeNull();
+    off.done();
+    const failed = await show({ ...base, snapshotMissing: 'failed' });
+    expect(failed.host.textContent).toContain('No chart snapshot: the picture of the chart could not be drawn or saved');
+    failed.done();
+    const older = await show(base);
+    expect(older.host.textContent).not.toContain('No chart snapshot');
+    expect(older.host.querySelector('img')).toBeNull();
+    older.done();
+  });
+});
