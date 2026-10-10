@@ -5,6 +5,7 @@
 import type { Bar, Timeframe, UnixSeconds } from '../types';
 import type { BarRequest, HistoricalDataProvider, SymbolInfo } from './provider';
 import { lastIndexAtOrBefore } from '../util/math';
+import { aggregateBars } from './aggregate';
 import { addDays, exchangeDate, exchangeTimeToUnix, isTradingDay } from '../time';
 
 export interface CsvDataset {
@@ -77,5 +78,10 @@ export class CsvDataProvider implements HistoricalDataProvider {
     const out: Bar[] = [];
     for (let i = start; i < d.bars.length && d.bars[i].time < req.to; i++) out.push({ ...d.bars[i] });
     return out;
+  }
+
+  /** The imported bars aggregated as a chart does. */
+  async getCoarseBars(req: BarRequest, timeframe: Timeframe): Promise<Bar[]> {
+    return aggregateBars(await this.getBars(req), timeframe, this.baseTimeframe(req.symbol));
   }
 }

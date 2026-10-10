@@ -46,6 +46,15 @@ describe('drawing projector', () => {
     expect(proj.shiftT(T0 + 3 * 300 + 150, 4)).toBe(T0 + 3 * 300 + 150);
     expect(proj.shiftT(T0 + 3 * 300 + 150, -30)).toBe(T0 + 150);
   });
+
+  it('stays on the same candles when the chart was handed only the newest ones', () => {
+    // The chart holds the candles from the fifth on: its logical index 0 (x = 100) is candle 4.
+    const windowed = projector({ ...geometry(), firstIndex: () => 4 });
+    expect(windowed.x(T0 + 4 * 300)).toBe(100);
+    expect(windowed.x(T0 + 3 * 300 + 150)).toBe(95);
+    expect(windowed.t(110)).toBe(T0 + 5 * 300);
+    expect(windowed.t(80)).toBe(T0 + 2 * 300);
+  });
 });
 
 describe('drawing points past the last candle', () => {

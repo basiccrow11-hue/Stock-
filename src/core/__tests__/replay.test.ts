@@ -1,12 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ReplayEngine } from '../replay/ReplayEngine';
-import { ReplaySession } from '../replay/ReplaySession';
+import { BASE_LOOKBACK_LIMIT, DEFAULT_LOOKBACK, ReplaySession } from '../replay/ReplaySession';
 import { DemoDataProvider } from '../data/demoProvider';
+import { CsvDataProvider } from '../data/csvProvider';
+import { aggregateBars } from '../data/aggregate';
+import type { BarRequest, HistoricalDataProvider } from '../data/provider';
+import { exchangeDate, nextTradingDay, prevTradingDay } from '../time';
 import { parseCsv } from '../data/csv';
 import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import type { BrokerCheckpoint } from '../broker/SimBroker';
 import { ema, rsi, vwap } from '../indicators/indicators';
-import type { Bar, UnixSeconds } from '../types';
+import type { Bar, Timeframe, UnixSeconds } from '../types';
 import { bar, et, minuteBars, randomBars } from './helpers';
 import { formatExchangeTime } from '../time';
 
@@ -820,5 +824,162 @@ describe('Play through quiet stretches', () => {
     expect(s.now).toBe(et('2024-11-29', '13:00'));
     s.advance(60);
     expect(s.now).toBe(et('2024-12-02', '09:30'));
+  });
+});
+
+describe('History for higher timeframes', () => {
+  const p = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
+  const back = (date: string, days: number) => {
+    let d = date;
+    for (let i = 0; i < days; i++) d = prevTradingDay(d);
+    return d;
+  };
+
+  it('loads weeks, not months, of 1-minute bars, and gives a daily chart 200 days as 30-minute bars on demand', async () => {
+    const { session: s } = await ReplaySession.load(p, { ...setupFor(), symbol: 'SPY', lookbackDays: DEFAULT_LOOKBACK['1D'] }, ZERO_COST_CONFIG, 'h');
+    const loaded = s.engine.visibleBaseBars();
+    expect(exchangeDate(loaded[0].time)).toBe(back(D, BASE_LOOKBACK_LIMIT));
+    // A 5m chart cannot be built from 30-minute bars; a daily one wants more than the 1-minute bars cover.
+    expect(s.chartHistory('SPY', '5m')).toMatchObject({ bars: [], wanted: false, status: 'idle' });
+    expect(s.chartHistory('SPY', '1D')).toMatchObject({ bars: [], wanted: true, status: 'idle', timeframe: '30m' });
+    const loading = s.loadHistory('SPY');
+    expect(s.chartHistory('SPY', '1D')!.status).toBe('loading');
+    await loading;
+    const h = s.chartHistory('SPY', '1D')!;
+    expect(h.status).toBe('ready');
+    expect(h.dataStart).toBeNull();
+    expect(exchangeDate(h.bars[0].time)).toBe(back(D, DEFAULT_LOOKBACK['1D']));
+    // Every history bar ends before the first loaded 1-minute bar, so before the start.
+    for (const b of h.bars) expect(b.time + 30 * 60).toBeLessThanOrEqual(loaded[0].time);
+    // The daily candles are the ones the 1-minute bars of those days make.
+    const minutes = p.getBarsSync({ symbol: 'SPY', from: h.bars[0].time, to: loaded[0].time });
+    expect(aggregateBars(h.bars, '1D', '30m')).toEqual(aggregateBars(minutes, '1D', '1m'));
+    expect(aggregateBars(h.bars, '1h', '30m')).toEqual(aggregateBars(minutes, '1h', '1m'));
+    expect(aggregateBars(h.bars, '1D', '30m')).toHaveLength(DEFAULT_LOOKBACK['1D'] - BASE_LOOKBACK_LIMIT);
+    // Charts that cannot use it, or need no more, are given none.
+    expect(s.chartHistory('SPY', '15m')!.bars).toEqual([]);
+    expect(s.chartHistory('SPY', '30m')!.bars.length).toBe(h.bars.length);
+  });
+
+  it('never shows the future: bars a data source returns past the loaded bars or the start are dropped', async () => {
+    const start = et(D, '09:30');
+    // A careless source: whatever is asked, it returns 30-minute bars from 20 days back to two days past the start.
+    const leaky: HistoricalDataProvider = {
+      id: 'leaky',
+      name: 'leaky',
+      source: 'HISTORICAL',
+      requiresCredentials: false,
+      unavailableReason: () => null,
+      listSymbols: async () => [],
+      baseTimeframe: () => '1m',
+      availableRange: async () => null,
+      getBars: async (req: BarRequest) => randomBars(Math.floor((req.to - req.from) / 60), 5, req.from),
+      getCoarseBars: async () => {
+        const out: Bar[] = [];
+        for (let d = back(D, 20); d <= '2025-01-17'; d = nextTradingDay(d)) out.push(...randomBars(32, d.length + out.length, et(d, '04:00')).map((b, i) => ({ ...b, time: et(d, '04:00') + i * 1800 })));
+        return out;
+      },
+    };
+    const { session: s } = await ReplaySession.load(leaky, { ...setupFor(), lookbackDays: 30 }, ZERO_COST_CONFIG, 'l');
+    await s.loadHistory('TEST');
+    const h = s.chartHistory('TEST', '1D')!;
+    const firstLoaded = s.engine.visibleBaseBars()[0].time;
+    expect(h.bars.length).toBeGreaterThan(0);
+    for (const b of h.bars) {
+      expect(b.time + 1800).toBeLessThanOrEqual(firstLoaded);
+      expect(b.time + 1800).toBeLessThanOrEqual(start);
+    }
+    // Nothing from the start's day or later, so the forming daily candle is built from revealed bars only.
+    expect(h.bars.every((b) => exchangeDate(b.time) < exchangeDate(firstLoaded))).toBe(true);
+  });
+
+  it('gives identical history whatever happens after the start', async () => {
+    const days = (future: number) => {
+      const csv = new CsvDataProvider();
+      const bars: Bar[] = [];
+      for (let d = back(D, 40); d <= D; d = nextTradingDay(d)) {
+        const day = randomBars(16 * 60, d.charCodeAt(9) + d.charCodeAt(6), et(d, '04:00'));
+        bars.push(...(d === D ? day.map((b) => (b.time >= et(D, '09:30') ? { ...b, close: b.close * future, high: b.high * future + 1 } : b)) : day));
+      }
+      csv.upsert({ symbol: 'TEST', name: 'T', baseTimeframe: '1m', importedAt: 0, fileName: 't.csv', bars });
+      return csv;
+    };
+    const history = async (provider: HistoricalDataProvider) => {
+      const { session: s } = await ReplaySession.load(provider, { ...setupFor(), lookbackDays: 5 }, ZERO_COST_CONFIG, 'f');
+      await s.loadHistory('TEST');
+      return s.chartHistory('TEST', '1D')!.bars;
+    };
+    const a = await history(days(1));
+    expect(a.length).toBeGreaterThan(0);
+    expect(await history(days(3))).toEqual(a);
+  });
+
+  it('says where the data begins when it has less history than a chart wants', async () => {
+    const csv = new CsvDataProvider();
+    const first = back(D, 10);
+    const bars: Bar[] = [];
+    for (let d = first; d <= D; d = nextTradingDay(d)) bars.push(...randomBars(390, 3, et(d, '09:30')));
+    csv.upsert({ symbol: 'TEST', name: 'T', baseTimeframe: '1m', importedAt: 0, fileName: 't.csv', bars });
+    const { session: s } = await ReplaySession.load(csv, { ...setupFor(), lookbackDays: DEFAULT_LOOKBACK['1m'] }, ZERO_COST_CONFIG, 'c');
+    // The 1-minute bars cover what a 1m chart wants: nothing to say.
+    expect(s.chartHistory('TEST', '1m')).toMatchObject({ wanted: false, dataStart: null });
+    expect(s.chartHistory('TEST', '1D')!.wanted).toBe(true);
+    await s.loadHistory('TEST');
+    const h = s.chartHistory('TEST', '1D')!;
+    expect(h).toMatchObject({ status: 'ready', dataStart: first });
+    expect(exchangeDate(h.bars[0].time)).toBe(first);
+    // A 30m chart wants 25 days: also more than there is. A 1m chart still wants no more.
+    expect(s.chartHistory('TEST', '30m')!.dataStart).toBe(first);
+    expect(s.chartHistory('TEST', '1m')!.dataStart).toBeNull();
+
+    // Data that begins after the first day asked for: known at once, and nothing more is asked for.
+    const short = new CsvDataProvider();
+    short.upsert({ symbol: 'TEST', name: 'T', baseTimeframe: '1m', importedAt: 0, fileName: 't.csv', bars: bars.filter((b) => exchangeDate(b.time) >= back(D, 2)) });
+    const spy = vi.spyOn(short, 'getCoarseBars');
+    const { session: s2 } = await ReplaySession.load(short, { ...setupFor(), lookbackDays: DEFAULT_LOOKBACK['1m'] }, ZERO_COST_CONFIG, 'c2');
+    expect(s2.chartHistory('TEST', '1m')).toMatchObject({ status: 'ready', dataStart: back(D, 2) });
+    await s2.loadHistory('TEST');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed load, and loads on a later try', async () => {
+    const csv = new CsvDataProvider();
+    const bars: Bar[] = [];
+    for (let d = back(D, 30); d <= D; d = nextTradingDay(d)) bars.push(...randomBars(390, 4, et(d, '09:30')));
+    csv.upsert({ symbol: 'TEST', name: 'T', baseTimeframe: '1m', importedAt: 0, fileName: 't.csv', bars });
+    const fail = vi.spyOn(csv, 'getCoarseBars').mockRejectedValueOnce(new Error('rate limit'));
+    const { session: s } = await ReplaySession.load(csv, { ...setupFor(), lookbackDays: 1 }, ZERO_COST_CONFIG, 'e');
+    await s.loadHistory('TEST');
+    expect(s.chartHistory('TEST', '4h')).toMatchObject({ status: 'failed', error: 'rate limit', bars: [] });
+    await s.loadHistory('TEST');
+    expect(fail).toHaveBeenCalledTimes(2);
+    expect(s.chartHistory('TEST', '4h')!.status).toBe('ready');
+    expect(s.chartHistory('TEST', '4h')!.bars.length).toBeGreaterThan(0);
+  });
+
+  it('serves data coarser than 30 minutes at its own size, for as long as asked', async () => {
+    const csv = new CsvDataProvider();
+    const daily: Bar[] = [];
+    for (let d = back(D, 300); d <= D; d = nextTradingDay(d)) daily.push(bar(et(d, '09:30'), 100, 101, 99, 100));
+    csv.upsert({ symbol: 'TEST', name: 'T', baseTimeframe: '1D', importedAt: 0, fileName: 't.csv', bars: daily });
+    const { session: s } = await ReplaySession.load(csv, { ...setupFor(), lookbackDays: 5 }, ZERO_COST_CONFIG, 'd');
+    expect(exchangeDate(s.engine.visibleBaseBars()[0].time)).toBe(back(D, 5));
+    // A 1m chart of daily data shows daily candles, so it wants a daily chart's history.
+    const tf: Timeframe = '1m';
+    expect(s.chartHistory('TEST', tf)).toMatchObject({ wanted: true, timeframe: '1D' });
+    await s.loadHistory('TEST');
+    expect(s.chartHistory('TEST', tf)!.bars).toHaveLength(DEFAULT_LOOKBACK['1D'] - 5);
+  });
+});
+
+describe('Demo data for long requests', () => {
+  it('lets the page draw while it generates months of bars, and gives the same bars', async () => {
+    const p = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
+    const req = { symbol: 'QQQ', from: et('2024-06-03', '04:00'), to: et(D, '20:00') };
+    let drew = false;
+    setTimeout(() => (drew = true), 0);
+    const bars = await p.getBars(req);
+    expect(drew).toBe(true);
+    expect(bars).toEqual(new DemoDataProvider(new Date('2026-10-08T12:00:00Z')).getBarsSync(req));
   });
 });

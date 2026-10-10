@@ -22,6 +22,11 @@ export interface ChartGeometry {
   chart: IChartApi;
   series: ISeriesApi<SeriesType>;
   candles: () => Bar[];
+  /**
+   * Index of the oldest candle the chart was handed, which its time scale counts as logical index 0
+   * (the chart is handed only the newest candles of a long session). 0 when it has them all.
+   */
+  firstIndex?: () => number;
   /** The candles' own size: the chart's timeframe, or the data's bar size when that is coarser. */
   timeframe: Timeframe;
   paneHeight: () => number;
@@ -51,6 +56,8 @@ export function projector(g: ChartGeometry): Projector {
   const x1 = candles.length ? ts.logicalToCoordinate(1 as never) : null;
   const spacing = x0 === null || x1 === null ? 0 : x1 - x0;
   const ready = spacing > 0;
+  // Positions below are counted in candles; the chart counts from the oldest candle it was handed.
+  const first = g.firstIndex?.() ?? 0;
   // Past the last candle, slots follow the trading calendar (overnight and weekend gaps take no
   // slot), so a point drawn there stays on the candle that later fills its slot.
   let cal: CandleCalendar | undefined;
@@ -75,9 +82,9 @@ export function projector(g: ChartGeometry): Projector {
     return candles[i].time + (l - i) * Math.min(tfSeconds, candles[i + 1].time - candles[i].time);
   };
   return {
-    x: (t) => (ready ? x0! + toLogical(t) * spacing : null),
+    x: (t) => (ready ? x0! + (toLogical(t) - first) * spacing : null),
     y: (p) => g.series.priceToCoordinate(p),
-    t: (x) => (ready ? fromLogical(Math.round((x - x0!) / spacing)) : null),
+    t: (x) => (ready ? fromLogical(first + Math.round((x - x0!) / spacing)) : null),
     p: (y) => g.series.coordinateToPrice(y),
     shiftT: (t, dx) => (ready ? fromLogical(toLogical(t) + Math.round(dx / spacing)) : null),
   };
