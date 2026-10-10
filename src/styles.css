@@ -204,6 +204,13 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .dock-resize::after { content: ''; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--border-2); }
 .dock-resize:hover::after, .dock-resize:focus-visible::after, .dock-resize:active::after { left: 0; width: 100%; margin-left: 0; background: var(--accent); }
 .dock-resize:focus-visible { outline: none; }
+/* On a touch screen it is 24px tall, a fingertip's target, with the same grip in its middle. It takes
+   that room from the panel rather than reaching over its neighbours: the tabs right below it and the
+   replay controls or watchlist above keep all of their own area. */
+@media (pointer: coarse) {
+  .dock-resize { height: 24px; }
+  .dock-resize::after { top: 10px; }
+}
 .tabs .dock-toggle { margin-left: auto; display: inline-flex; align-items: center; color: var(--text-2); }
 .tabs .dock-toggle:hover { color: var(--text); }
 /* Collapsed, no tab's contents show, so none is marked as showing. */
@@ -377,7 +384,9 @@ table.grid tr.clickable:focus-visible { outline: 2px solid var(--accent); outlin
 .journal-cols table.grid td.num { white-space: nowrap; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
 .mini-chart { height: 260px; position: relative; }
-.section-title { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+/* A heading row wraps when its parts do not fit (gap spaces the rows too): the data source badge never
+   breaks its words, so on a 320px phone it would otherwise run past the card. */
+.section-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
 .kv .k { color: var(--muted); }
 

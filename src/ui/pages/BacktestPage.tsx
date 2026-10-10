@@ -408,7 +408,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
       for (let i = 0; i < days; i++) warm = prevTradingDay(warm);
       const range = await provider.availableRange(sym);
       if (range && exchangeDate(range.from) > warm) warm = tradingDayOnOrAfter(exchangeDate(range.from));
-      // Loaded a few weeks at a time, newest first, and turned into candles at once, so a long warm-up
+      // Loaded WARMUP_CHUNK_DAYS at a time, newest first, and turned into candles at once, so a long warm-up
       // never holds its minute bars, a vendor's page limit never cuts it short, and Cancel works between
       // pieces. A piece that fails to load (a free plan's rate limit, say) ends the warm-up there: the
       // test runs on the recent history already loaded, which has no gap before the start, and says so.

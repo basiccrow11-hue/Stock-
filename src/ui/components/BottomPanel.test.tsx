@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -69,6 +72,27 @@ async function mount(onOpenJournal: (id: string) => void = () => undefined) {
 
 const press = (el: Element, key: string, shiftKey = false) => act(() => void el.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })));
 const click = (el: Element) => act(() => void (el as HTMLElement).click());
+
+/** styles.css, added to the page. */
+function addStyles(): HTMLStyleElement {
+  const style = document.createElement('style');
+  style.textContent = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../styles.css'), 'utf8');
+  document.head.appendChild(style);
+  return style;
+}
+
+/**
+ * The declarations `style` gives `el`, or its ::before or ::after, on a touch screen only: its
+ * (pointer: coarse) rules, in order. jsdom skips @media rules when it works out styles.
+ */
+function onTouch(style: HTMLStyleElement, el: Element, pseudo: '' | '::before' | '::after'): CSSStyleDeclaration[] {
+  const matches = (selector: string) => (pseudo ? selector.endsWith(pseudo) && el.matches(selector.slice(0, -pseudo.length)) : !selector.includes('::') && el.matches(selector));
+  return [...style.sheet!.cssRules]
+    .filter((r): r is CSSMediaRule => r instanceof CSSMediaRule && r.media.mediaText === '(pointer: coarse)')
+    .flatMap((m) => [...m.cssRules])
+    .filter((r): r is CSSStyleRule => r instanceof CSSStyleRule && r.selectorText.split(',').some((s) => matches(s.trim())))
+    .map((r) => r.style);
+}
 
 describe('the bottom panel', () => {
   it('collapses to its tabs and expands again, says which it is, and remembers it', async () => {
@@ -164,6 +188,32 @@ describe('the bottom panel', () => {
     click(again.toggle);
     expect(again.panel.style.getPropertyValue('--bottom-h')).toBe('');
     again.unmount();
+  });
+
+  it('gives a touch screen a fingertip-sized resize edge that keeps to its own place and look', async () => {
+    const style = addStyles();
+    const p = await mount();
+    try {
+      const handle = p.handle()!;
+      const touch = (pseudo: '' | '::before' | '::after') => onTouch(style, handle, pseudo);
+      // A mouse keeps the thin edge; a finger gets WCAG's 24px target.
+      expect(getComputedStyle(handle).height).toBe('7px');
+      const touchHeight = parseFloat(touch('').map((s) => s.height).filter(Boolean).at(-1) ?? '7px');
+      expect(touchHeight).toBeGreaterThanOrEqual(24);
+      // The target is the edge's own box: nothing reaches out over the tabs below it or the replay
+      // controls and watchlist above it.
+      for (const s of [...touch(''), ...touch('::before'), ...touch('::after')]) {
+        for (const side of [s.top, s.bottom, s.marginTop, s.marginBottom]) expect(parseFloat(side || '0')).toBeGreaterThanOrEqual(0);
+      }
+      // The grip looks the same, in the middle of the taller edge.
+      expect(touch('::before')).toEqual([]);
+      for (const s of touch('::after')) expect([s.width, s.height, s.background, s.borderRadius, s.left]).toEqual(['', '', '', '', '']);
+      const gripTop = parseFloat(touch('::after').map((s) => s.top).filter(Boolean).at(-1) ?? '2px');
+      expect(Math.abs(gripTop + 1.5 - touchHeight / 2)).toBeLessThanOrEqual(1);
+    } finally {
+      p.unmount();
+      style.remove();
+    }
   });
 
   it('works when storage is blocked, and ignores a malformed stored value', async () => {

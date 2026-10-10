@@ -7,7 +7,10 @@
 import { useCallback, useState, useSyncExternalStore } from 'react';
 
 export const DOCK_KEY = 'stock-replay-bottom-panel';
-/** The smallest height it can be dragged to: its tabs and about two rows of a table. */
+/**
+ * The smallest height it can be dragged to: its tabs and about two rows of a table (a table's header
+ * row on a touch screen, where the resize edge above the tabs is taller).
+ */
 export const DOCK_MIN = 96;
 /**
  * What the chart column keeps when the panel is dragged up: the top bar, the chart's toolbar and
