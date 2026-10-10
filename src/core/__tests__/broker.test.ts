@@ -1573,3 +1573,94 @@ describe("the daily limit reached by a bar's own exits, and refused changes in t
     expect(last.message).toBe(`Change to BUY 10 ${S} LMT 49.00 refused: ${r.error}`);
   });
 });
+
+describe('the daily limit at moments inside a bar', () => {
+  const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 5, requireStopLoss: true, maxDailyLossPct: 1, maxPositionPctOfEquity: 400 };
+
+  it('values the shares held from before at the price where an add is stopped out, so a day that never lost 1% is not locked', () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, marginMultiplier: 4, strictRisk } });
+    let t = et('2025-01-15', '09:30');
+    const next = (o: number, h: number, l: number, c: number) => {
+      broker.onBar(S, bar(t, o, h, l, c, 10_000_000));
+      t += 60;
+    };
+    next(50, 50, 50, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 49, tif: 'gtc' }).ok).toBe(true);
+    next(50, 50, 50, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 52, quantity: 1000, stopLoss: 51, tif: 'gtc' }).ok).toBe(true);
+    // The add fills at 52 and its stop sells it at 51: -1000 on the add, +1000 on the 1000 shares held from 50.
+    next(50, 52.5, 50, 50.1);
+    expect(broker.state.fills.map((f) => `${f.action} ${f.quantity}@${f.price}`).slice(-2)).toEqual(['buy 1000@52', 'sell 1000@51']);
+    next(50.1, 50.1, 50.1, 50.1);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 50, quantity: 100, stopLoss: 49 }).ok).toBe(true);
+  });
+
+  it('cancels an entry reached while the shares held are down past the limit, and holds the limit for the day', () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, marginMultiplier: 4, strictRisk } });
+    let t = et('2025-01-15', '09:30');
+    const next = (o: number, h: number, l: number, c: number) => {
+      broker.onBar(S, bar(t, o, h, l, c, 10_000_000));
+      t += 60;
+    };
+    next(50, 50, 50, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 2000, stopLoss: 47.6, tif: 'gtc' }).ok).toBe(true);
+    const dip = broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 49.4, quantity: 100, stopLoss: 47.6, tif: 'gtc' });
+    expect(dip.ok).toBe(true);
+    // At 49.40 the 2000 shares are 1200 (1.2%) down: the add is cancelled though the bar closes higher.
+    next(50, 50.2, 49.3, 50.5);
+    expect(broker.state.orders.find((o) => o.id === dip.order!.id)).toMatchObject({ status: 'cancelled', conflict: true });
+    expect(broker.account().equity).toBeGreaterThan(100_000);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 50, quantity: 100, stopLoss: 47.6 }).error).toMatch(/daily loss limit of 1% reached/);
+    next(50.5, 50.6, 50.4, 50.6);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 50, quantity: 100, stopLoss: 47.6 }).error).toMatch(/daily loss limit of 1% reached/);
+  });
+
+  for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+    it(`leaves one symbol's stop-out out of another's bar ending at the same time, then holds it (${order.join(', ')})`, () => {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, strictRisk } });
+      let t = et('2025-01-15', '10:00');
+      const minute = (bars: Record<string, [number, number, number, number]>) => {
+        for (const sym of order) broker.onBar(sym, bar(t, ...bars[sym], 1_000_000));
+        t += 60;
+      };
+      minute({ AAA: [50, 50, 50, 50], BBB: [20, 20, 20, 20] });
+      expect(broker.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 1000, stopLoss: 49, tif: 'gtc' }).ok).toBe(true);
+      expect(broker.submit({ symbol: 'BBB', action: 'buy', type: 'limit', limitPrice: 19.9, quantity: 500, stopLoss: 19.5, tif: 'gtc' }).ok).toBe(true);
+      minute({ AAA: [50, 50, 50, 50], BBB: [20, 20, 20, 20] });
+      // AAA's stop costs 1% of the account; BBB's entry fills at its bar's open, in the same minute.
+      minute({ AAA: [50, 50.2, 48.9, 49.6], BBB: [19.85, 20, 19.8, 19.95] });
+      expect(broker.position('AAA').quantity).toBe(0);
+      expect(broker.position('BBB').quantity).toBe(500);
+      expect(broker.submit({ symbol: 'BBB', action: 'buy', type: 'limit', limitPrice: 19.5, quantity: 10, stopLoss: 19 }).error).toMatch(/daily loss limit of 1% reached/);
+      minute({ AAA: [49.6, 49.6, 49.6, 49.6], BBB: [19.95, 20.5, 19.95, 20.5] });
+      expect(broker.submit({ symbol: 'BBB', action: 'buy', type: 'limit', limitPrice: 19.5, quantity: 10, stopLoss: 19 }).error).toMatch(/daily loss limit of 1% reached/);
+    });
+  }
+});
+
+describe("Size by risk on a trade whose risk can't be measured, with Strict Mode off", () => {
+  it('does not say adds are refused, as Strict Mode would', () => {
+    const { broker, next } = setup({}, 100_000, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, stopLoss: 49, tif: 'gtc' }).ok).toBe(true);
+    broker.cancel(broker.workingOrders(S).find((o) => o.type === 'stop')!.id);
+    next(47, 47, 47, 47);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 300, tif: 'gtc' }).ok).toBe(true);
+    next(49.5, 49.5, 49.5, 49.5);
+    expect(broker.sizeByRisk({ symbol: S, action: 'buy', type: 'limit', limitPrice: 49.4, stopLoss: 49.2 }, 1)).toEqual({
+      ok: false,
+      error: "The trade's average entry is at or below its first stop at 49.00, so its risk can't be measured.",
+    });
+  });
+
+  it("names the working entry whose stop it is, not this order's", () => {
+    const { broker, next } = setup({}, 100_000, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100, tif: 'gtc' }).ok).toBe(true);
+    next(55, 55, 55, 55);
+    const w = broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 54, quantity: 50, stopLoss: 51, tif: 'gtc' });
+    expect(w.ok).toBe(true);
+    expect(broker.sizeByRisk({ symbol: S, action: 'buy', type: 'limit', limitPrice: 54.5, stopLoss: 53 }, 1)).toEqual({
+      ok: false,
+      error: `The stop on your working BUY 50 ${S} LMT 54.00 at 51.00 is at or above the trade's average entry of 50.00, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. Change its stop to one below 50.00.`,
+    });
+  });
+});

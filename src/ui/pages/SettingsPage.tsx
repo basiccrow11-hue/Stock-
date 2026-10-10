@@ -504,7 +504,7 @@ function RiskCard() {
             Off by default: the ticket warns but lets you place any trade. When on, orders that would break these limits are refused. A trade&apos;s risk is measured the way the trade review and the
             challenges measure it: every share from the trade&apos;s first stop loss, against the equity the trade started with, so raising your stop does not make room for bigger adds. Keep this
             limit at or below your rule&apos;s. Entries waiting on a stock you don&apos;t hold yet must share one stop loss, and a stop can be tightened but never moved past
-            the trade&apos;s first stop. When a trade closes, its other entries that way are cancelled. Once the day&apos;s loss reaches its limit, open trades included, no new entries or adds until the next session, even if those trades recover. Cancelling orders and closing positions are always allowed.
+            the trade&apos;s first stop. When a trade closes, its other entries that way are cancelled. Once the day&apos;s loss reaches its limit, open trades included (at a bar close, or inside a bar when one of your orders fills or is reached), no new entries or adds until the next session, even if those trades recover. Cancelling orders and closing positions are always allowed.
           </p>
           <label className="check">
             <input type="checkbox" checked={sr.enabled} onChange={(e) => setStrict({ enabled: e.target.checked })} /> Block orders that break these limits

@@ -1225,6 +1225,22 @@ describe('stops past $1 on sub-dollar trades, pre-market entries, and planned R:
         flat(next, 9.8, 25);
       }),
     ).toMatch(/^Your stop at 9\.90 came with a later add, and it sat past your average entry of 9\.68: it locked in a gain on your earlier shares/);
+    // A breakeven stop, at exactly the first shares' price, locks in no gain: later adds moved the average.
+    expect(
+      why((b, next) => {
+        flat(next, 10, 5);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, tif: 'gtc' });
+        flat(next, 10.4, 2);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 10, tif: 'gtc' });
+        flat(next, 10.4, 2);
+        next(10.2, 10.2, 9.9, 9.95);
+        flat(next, 9.8, 2);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 300, tif: 'gtc' });
+        flat(next, 9.85, 2);
+        b.closePosition('T');
+        flat(next, 9.85, 25);
+      }),
+    ).toMatch(/^Your stop at 10\.00 came with a later add, and shares added after it took your average entry to 9\.96, past that stop, so/);
   });
 
   it('says where a moved stop filled when that was over a quarter R past it', () => {

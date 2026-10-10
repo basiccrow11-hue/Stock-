@@ -72,17 +72,19 @@ export interface BrokerState {
   sessionDate: string;
   dayStartEquity: number;
   /**
-   * The lowest equity since the session began at a moment every bar ending then had been processed,
-   * taken as each such moment's bars begin, or just after an exit inside a bar (that bar's own fills
-   * counted, see SimBroker.bar): Strict Mode's daily limit holds once reached. The latest moment is
-   * read live, not from here.
+   * The lowest equity Strict Mode's daily limit has seen since the session began, folded in as each bar
+   * step begins: the equity then (every bar ending earlier has closed) and the low inside the step before
+   * (stepStart.low). The limit holds once reached. The latest moment is read live, not from here.
    */
   dayLowEquity?: number;
   /**
-   * Equity when the bars ending at `time` began to be processed (the last moment every bar had closed):
-   * what Strict Mode's daily limit is judged on while they fill, with each bar's own fills.
+   * The bars ending at `time`: `equity` is the account's equity when they began to be processed (the
+   * last moment every bar had closed), what each of them is judged from while it fills; `low` the lowest
+   * equity at a moment inside them where an order filled or was reached (see SimBroker.dayEquity). That
+   * low joins dayLowEquity when the next step begins and counts outside a bar until then, but not for the
+   * step's other bars, so their fills don't depend on which symbol is processed first.
    */
-  stepStart?: { time: UnixSeconds; equity: number };
+  stepStart?: { time: UnixSeconds; equity: number; low?: number };
   equityCurve: EquityPoint[];
   events: BrokerEvent[];
   version: number;
@@ -176,13 +178,11 @@ export class SimBroker {
    */
   private openFrom = 0;
   /**
-   * While onBar runs, what the daily limit adds to the account's equity to judge it as of this bar's
-   * own fills: `offset`, the step's starting equity (stepStart) less the equity when this bar began, so
-   * other symbols' bars processed before it at the same time are left out; and `adj`, which values the
-   * shares this bar opened (and still holds, `held`, signed) at what was paid rather than at the
-   * symbol's previous close. Undefined otherwise.
+   * While onBar runs: its symbol; `offset`, the step's starting equity (stepStart) less the equity when
+   * this bar began, which leaves out other symbols' bars processed before it at the same time; and `low`,
+   * the lowest equity Strict's daily limit has seen inside this bar. Undefined otherwise.
    */
-  private bar?: { symbol: string; offset: number; held: number; adj: number };
+  private bar?: { symbol: string; offset: number; low?: number };
 
   private liveOrders(): Order[] {
     const list = this.s.orders;
@@ -506,33 +506,65 @@ export class SimBroker {
   }
 
   /**
-   * Whether today's loss has reached Strict Mode's daily limit: now, or at any earlier moment since the
-   * session began once every bar ending then had closed or just after an exit inside a bar, so the
-   * limit holds until the next session even if open trades recover. While a bar fills, "now" is the
-   * last such close plus that bar's own fills, with the shares they opened worth what was paid: other
-   * symbols' bars ending at the same time, processed before it, are not counted yet.
+   * The account's equity for Strict's daily limit: inside a bar, at the moment its path is at `x`, with
+   * the bar's symbol at that price and every other symbol where it stood when the step began (so bars
+   * ending at the same time don't count each other, whichever comes first); otherwise the live equity.
    */
-  private dailyLimitReached(): boolean {
+  private dayEquity(x?: number): number {
+    const equity = this.account().equity;
+    const b = this.bar;
+    if (!b || x === undefined) return equity;
+    const last = this.s.lastPrice[b.symbol];
+    return equity + b.offset + (last === undefined ? 0 : this.position(b.symbol).quantity * (x - last));
+  }
+
+  /** Inside a bar, count the moment its path is at `x` toward the lowest equity the daily limit has seen. */
+  private noteDayLow(x: number): void {
+    const b = this.bar;
+    if (!b) return;
+    const now = this.dayEquity(x);
+    b.low = Math.min(b.low ?? now, now);
+  }
+
+  /**
+   * Whether today's loss has reached Strict Mode's daily limit: now (inside a bar, at path price `x`), at
+   * any bar close since the session began, or at a moment inside a bar where an order filled or was
+   * reached, so the limit holds until the next session even if open trades recover. A bar's own moments
+   * count for it at once and for the step's other bars only once the step is over.
+   */
+  private dailyLimitReached(x?: number): boolean {
     const start = this.s.dayStartEquity;
-    const now = this.account().equity + (this.bar ? this.bar.offset + this.bar.adj : 0);
-    const low = Math.min(now, this.s.dayLowEquity ?? Infinity);
+    const stepLow = (this.bar ? this.bar.low : this.s.stepStart?.low) ?? Infinity;
+    const low = Math.min(this.dayEquity(x), this.s.dayLowEquity ?? Infinity, stepLow);
     return start > 0 && (money(start - low) / start) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
   }
 
   /**
    * Why the trade `t` an opening order joins can't be measured (its average entry is at or past the
-   * first stop), as a sentence in lower case: with no first stop yet, that stop is the one this order
-   * (`stopLoss`) or its working entries would give it, and a stop on the other side of the average works.
+   * first stop), as a sentence in lower case: with no first stop yet, that stop is the furthest of this
+   * order's (`stopLoss`) and its working entries', named as whichever it is, and a stop on the other side
+   * of the average works. `strict` adds that Strict Mode allows no adds to a trade past its first stop.
    */
-  private unmeasurableText(t: ReturnType<SimBroker['tradeOf']>, stopLoss: number | undefined): string {
+  private unmeasurableText(t: ReturnType<SimBroker['tradeOf']>, stopLoss: number | undefined, strict: boolean): string {
     const long = t.dir === 1;
     const below = long ? 'below' : 'above';
     const S = formatTick(t.stop!);
-    if (t.fromTrip) return `the trade's average entry is at or ${below} its first stop at ${S}, so its risk can't be measured. No adds to this trade.`;
+    if (t.fromTrip) return `the trade's average entry is at or ${below} its first stop at ${S}, so its risk can't be measured.${strict ? ' No adds to this trade.' : ''}`;
     const A = formatTick(t.trip!.avgEntry);
-    const whose = stopLoss !== undefined ? "this order's stop" : 'the stop your working entries share';
-    const shared = stopLoss !== undefined && t.entries.some((e) => e.order.stopLoss !== undefined);
-    const fix = stopLoss !== undefined ? `Use a stop ${below} ${A}${shared ? ' here and on your working entries' : ''}.` : `Change their stop to one ${below} ${A}.`;
+    const at = (x: number | undefined) => x !== undefined && Math.abs(x - t.stop!) <= EPS;
+    const theirs = t.entries.filter((e) => at(e.order.stopLoss));
+    let whose: string;
+    let fix: string;
+    if (at(stopLoss)) {
+      whose = "this order's stop";
+      fix = `Use a stop ${below} ${A}${theirs.length ? ' here and on your working entries' : ''}.`;
+    } else if (theirs.length === 1) {
+      whose = `the stop on your working ${describe(theirs[0].order)}`;
+      fix = `Change its stop to one ${below} ${A}.`;
+    } else {
+      whose = 'the stop your working entries share';
+      fix = `Change their stop to one ${below} ${A}.`;
+    }
     return `${whose} at ${S} is at or ${long ? 'above' : 'below'} the trade's average entry of ${A}, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. ${fix}`;
   }
 
@@ -606,7 +638,7 @@ export class SimBroker {
         return `Strict risk: your working ${describe(stale.order)} ${what}, and Strict Mode measures every share from that stop. Cancel it first.`;
       }
       const risk = this.tradeRiskOf({ symbol: sym, action: o.action, quantity: o.quantity, fillAt, stopLoss: o.stopLoss }, own)!;
-      if (risk.unmeasurable) return `Strict risk: ${this.unmeasurableText(t, o.stopLoss)}`;
+      if (risk.unmeasurable) return `Strict risk: ${this.unmeasurableText(t, o.stopLoss, true)}`;
       if (risk.pct > L + EPS) {
         if (!risk.held && !risk.working) return `Strict risk: this trade risks ${over(risk.pct, L, 2)}% (limit ${L}%).`;
         const parts = [risk.held ? `the ${shares(risk.held)} you hold` : '', risk.working ? `${shares(risk.working)} in working entries` : ''].filter(Boolean).join(' and ');
@@ -760,7 +792,7 @@ export class SimBroker {
         return { ok: false as const, error: joined ? `This order is at or past the trade's first stop at ${S}, so it has no risk budget to size from.` : 'The stop loss is on the wrong side of the entry.' };
       }
       if (one.unmeasurable) {
-        const why = b.unmeasurableText(b.tradeOf(req.symbol, req.action, undefined, req.stopLoss), req.stopLoss);
+        const why = b.unmeasurableText(b.tradeOf(req.symbol, req.action, undefined, req.stopLoss), req.stopLoss, b.cfg.strictRisk.enabled);
         return { ok: false as const, error: why[0].toUpperCase() + why.slice(1) };
       }
       if (one.pct > riskPct + EPS) {
@@ -1190,6 +1222,7 @@ export class SimBroker {
     if (date !== this.s.sessionDate) {
       if (this.s.sessionDate) this.s.dayStartEquity = this.account().equity;
       this.s.dayLowEquity = undefined;
+      if (this.s.stepStart) this.s.stepStart.low = undefined;
       this.s.sessionDate = date;
     }
     const session = marketSession(barTime);
@@ -1218,11 +1251,13 @@ export class SimBroker {
     const end = bar.time + barSeconds;
     const equity = this.account().equity;
     if (this.s.stepStart?.time !== end) {
-      // The first bar ending at `end`: every bar ending earlier has closed, so the account really has this equity.
+      // The first bar ending at `end`: every bar ending earlier has closed, so the account really has this
+      // equity, and the moments inside the step before are over.
+      const low = Math.min(this.s.dayLowEquity ?? equity, this.s.stepStart?.low ?? equity, equity);
       this.s.stepStart = { time: end, equity };
-      this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? equity, equity);
+      this.s.dayLowEquity = low;
     }
-    this.bar = { symbol, offset: this.s.stepStart.equity - equity, held: 0, adj: 0 };
+    this.bar = { symbol, offset: this.s.stepStart.equity - equity };
     const session = marketSession(bar.time);
     // Pending orders become working once their session arrives.
     for (const o of this.liveOrders()) {
@@ -1306,6 +1341,8 @@ export class SimBroker {
     (this.s.barVolumeUsed ??= {})[symbol] = traded;
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
 
+    const low = this.bar.low;
+    if (low !== undefined) this.s.stepStart.low = Math.min(this.s.stepStart.low ?? low, low);
     this.bar = undefined;
     this.recordEquity(bar.time + barSeconds);
     this.touch();
@@ -1464,7 +1501,8 @@ export class SimBroker {
     }
 
     // Under Strict Mode, once the day's loss reaches its limit an entry is cancelled rather than filled.
-    if (isOpeningAction(o.action) && this.cfg.strictRisk.enabled && this.dailyLimitReached()) {
+    this.noteDayLow(x);
+    if (isOpeningAction(o.action) && this.cfg.strictRisk.enabled && this.dailyLimitReached(x)) {
       this.autoCancel(o, time, `Strict Mode: the ${this.cfg.strictRisk.maxDailyLossPct}% daily loss limit was reached.`, "Strict Mode's daily loss limit was reached");
       skip.add(o.id);
       return 0;
@@ -1516,6 +1554,7 @@ export class SimBroker {
     const spreadCost = hs * qty;
 
     this.applyFill(o, qty, price, time, slippage, spreadCost, at, knownAt);
+    this.noteDayLow(x);
     if (isOpen(o)) skip.add(o.id); // partially filled: capacity exhausted for this bar
     return qty;
   }
@@ -1567,27 +1606,12 @@ export class SimBroker {
     }
     pos.realizedPnl += realizedGross - commission;
     this.s.positions[symbol] = pos;
-    // The daily limit values shares this bar opened at their price; an exit closes those first.
-    const b = this.bar?.symbol === symbol ? this.bar : undefined;
-    if (b && opening) {
-      b.held += signed;
-      b.adj += signed * (price - markBefore);
-    } else if (b && b.held !== 0) {
-      const k = Math.min(qty, Math.abs(b.held));
-      b.adj -= (b.adj * k) / Math.abs(b.held);
-      b.held -= Math.sign(b.held) * k;
-    }
 
     // ---- cash
     this.s.cash += side === 'buy' ? -qty * price : qty * price;
     this.s.cash -= commission;
     this.s.realizedPnl += realizedGross - commission;
     this.s.commissionsPaid += commission;
-    // An exit inside a bar realises its loss: the daily limit holds what that moment comes to, as at a close.
-    if (b && !opening) {
-      const now = this.account().equity + b.offset + b.adj;
-      this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? now, now);
-    }
 
     // ---- order
     o.avgFillPrice = (o.avgFillPrice * o.filledQty + price * qty) / (o.filledQty + qty);

@@ -353,10 +353,10 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const sign = long ? 1 : -1;
     const lead = `Your stop at ${formatTick(S)} came with a later add`;
     const end = "so the trade's risk cannot be measured in R.";
-    if (before !== undefined && (before - S) * sign <= 1e-9) {
+    if (before !== undefined && (before - S) * sign < -1e-9) {
       return `${lead}, and it sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain on your earlier shares rather than capping a loss, ${end}`;
     }
-    if (add !== undefined && (add - S) * sign <= 1e-9) {
+    if (add !== undefined && (add - S) * sign < -1e-9) {
       return `${lead}, which filled at ${formatTick(add)}, already past it, and your average entry of ${formatTick(trip.avgEntry)} ended up past it too, ${end}`;
     }
     return `${lead}, and shares added after it took your average entry to ${formatTick(trip.avgEntry)}, past that stop, ${end}`;

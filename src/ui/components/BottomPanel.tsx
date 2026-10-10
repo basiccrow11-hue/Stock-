@@ -220,7 +220,7 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
           onClick={() => {
             setVal(error?.val ?? String(current));
             discard.current = false;
-            refused.current = false;
+            refused.current = !!error;
             setEditing(true);
           }}
         >
@@ -244,7 +244,8 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       setError(null);
       return close();
     }
-    if (refused.current) return stay ? false : close();
+    // A refused price, unchanged since, is sent again only by Enter, never by leaving the box.
+    if (refused.current && !stay) return close();
     const r = modifyOrder(order.id, { [field]: n });
     if (r.ok) {
       setError(null);
