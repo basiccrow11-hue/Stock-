@@ -73,8 +73,9 @@ export interface BrokerState {
   dayStartEquity: number;
   /**
    * The lowest equity since the session began at a moment every bar ending then had been processed,
-   * taken as each such moment's bars begin (Strict Mode's daily limit holds once reached). The latest
-   * moment is read live, not from here.
+   * taken as each such moment's bars begin, or just after an exit inside a bar (that bar's own fills
+   * counted, see SimBroker.bar): Strict Mode's daily limit holds once reached. The latest moment is
+   * read live, not from here.
    */
   dayLowEquity?: number;
   /**
@@ -506,16 +507,33 @@ export class SimBroker {
 
   /**
    * Whether today's loss has reached Strict Mode's daily limit: now, or at any earlier moment since the
-   * session began once every bar ending then had closed, so the limit holds until the next session
-   * even if open trades recover. While a bar fills, "now" is the last such moment plus that bar's own
-   * fills, with the shares they opened worth what was paid: other symbols' bars ending at the same
-   * time, processed before it, are not counted yet.
+   * session began once every bar ending then had closed or just after an exit inside a bar, so the
+   * limit holds until the next session even if open trades recover. While a bar fills, "now" is the
+   * last such close plus that bar's own fills, with the shares they opened worth what was paid: other
+   * symbols' bars ending at the same time, processed before it, are not counted yet.
    */
   private dailyLimitReached(): boolean {
     const start = this.s.dayStartEquity;
     const now = this.account().equity + (this.bar ? this.bar.offset + this.bar.adj : 0);
     const low = Math.min(now, this.s.dayLowEquity ?? Infinity);
     return start > 0 && (money(start - low) / start) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
+  }
+
+  /**
+   * Why the trade `t` an opening order joins can't be measured (its average entry is at or past the
+   * first stop), as a sentence in lower case: with no first stop yet, that stop is the one this order
+   * (`stopLoss`) or its working entries would give it, and a stop on the other side of the average works.
+   */
+  private unmeasurableText(t: ReturnType<SimBroker['tradeOf']>, stopLoss: number | undefined): string {
+    const long = t.dir === 1;
+    const below = long ? 'below' : 'above';
+    const S = formatTick(t.stop!);
+    if (t.fromTrip) return `the trade's average entry is at or ${below} its first stop at ${S}, so its risk can't be measured. No adds to this trade.`;
+    const A = formatTick(t.trip!.avgEntry);
+    const whose = stopLoss !== undefined ? "this order's stop" : 'the stop your working entries share';
+    const shared = stopLoss !== undefined && t.entries.some((e) => e.order.stopLoss !== undefined);
+    const fix = stopLoss !== undefined ? `Use a stop ${below} ${A}${shared ? ' here and on your working entries' : ''}.` : `Change their stop to one ${below} ${A}.`;
+    return `${whose} at ${S} is at or ${long ? 'above' : 'below'} the trade's average entry of ${A}, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. ${fix}`;
   }
 
   /**
@@ -588,15 +606,7 @@ export class SimBroker {
         return `Strict risk: your working ${describe(stale.order)} ${what}, and Strict Mode measures every share from that stop. Cancel it first.`;
       }
       const risk = this.tradeRiskOf({ symbol: sym, action: o.action, quantity: o.quantity, fillAt, stopLoss: o.stopLoss }, own)!;
-      if (risk.unmeasurable) {
-        if (t.fromTrip) return `Strict risk: the trade's average entry is at or ${below} its first stop at ${formatTick(S)}, so its risk can't be measured. No adds to this trade.`;
-        // No first stop yet: S is the one this order (and its working entries) would give the trade.
-        const A = formatTick(t.trip!.avgEntry);
-        const whose = o.stopLoss !== undefined ? "this order's stop" : 'the stop your working entries share';
-        const shared = o.stopLoss !== undefined && t.entries.some((e) => e.order.stopLoss !== undefined);
-        const fix = o.stopLoss !== undefined ? `Use a stop ${below} ${A}${shared ? ' here and on your working entries' : ''}.` : `Change their stop to one ${below} ${A}.`;
-        return `Strict risk: ${whose} at ${formatTick(S)} is at or ${long ? 'above' : 'below'} the trade's average entry of ${A}, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. ${fix}`;
-      }
+      if (risk.unmeasurable) return `Strict risk: ${this.unmeasurableText(t, o.stopLoss)}`;
       if (risk.pct > L + EPS) {
         if (!risk.held && !risk.working) return `Strict risk: this trade risks ${over(risk.pct, L, 2)}% (limit ${L}%).`;
         const parts = [risk.held ? `the ${shares(risk.held)} you hold` : '', risk.working ? `${shares(risk.working)} in working entries` : ''].filter(Boolean).join(' and ');
@@ -749,7 +759,10 @@ export class SimBroker {
       if ((fill1 - one.stop) * dir <= EPS) {
         return { ok: false as const, error: joined ? `This order is at or past the trade's first stop at ${S}, so it has no risk budget to size from.` : 'The stop loss is on the wrong side of the entry.' };
       }
-      if (one.unmeasurable) return { ok: false as const, error: `The trade's average entry is at or past its first stop at ${S}, so its risk can't be measured.` };
+      if (one.unmeasurable) {
+        const why = b.unmeasurableText(b.tradeOf(req.symbol, req.action, undefined, req.stopLoss), req.stopLoss);
+        return { ok: false as const, error: why[0].toUpperCase() + why.slice(1) };
+      }
       if (one.pct > riskPct + EPS) {
         return {
           ok: false as const,
@@ -966,12 +979,18 @@ export class SimBroker {
   modify(orderId: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }): { ok: boolean; error?: string } {
     const o = this.openOrderById(orderId);
     if (!o) return { ok: false, error: 'Order is not open.' };
+    // A refused change is logged, as a refused order is, so its reason can be read again later.
+    const refuse = (error: string) => {
+      this.log('rejected', `Change to ${describe(o)} refused: ${error}`, o.id);
+      this.touch();
+      return { ok: false, error };
+    };
     if (changes.quantity !== undefined && (changes.quantity < o.filledQty + 1 || Math.floor(changes.quantity) !== changes.quantity)) {
-      return { ok: false, error: 'Quantity must be a whole number above the filled quantity.' };
+      return refuse('Quantity must be a whole number above the filled quantity.');
     }
-    if (changes.limitPrice !== undefined && (!(changes.limitPrice > 0) || (o.type !== 'limit' && o.type !== 'stop_limit'))) return { ok: false, error: 'Invalid limit price.' };
-    if (changes.stopPrice !== undefined && (!(changes.stopPrice > 0) || (o.type !== 'stop' && o.type !== 'stop_limit'))) return { ok: false, error: 'Invalid stop price.' };
-    if (changes.stopPrice !== undefined && o.triggered) return { ok: false, error: 'The stop has already triggered, so its price no longer applies.' };
+    if (changes.limitPrice !== undefined && (!(changes.limitPrice > 0) || (o.type !== 'limit' && o.type !== 'stop_limit'))) return refuse('Invalid limit price.');
+    if (changes.stopPrice !== undefined && (!(changes.stopPrice > 0) || (o.type !== 'stop' && o.type !== 'stop_limit'))) return refuse('Invalid stop price.');
+    if (changes.stopPrice !== undefined && o.triggered) return refuse('The stop has already triggered, so its price no longer applies.');
     const limitPrice = changes.limitPrice !== undefined ? roundToTick(changes.limitPrice) : o.limitPrice;
     const stopPrice = changes.stopPrice !== undefined ? roundToTick(changes.stopPrice) : o.stopPrice;
     // A changed entry is checked as if it were placed now: its stop loss and target against where it
@@ -985,12 +1004,12 @@ export class SimBroker {
         const px = this.entryPrice({ symbol: o.symbol, limitPrice, stopPrice });
         const next = { ...o, ...this.bracketLevels(o, px), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
         const { error, price } = this.openingCheck(next, o);
-        if (error) return { ok: false, error };
+        if (error) return refuse(error);
         o.quotedPrice = price;
       }
     } else if (stopPrice !== undefined && stopPrice !== o.stopPrice) {
       const violation = this.exitStopViolation(o.symbol, o.action, stopPrice, o.stopPrice);
-      if (violation) return { ok: false, error: violation };
+      if (violation) return refuse(violation);
     }
     o.limitPrice = limitPrice;
     o.stopPrice = stopPrice;
@@ -1564,6 +1583,11 @@ export class SimBroker {
     this.s.cash -= commission;
     this.s.realizedPnl += realizedGross - commission;
     this.s.commissionsPaid += commission;
+    // An exit inside a bar realises its loss: the daily limit holds what that moment comes to, as at a close.
+    if (b && !opening) {
+      const now = this.account().equity + b.offset + b.adj;
+      this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? now, now);
+    }
 
     // ---- order
     o.avgFillPrice = (o.avgFillPrice * o.filledQty + price * qty) / (o.filledQty + qty);

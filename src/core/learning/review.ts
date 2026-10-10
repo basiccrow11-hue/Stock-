@@ -337,6 +337,31 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     });
   }
 
+  /**
+   * Why the stop a later add brought sat past the trade's average entry: the shares bought before it were
+   * already past it (it locked in a gain), the add itself filled past it, or later adds moved the average.
+   */
+  const stopPastAverage = (S: number): string => {
+    const avgOf = (fs: Fill[]) => {
+      const n = fs.reduce((a, f) => a + f.quantity, 0);
+      return n > 0 ? fs.reduce((a, f) => a + f.price * f.quantity, 0) / n : undefined;
+    };
+    const entries = tripFills.filter((f): f is Fill => f?.action === 'buy' || f?.action === 'short');
+    const at = entries.findIndex((f) => f.orderId === stopOrder?.id);
+    const before = avgOf(at > 0 ? entries.slice(0, at) : []);
+    const add = avgOf(entries.filter((f) => f.orderId === stopOrder?.id));
+    const sign = long ? 1 : -1;
+    const lead = `Your stop at ${formatTick(S)} came with a later add`;
+    const end = "so the trade's risk cannot be measured in R.";
+    if (before !== undefined && (before - S) * sign <= 1e-9) {
+      return `${lead}, and it sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain on your earlier shares rather than capping a loss, ${end}`;
+    }
+    if (add !== undefined && (add - S) * sign <= 1e-9) {
+      return `${lead}, which filled at ${formatTick(add)}, already past it, and your average entry of ${formatTick(trip.avgEntry)} ended up past it too, ${end}`;
+    }
+    return `${lead}, and shares added after it took your average entry to ${formatTick(trip.avgEntry)}, past that stop, ${end}`;
+  };
+
   if (riskPerShare === null) {
     const worstText = `The worst point of the trade was ${money(mae.dollars)} against you${
       equityAtEntry > 0 ? ` (${((mae.dollars / equityAtEntry) * 100).toFixed(2)}% of the account)` : ''
@@ -345,11 +370,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       trip.initialStop === undefined
         ? { tone: 'bad', title: 'No stop loss', detail: `Your risk was undefined. ${worstText}` }
         : trip.stopFromAdd
-          ? {
-              tone: 'bad',
-              title: 'No stop on your first entry',
-              detail: `Your stop at ${formatTick(trip.initialStop)} came with a later add, and it sat past your average entry of ${formatTick(trip.avgEntry)}: it locked in a gain on your earlier shares rather than capping a loss, so the trade's risk cannot be measured in R. ${worstText}`,
-            }
+          ? { tone: 'bad', title: 'No stop on your first entry', detail: `${stopPastAverage(trip.initialStop)} ${worstText}` }
           : { tone: 'bad', title: 'Risk not measurable', detail: `Your entry filled past your stop at ${formatTick(trip.initialStop)}, so the trade's risk cannot be measured in R. ${worstText}` },
     );
   } else if (stopDistanceAtr !== null) {
@@ -478,12 +499,14 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         detail: `Once the replay has shown the ${AFTER_EXIT_WINDOW[input.timeframe].label} after your stop filled, this review adds whether price went on against you or came back your way.`,
       });
     } else if (afterExit) {
+      // Filled more than a quarter R past it, though not 'well past': say where.
+      const filledAt = past > 0.25 * riskPerShare + 1e-9 ? `, though it filled at ${formatTick(exitPx)}` : '';
       const where = fromAdd
-        ? `at ${theStop} (${formatTick(stopAt)}${moved ? `; placed at ${formatTick(origin)}` : ''}; your first stop was at ${formatTick(trip.initialStop!)})`
+        ? `at ${theStop} (${formatTick(stopAt)}${moved ? `; placed at ${formatTick(origin)}` : ''}; your first stop was at ${formatTick(trip.initialStop!)})${filledAt}`
         : moved
-          ? `at ${theStop} (${formatTick(stopAt)}; planned at ${formatTick(trip.initialStop!)})`
-          : past > 0.25 * riskPerShare + 1e-9
-            ? `at your stop at ${formatTick(stopAt)}, though it filled at ${formatTick(exitPx)}`
+          ? `at ${theStop} (${formatTick(stopAt)}; planned at ${formatTick(trip.initialStop!)})${filledAt}`
+          : filledAt
+            ? `at your stop at ${formatTick(stopAt)}${filledAt}`
             : 'where you planned';
       findings.push({
         tone: 'good',

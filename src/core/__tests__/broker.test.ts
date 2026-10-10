@@ -1537,3 +1537,39 @@ describe("the daily limit at the bar after a breach and with a bar's own entries
     expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 20, stopLoss: 49 }).ok).toBe(true);
   });
 });
+
+describe("the daily limit reached by a bar's own exits, and refused changes in the log", () => {
+  it('holds a limit a stop reached partway through a bar for the rest of the day, though the bar closes higher', () => {
+    const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 5, requireStopLoss: true, maxDailyLossPct: 1, maxPositionPctOfEquity: 400 };
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, marginMultiplier: 4, strictRisk } });
+    let t = et('2025-01-15', '09:30');
+    const next = (o: number, h: number, l: number, c: number) => {
+      broker.onBar(S, bar(t, o, h, l, c, 10_000_000));
+      t += 60;
+    };
+    next(50, 50, 50, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 48, tif: 'gtc' }).ok).toBe(true);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 49, tif: 'gtc' }).ok).toBe(true);
+    const dip = broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 48.8, quantity: 100, stopLoss: 48, tif: 'gtc' });
+    const breakout = broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 51.3, quantity: 100, stopLoss: 48, tif: 'gtc' });
+    expect(dip.ok && breakout.ok).toBe(true);
+    // The stop at 49 sells 1000 shares, 1% of the account down from the last close, before the dip add is reached.
+    next(50, 51, 48.7, 51);
+    expect(broker.state.orders.find((o) => o.id === dip.order!.id)).toMatchObject({ status: 'cancelled', conflict: true });
+    expect(broker.account().equity).toBeGreaterThanOrEqual(100_000);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 50.5, quantity: 100, stopLoss: 48 }).error).toMatch(/daily loss limit of 1% reached/);
+    next(51, 51.4, 50.9, 51.2);
+    expect(broker.state.orders.find((o) => o.id === breakout.order!.id)).toMatchObject({ status: 'cancelled', conflict: true });
+    expect(broker.position(S).quantity).toBe(1000);
+  });
+
+  it('logs a refused price change with its reason, as a refused order is', () => {
+    const { broker } = setup({}, 10_000, 50);
+    const o = broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 49, quantity: 10, stopLoss: 48, tif: 'gtc' }).order!;
+    const r = broker.modify(o.id, { limitPrice: 47 });
+    expect(r.ok).toBe(false);
+    const last = broker.state.events.at(-1)!;
+    expect(last).toMatchObject({ kind: 'rejected', orderId: o.id });
+    expect(last.message).toBe(`Change to BUY 10 ${S} LMT 49.00 refused: ${r.error}`);
+  });
+});

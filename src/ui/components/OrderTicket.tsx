@@ -57,9 +57,10 @@ export function OrderTicket() {
   const [ext, setExt] = useState(false);
   const [tag, setTag] = useState('');
   const [riskPct, setRiskPct] = useState(String(rules.maxRiskPctPerTrade));
-  const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; n: number } | null>(null);
+  /** The last submit's outcome, or Size by risk's refusal (`sizing`). */
+  const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; sizing?: boolean; n: number } | null>(null);
   const resultSeq = useRef(0);
-  const setResult = (r: { tone: 'error' | 'success'; text: string } | null) => setResultState(r && { ...r, n: ++resultSeq.current });
+  const setResult = (r: { tone: 'error' | 'success'; text: string; sizing?: boolean } | null) => setResultState(r && { ...r, n: ++resultSeq.current });
 
   const position = positions.find((p) => p.symbol === symbol);
   const last = quote?.last;
@@ -167,9 +168,11 @@ export function OrderTicket() {
     }
     const r = sizeByRisk(request(), asked);
     if (!r.ok) {
-      toast('warning', r.error);
+      // Shown with the ticket's other results, where it stays until the next one: a refusal can be long.
+      setResult({ tone: 'error', text: r.error, sizing: true });
       return;
     }
+    if (result?.sizing) setResult(null);
     const joined = r.risk.held + r.risk.working > 0;
     const peak = r.risk.peak ? `, counted at its largest size of ${r.risk.peak} shares as the trade review counts it` : '';
     const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}${peak}.` : '';

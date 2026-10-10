@@ -1181,4 +1181,61 @@ describe('stops past $1 on sub-dollar trades, pre-market entries, and planned R:
     });
     expect(text).toContain('Planned reward:risk is measured from 100.00, where the order was expected to fill.');
   });
+
+  it("says why a stop that came with an add sat past the average: a gain locked in, the add past its stop, or later adds", () => {
+    const why = (prep: (b: SimBroker, next: (o: number, h: number, l: number, c: number) => void) => void) =>
+      runTrade(ZERO_COST_CONFIG, '10:00', prep).review.findings.find((f) => f.title === 'No stop on your first entry')?.detail;
+    const flat = (next: (o: number, h: number, l: number, c: number) => void, p: number, n: number) => {
+      for (let i = 0; i < n; i++) next(p, p, p, p);
+    };
+    // Bought at 10 with no stop, added at 9.90 with a stop at 9.80 (sold on the way down), then 300 more at 9.60.
+    expect(
+      why((b, next) => {
+        flat(next, 10, 5);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, tif: 'gtc' });
+        flat(next, 9.9, 2);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 9.8, tif: 'gtc' });
+        flat(next, 9.6, 2);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 300, tif: 'gtc' });
+        flat(next, 9.7, 2);
+        b.closePosition('T');
+        flat(next, 9.7, 25);
+      }),
+    ).toMatch(/^Your stop at 9\.80 came with a later add, and shares added after it took your average entry to 9\.7\d, past that stop, so/);
+    // The add, a limit at 9.90 with its stop at 9.80, gaps to 9.50.
+    expect(
+      why((b, next) => {
+        flat(next, 10, 5);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, tif: 'gtc' });
+        b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 9.9, quantity: 100, stopLoss: 9.8, tif: 'gtc' });
+        flat(next, 9.5, 3);
+        b.closePosition('T');
+        flat(next, 9.5, 25);
+      }),
+    ).toMatch(/^Your stop at 9\.80 came with a later add, which filled at 9\.50, already past it, and your average entry of 9\.75 ended up past it too, so/);
+    // Bought at 9.50 with no stop; at 10.20 an add brings a stop at 9.90, above the first shares.
+    expect(
+      why((b, next) => {
+        flat(next, 9.5, 5);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 300, tif: 'gtc' });
+        flat(next, 10.2, 2);
+        b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 100, stopLoss: 9.9, tif: 'gtc' });
+        flat(next, 9.8, 2);
+        b.closePosition('T');
+        flat(next, 9.8, 25);
+      }),
+    ).toMatch(/^Your stop at 9\.90 came with a later add, and it sat past your average entry of 9\.68: it locked in a gain on your earlier shares/);
+  });
+
+  it('says where a moved stop filled when that was over a quarter R past it', () => {
+    const { text } = runTrade(DEFAULT_EXECUTION_CONFIG, '10:00', (b, next) => {
+      for (let i = 0; i < 20; i++) next(0.45, 0.45, 0.45, 0.45);
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 50_000, stopLoss: 0.438, tif: 'gtc' }).ok).toBe(true);
+      const stop = b.workingOrders('T').find((o) => o.type === 'stop')!;
+      expect(b.modify(stop.id, { stopPrice: 0.44 }).ok).toBe(true);
+      next(0.45, 0.45, 0.435, 0.436);
+      for (let i = 0; i < 25; i++) next(0.436, 0.436, 0.436, 0.436);
+    });
+    expect(text).toMatch(/Your loss was capped at your moved stop \(0\.4400; planned at 0\.4380\), though it filled at 0\.43\d\d\./);
+  });
 });

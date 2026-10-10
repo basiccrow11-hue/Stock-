@@ -42,8 +42,8 @@ export interface PerformanceStats {
  * when that is at or past the stop, the entry the stop came with (adds past the stop moved the
  * average); and when that is past it too (a gap through both the entry order and its stop), the
  * price the entry order was placed at, which is the risk that was planned. None when the trade opened
- * without a stop and the add that brought one left the average past it: the stop then locked in a
- * gain on the earlier shares rather than capping a loss.
+ * without a stop and its average sat past the stop a later add brought (the earlier shares were past
+ * it, the add filled past it, or shares added after it moved the average): R is never measured from an add.
  */
 export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;

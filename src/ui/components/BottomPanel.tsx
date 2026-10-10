@@ -1,5 +1,5 @@
 /** Bottom dock: positions, working orders, fills, closed trades, simulated news and the broker log. */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { blindDayLabel, cancelAllOrders, cancelOrder, closePosition, modifyOrder, setActiveSymbol, useTrading } from '../state/tradingStore';
 import { isOpen } from '../../core/broker/SimBroker';
 import type { Order } from '../../core/types';
@@ -166,6 +166,11 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
   const current = order[field];
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState<string>('');
+  /** Why the last change was refused: shown under the price until it changes or is edited again. */
+  const [error, setError] = useState<{ text: string; val: string } | null>(null);
+  const errorId = useId();
+  /** The box holds a price just refused, unchanged since: leaving the box must not send it again. */
+  const refused = useRef(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // Enter and Escape hand focus back to the price; leaving the box by clicking elsewhere does not.
@@ -180,6 +185,7 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       discard.current = true;
       setEditing(false);
       if (input && document.activeElement === input) input.closest('.price-legs')?.querySelector<HTMLButtonElement>('button.price-edit')?.focus();
+      setError(null);
       const now = order.type === 'stop_limit' ? `The order is now a limit at ${price(order.limitPrice)}.` : 'What is left of it fills at market.';
       toast('warning', `${order.symbol} stop triggered while you were editing it, so the change was not applied. ${now}`, 7000);
     }
@@ -190,65 +196,102 @@ function OrderPriceEditor({ order, field, done = false }: { order: Order; field:
       buttonRef.current?.focus();
     }
   }, [editing]);
+  // A refusal no longer applies once the price has changed some other way (a drag on the chart).
+  useEffect(() => setError(null), [current]);
   if (current === undefined) return <>—</>;
   const what = `${order.symbol} ${order.action} ${field === 'limitPrice' ? 'limit' : 'stop'} price`;
   // While the box is open, the effect above closes it first (dropping the typed value).
   if (done && !editing) return <span className="mono">{price(current)}</span>;
+  const refusal = error && (
+    <span id={errorId} className="price-error error small" role="alert">
+      {error.text}
+    </span>
+  );
   if (!editing)
     return (
-      <button
-        ref={buttonRef}
-        type="button"
-        className="price-edit mono"
-        title="Change price"
-        aria-label={`Change ${what}, now ${price(current)}`}
-        onClick={() => {
-          setVal(String(current));
-          discard.current = false;
-          setEditing(true);
-        }}
-      >
-        {price(current)}
-      </button>
+      <>
+        <button
+          ref={buttonRef}
+          type="button"
+          className="price-edit mono"
+          title="Change price"
+          aria-label={`Change ${what}, now ${price(current)}`}
+          aria-describedby={error ? errorId : undefined}
+          onClick={() => {
+            setVal(error?.val ?? String(current));
+            discard.current = false;
+            refused.current = false;
+            setEditing(true);
+          }}
+        >
+          {price(current)}
+        </button>
+        {refusal}
+      </>
     );
-  const commit = () => {
+  /**
+   * Saves the typed price and says whether the box closed. `stay`: after Enter, a refused price stays in
+   * the box so it can be corrected; leaving the box closes it, the reason staying under the price.
+   */
+  const commit = (stay: boolean): boolean => {
     const n = Number(val);
-    setEditing(false);
-    if (discard.current) return;
-    if (!Number.isFinite(n) || n <= 0 || n === current) return;
+    const close = () => {
+      setEditing(false);
+      return true;
+    };
+    if (discard.current) return close();
+    if (!Number.isFinite(n) || n <= 0 || n === current) {
+      setError(null);
+      return close();
+    }
+    if (refused.current) return stay ? false : close();
     const r = modifyOrder(order.id, { [field]: n });
-    if (!r.ok) toast('error', r.error ?? 'Modify failed');
+    if (r.ok) {
+      setError(null);
+      return close();
+    }
+    setError({ text: r.error ?? 'Modify failed', val });
+    refused.current = true;
+    return stay ? false : close();
   };
   return (
-    <input
-      ref={inputRef}
-      autoFocus
-      type="number"
-      // The price tick, as on the ticket: a hundredth of a cent below $1.
-      step={current !== undefined && current < 1 ? 0.0001 : 0.01}
-      value={val}
-      aria-label={`New ${what}`}
-      style={{ width: 90 }}
-      onChange={(e) => setVal(e.target.value)}
-      onBlur={(e) => {
-        // A dialog that opened by itself (a trade review, a milestone) took focus mid-edit: keep the box
-        // and what was typed, unsaved. The dialog gives focus back to it when it closes.
-        if (modalOpen() || (e.relatedTarget as HTMLElement | null)?.closest('[role="dialog"]')) return;
-        commit();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          // Without this the same Enter would also press the price button that takes focus back.
-          e.preventDefault();
-          refocus.current = true;
-          commit();
-        }
-        if (e.key === 'Escape') {
-          refocus.current = true;
-          setEditing(false);
-        }
-      }}
-    />
+    <>
+      <input
+        ref={inputRef}
+        autoFocus
+        type="number"
+        // The price tick, as on the ticket: a hundredth of a cent below $1.
+        step={current !== undefined && current < 1 ? 0.0001 : 0.01}
+        value={val}
+        aria-label={`New ${what}`}
+        aria-invalid={error && error.val === val ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+        style={{ width: 90 }}
+        onChange={(e) => {
+          refused.current = false;
+          setVal(e.target.value);
+        }}
+        onBlur={(e) => {
+          // A dialog that opened by itself (a trade review, a milestone) took focus mid-edit: keep the box
+          // and what was typed, unsaved. The dialog gives focus back to it when it closes.
+          if (modalOpen() || (e.relatedTarget as HTMLElement | null)?.closest('[role="dialog"]')) return;
+          commit(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            // Without this the same Enter would also press the price button that takes focus back.
+            e.preventDefault();
+            // Refused, the box stays open with focus in it; leaving it later must not pull focus back.
+            refocus.current = commit(true);
+          }
+          if (e.key === 'Escape') {
+            refocus.current = true;
+            setEditing(false);
+          }
+        }}
+      />
+      {refusal}
+    </>
   );
 }
 
