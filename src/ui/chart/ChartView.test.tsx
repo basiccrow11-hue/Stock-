@@ -62,6 +62,10 @@ const lw = vi.hoisted(() => {
       const r = this.getVisibleLogicalRange();
       return r ? ((i - r.from) * this.width()) / this.span : null;
     }
+    coordinateToLogical(x: number) {
+      const r = this.getVisibleLogicalRange();
+      return r ? r.from + (x * this.span) / this.width() : null;
+    }
   }
 
   class Series {
@@ -69,10 +73,13 @@ const lw = vi.hoisted(() => {
     removed = false;
     constructor(private chart: Chart) {}
     setData(d: Point[]) {
+      if (this.chart.cross) this.chart.crosshairRedone++;
       this.points = d.slice();
       this.chart.dataChanged();
     }
     update(p: Point, historical = false) {
+      // The library redoes a shown crosshair, with a hit test over every point, on each change.
+      if (this.chart.cross) this.chart.crosshairRedone++;
       const pts = this.points;
       const last = pts[pts.length - 1];
       if (last && p.time === last.time) pts[pts.length - 1] = p;
@@ -103,6 +110,15 @@ const lw = vi.hoisted(() => {
     ts = new TimeScale();
     panesList = [this.pane()];
     crosshair: ((p: unknown) => void)[] = [];
+    /** Where the crosshair is shown (none: hidden), and how often a series change made the library redo it. */
+    cross: { time: number; price: number } | null = null;
+    crosshairRedone = 0;
+    clearCrosshairPosition() {
+      this.cross = null;
+    }
+    setCrosshairPosition(price: number, time: number) {
+      this.cross = { time, price };
+    }
     pane() {
       return lenient({ getHeight: () => 400, getStretchFactor: () => 1, getHTMLElement: () => null });
     }
@@ -322,7 +338,7 @@ describe('the chart during a long replay', () => {
 });
 
 describe('the chart during fast play with the pointer on it', () => {
-  it('hands many new candles over in one setData per series, and draws what a fresh chart draws', async () => {
+  it('hides the crosshair while candles go over, puts it back under the pointer, and draws what a fresh chart draws', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings, DEFAULT_INDICATORS } = await import('../state/settingsStore');
     const { ChartView } = await import('./ChartView');
@@ -348,25 +364,27 @@ describe('the chart during fast play with the pointer on it', () => {
       document.body.appendChild(host);
       const r = createRoot(host);
       await act(async () => r.render(createElement(ChartView, { symbol: 'MSFT', timeframe: '1m' })));
-      return { chart: lw.charts.at(-1)!, root: r };
+      return { chart: lw.charts.at(-1)!, root: r, host };
     };
     const a = await render();
     const chart = a.chart;
     const main = chart.series[0];
     expect(chart.series.length).toBeGreaterThanOrEqual(8);
-    const calls = { update: 0, setData: 0 };
+    const calls = { update: 0 };
     for (const s of chart.series) {
       const update = s.update.bind(s);
-      const setData = s.setData.bind(s);
-      Object.assign(s, {
-        update: (...args: Parameters<typeof update>) => (calls.update++, update(...args)),
-        setData: (...args: Parameters<typeof setData>) => (calls.setData++, setData(...args)),
-      });
+      Object.assign(s, { update: (...args: Parameters<typeof update>) => (calls.update++, update(...args)) });
     }
+    /** The pointer rests at x = 300 on the price pane, or leaves the chart; the library shows or hides the crosshair. */
     const pointer = (on: boolean) => {
-      const k = main.points.length - 20;
-      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 } } : {})));
+      const k = Math.round(chart.ts.coordinateToLogical(300)!);
+      chart.cross = on ? { time: main.points[k].time, price: 100 } : null;
+      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 }, paneIndex: 0 } : {})));
     };
+    /** The candle under the pointer, and the legend's first row. */
+    const underPointer = () => main.points[Math.round(chart.ts.coordinateToLogical(300)!)] as unknown as { time: number; open: number; close: number };
+    const legend = () => a.host.querySelector('.chart-legend .legend-row')?.textContent ?? '';
+    const { price: fmtPrice } = await import('../services/format');
     let clock = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => clock);
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
@@ -377,29 +395,34 @@ describe('the chart during fast play with the pointer on it', () => {
       });
     const count = () => store.getBaseBars('MSFT').length;
 
-    // Pointer on the chart: a second of play brings a day of candles, in a few setData calls per series, not one update per candle.
+    // Pointer on the chart: a second of play brings a day of candles with the crosshair hidden, then
+    // puts it back on the candle now under the pointer, which the legend shows.
     pointer(true);
     act(() => store.play());
     let n = count();
     second();
     expect(count() - n).toBeGreaterThan(300);
-    expect(calls.update).toBeLessThan(3 * chart.series.length);
-    expect(calls.setData).toBeGreaterThanOrEqual(chart.series.length);
+    expect(calls.update).toBeGreaterThan(300 * chart.series.length);
+    expect(chart.crosshairRedone).toBe(0);
+    const c = underPointer();
+    expect(chart.cross).toEqual({ time: c.time, price: 100 });
+    expect(legend()).toContain(`O ${fmtPrice(c.open)}`);
+    expect(legend()).toContain(`C ${fmtPrice(c.close)}`);
 
-    // Pointer off the chart: updates, which cost little then.
+    // Pointer off the chart: nothing to hide or put back.
     pointer(false);
-    calls.update = calls.setData = 0;
+    calls.update = 0;
     n = count();
     second();
     const added = count() - n;
     expect(added).toBeGreaterThan(100);
-    expect(calls.setData).toBe(0);
     expect(calls.update).toBeGreaterThanOrEqual(added * chart.series.length);
+    expect(chart.cross).toBeNull();
 
     // Pointer on again, one candle at a time, into the next session (where VWAP's line breaks): still updates.
     act(() => store.pause());
     pointer(true);
-    calls.update = calls.setData = 0;
+    calls.update = 0;
     n = main.points.length;
     const day = () => exchangeDate(store.getBaseBars('MSFT').at(-1)!.time);
     const startDay = day();
@@ -411,8 +434,9 @@ describe('the chart during fast play with the pointer on it', () => {
     for (let i = 0; i < 2; i++, steps++) act(() => store.stepForward());
     expect(day()).not.toBe(startDay);
     await vi.waitFor(() => expect(main.points.length).toBe(n + steps));
-    expect(calls.setData).toBe(0);
     expect(calls.update).toBeGreaterThanOrEqual(steps * chart.series.length);
+    expect(chart.crosshairRedone).toBe(0);
+    expect(chart.cross?.time).toBe(underPointer().time);
 
     /** Every series holds what a chart drawn afresh holds, on the candles that one holds. */
     const matchesFresh = async () => {

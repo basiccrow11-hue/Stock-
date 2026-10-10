@@ -13,10 +13,9 @@ export function formatTick(price: number): string {
   return price >= 1 ? price.toFixed(2) : price.toFixed(4);
 }
 
-/** True when `price` written to the tick of `at` (an on-tick price, like a stop) shows as `at`. */
-export function sameAtTick(price: number, at: number): boolean {
-  const decimals = at >= 1 ? 2 : 4;
-  return price.toFixed(decimals) === at.toFixed(decimals);
+/** True when two prices, each rounded to its own tick (as they are shown), are the same price. */
+export function sameAtTick(a: number, b: number): boolean {
+  return Math.abs(roundToTick(a) - roundToTick(b)) < 1e-9;
 }
 
 export function clamp(v: number, lo: number, hi: number): number {

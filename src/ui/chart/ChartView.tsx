@@ -23,6 +23,8 @@ import {
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type ITextWatermarkPluginApi,
+  type Logical,
+  type MouseEventParams,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
@@ -68,6 +70,9 @@ export function blindChartShift(sessionId: string): number {
   return -(53 + ((h >>> 0) % 209)) * 7 * 86_400;
 }
 
+/** What the legend reads from a crosshair move. */
+type CrosshairParam = Pick<MouseEventParams<Time>, 'time' | 'logical' | 'point' | 'paneIndex'>;
+
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
@@ -78,8 +83,6 @@ const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height:
 const WINDOW = 2000;
 /** Scrolling to within this many candles of the oldest one handed over brings older ones. */
 const WINDOW_MARGIN = 300;
-/** With the pointer on the chart, more new or changed candles than this in one event go over with setData (see rebuildTail). */
-const BATCH_CANDLES = 2;
 /** Height of a legend row in pixels: past LEGEND_SHARE of the price pane, the legend flows compactly. */
 const LEGEND_ROW = 17;
 const LEGEND_SHARE = 0.4;
@@ -144,8 +147,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   timeframeRef.current = timeframe;
   /** Index in candlesRef of the candle under the crosshair, or null: the legend then shows the newest. */
   const hoverRef = useRef<number | null>(null);
-  /** The pointer is on the chart, so the crosshair is shown: see rebuildTail. */
-  const pointerOnRef = useRef(false);
+  /** Where the pointer is on the chart (in that pane's coordinates), or null when it is off it: see rebuildTail. */
+  const pointerRef = useRef<{ x: number; y: number; pane: number } | null>(null);
+  /** Follows the crosshair: the legend shows the candle under it. */
+  const onCrosshairRef = useRef<(param: CrosshairParam) => void>(() => undefined);
   /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
   const paneTopsRef = useRef<number[]>([]);
   const priceHeightRef = useRef(0);
@@ -200,8 +205,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     chart.panes()[0].setPreserveEmptyPane(true);
 
     // The legend follows the crosshair on its own: moving it never re-renders the chart.
-    chart.subscribeCrosshairMove((param) => {
-      pointerOnRef.current = param.point !== undefined;
+    const onCrosshair = (param: CrosshairParam) => {
+      pointerRef.current = param.point ? { x: param.point.x, y: param.point.y, pane: param.paneIndex ?? 0 } : null;
       const candles = candlesRef.current;
       let i = -1;
       if (param.time !== undefined && param.logical !== undefined) {
@@ -214,7 +219,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (hover === hoverRef.current) return;
       hoverRef.current = hover;
       emitLegend();
-    });
+    };
+    onCrosshairRef.current = onCrosshair;
+    chart.subscribeCrosshairMove(onCrosshair);
     chart.subscribeClick((param) => {
       const series = candleRef.current;
       if (!param.point || !series || !useTrading.getState().pickTarget) return;
@@ -740,11 +747,39 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     emitLegend();
   }
 
+  /**
+   * Puts the crosshair back under the pointer after rebuildTail hid it, as lightweight-charts would have
+   * put it, and shows the candle under it in the legend (setCrosshairPosition sends no crosshair event).
+   * Past the newest candle it stays hidden until the pointer moves, and the legend shows the newest.
+   */
+  function restoreCrosshair(p: { x: number; y: number; pane: number }): void {
+    const chart = chartRef.current;
+    const candles = candlesRef.current;
+    const start = windowStartRef.current;
+    const series = p.pane === 0 ? candleRef.current : indicatorsRef.current.find((ind) => ind.pane === p.pane)?.series[0];
+    const logical = chart?.timeScale().coordinateToLogical(p.x) ?? null;
+    const k = logical === null ? -1 : Math.max(0, Math.round(logical));
+    const price = series?.coordinateToPrice(p.y) ?? null;
+    const point = { x: p.x, y: p.y } as CrosshairParam['point'];
+    if (!chart || !series || k < 0 || start + k >= candles.length || price === null) {
+      onCrosshairRef.current({ point, paneIndex: p.pane });
+      return;
+    }
+    const time = ct(candles[start + k].time);
+    chart.setCrosshairPosition(price, time, series as never);
+    onCrosshairRef.current({ time, logical: k as Logical, point, paneIndex: p.pane });
+  }
+
   /** Re-aggregate from the bucket containing base index `from` and push updates. */
   function rebuildTail(from: number): void {
     const base = baseRef.current;
     const series = candleRef.current;
     if (!series || !base.length) return;
+    // While the pointer is on the chart, every change to a series makes lightweight-charts redo the
+    // crosshair, with a hit test over every point of every series: at fast play, per candle and series,
+    // that froze the page. The crosshair is hidden while the candles go over and put back once.
+    const pointer = pointerRef.current;
+    if (pointer) chartRef.current?.clearCrosshairPosition();
     const candleOf = (t: number) => candleFor(t, timeframe, baseTfRef.current);
     const key = candleOf(base[Math.min(from, base.length - 1)].time).key;
     let start = Math.min(from, base.length - 1);
@@ -758,27 +793,22 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     for (const c of aggregateBars(base.slice(start), timeframe, baseTfRef.current)) candles.push(c);
     computeIndicators(firstChanged);
     const first = Math.max(firstChanged, windowStartRef.current);
-    // While the pointer is on the chart, every series.update re-runs the crosshair, with a hit test
-    // over every point of every series: once per candle and series, fast play froze. Many candles at
-    // once (fast play) then go over in one setData per series. Otherwise update is the cheaper way.
-    if (pointerOnRef.current && candles.length - first > BATCH_CANDLES) setWindowData();
-    else {
-      for (let i = first; i < candles.length; i++) {
-        series.update(candlePoint(candles[i]) as never);
-        volumeRef.current?.update(volumePoint(candles[i]));
-      }
-      for (const ind of indicatorsRef.current) {
-        if (!ind.stream) continue;
-        ind.series.forEach((s, k) => {
-          // A candle starting a new session changes how the one before it is drawn: update that in place.
-          if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
-          for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
-        });
-      }
+    for (let i = first; i < candles.length; i++) {
+      series.update(candlePoint(candles[i]) as never);
+      volumeRef.current?.update(volumePoint(candles[i]));
+    }
+    for (const ind of indicatorsRef.current) {
+      if (!ind.stream) continue;
+      ind.series.forEach((s, k) => {
+        // A candle starting a new session changes how the one before it is drawn: update that in place.
+        if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
+        for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
+      });
     }
     slideWindow();
     syncLastDirection();
     syncPercentBase();
+    if (pointer && pointerRef.current === pointer) restoreCrosshair(pointer);
     emitLegend();
   }
 

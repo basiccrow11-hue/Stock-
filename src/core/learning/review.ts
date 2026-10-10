@@ -544,6 +544,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const beyond = past - halfSpread;
     return { past, beyond, slipped: beyond >= 2 * (px >= 1 ? 0.01 : 0.0001) - 1e-9 };
   };
+  /** Why the closing stop could fill past its price. */
+  const stopFillNote = () =>
+    main!.order.type === 'stop_limit'
+      ? `A stop-limit becomes a limit order at ${formatTick(main!.order.limitPrice!)} when price reaches its stop and fills at any price up to that limit, which can be well past the stop after a gap.`
+      : 'A stop turns into a market order when price reaches it and fills at the next price available, which can be far away after a gap or for a large order in a thin bar.';
   if (exitReason === 'stop_loss' && riskPerShare && stopAt !== undefined && exitPx !== undefined) {
     const inR = (px: number) => ((px - trip.avgEntry) * dir) / riskPerShare;
     const fmtR = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`;
@@ -606,11 +611,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         title: 'Stop filled well past its price',
         detail: `Your stop at ${formatTick(stopAt)} filled at ${formatTick(exitPx)}, ${dist(past)} past it, so this exit was ${fmtR(inR(exitPx))} per share instead of ${
           moved || fromAdd ? `the ${fmtR(inR(stopAt))} ${theStop} allowed` : `the planned ${fmtR(-1)}`
-        }. ${
-          main!.order.type === 'stop_limit'
-            ? `A stop-limit becomes a limit order at ${formatTick(main!.order.limitPrice!)} when price reaches its stop and fills at any price up to that limit, which can be well past the stop after a gap.`
-            : 'A stop turns into a market order when price reaches it and fills at the next price available, which can be far away after a gap or for a large order in a thin bar.'
-        }`,
+        }. ${stopFillNote()}`,
       });
     } else if ((widened || firstWidened) && inR(stopAt) < -1 - 1e-9) {
       const planned = widened && fromAdd && inR(origin) < -1 - 1e-9 ? `the ${fmtR(inR(origin))} where it was placed (your first stop planned ${fmtR(-1)})` : `the planned ${fmtR(-1)}`;
@@ -665,10 +666,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   } else if (exitReason === 'stop_loss' && riskPerShare === null && stopAt !== undefined && exitPx !== undefined && stopSlip(stopAt, exitPx).slipped) {
     // With no R to measure it in (a breakeven stop, say), what the fill past the stop cost is said in dollars.
     const { past } = stopSlip(stopAt, exitPx);
+    const placed = input.fills.find((f) => f.orderId === main!.order.id && trip.fills.includes(f.id))?.at === 'placed';
     findings.push({
       tone: 'neutral',
       title: 'Stop filled past its price',
-      detail: `Your stop at ${formatTick(stopAt)} filled at ${formatTick(exitPx)}, ${dist(past)} past it, which cost ${money(past * main!.qty)} on the ${main!.qty} shares it closed. A stop turns into a market order when price reaches it and fills at the next price available.`,
+      detail: placed
+        ? `Your stop at ${formatTick(stopAt)} was already past the market when you placed or changed it, so it filled at once at ${formatTick(exitPx)}, ${dist(past)} past its price.`
+        : `Your stop at ${formatTick(stopAt)} filled at ${formatTick(exitPx)}, ${dist(past)} past it, which cost ${money(past * main!.qty)} on the ${main!.qty} shares it closed. ${stopFillNote()}`,
     });
   }
 
