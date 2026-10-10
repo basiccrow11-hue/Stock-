@@ -76,7 +76,8 @@ export const CHALLENGES: ChallengeDefinition[] = [
     setup: { startingBalance: 25_000, mode: 'replay' },
     requiresSessionEnd: true,
     evaluate(ctx) {
-      const minEq = Math.min(ctx.startingBalance, ...ctx.equityCurve.map((p) => p.equity));
+      // A loop, not a spread: a long replay's curve has more points than a call can take as arguments.
+      const minEq = ctx.equityCurve.reduce((m, p) => Math.min(m, p.equity), ctx.startingBalance);
       const ddPct = ((ctx.startingBalance - minEq) / ctx.startingBalance) * 100;
       if (ddPct >= 5) return { status: 'failed', progress: 0, detail: `Equity fell ${ddPct.toFixed(2)}% below the start.` };
       const closed = ctx.trips.filter((t) => t.closed).length;

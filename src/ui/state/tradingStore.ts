@@ -474,16 +474,23 @@ function evaluateActiveChallenge(): void {
   const def = CHALLENGES.find((c) => c.id === active.challengeId);
   if (!def) return;
   const st = b.state;
-  const result = evaluateChallenge(def, {
-    trips: st.roundTrips,
-    fills: st.fills,
-    equityCurve: st.equityCurve,
-    startingBalance: st.startingBalance,
-    equity: b.account().equity,
-    sessionFinished: eng.replay?.finished ?? false,
-    rewound: (eng.replay?.rewinds ?? 0) > 0,
-    rules: getSettings().rules,
-  });
+  let result: ReturnType<typeof evaluateChallenge>;
+  try {
+    result = evaluateChallenge(def, {
+      trips: st.roundTrips,
+      fills: st.fills,
+      equityCurve: st.equityCurve,
+      startingBalance: st.startingBalance,
+      equity: b.account().equity,
+      sessionFinished: eng.replay?.finished ?? false,
+      rewound: (eng.replay?.rewinds ?? 0) > 0,
+      rules: getSettings().rules,
+    });
+  } catch (e) {
+    // Scoring a challenge must never stop trading or journaling: its last result stays until the next try.
+    console.error(`Challenge ${def.id} could not be evaluated`, e);
+    return;
+  }
   const prev = active.result.status;
   useChallenges.getState().updateActive(result);
   if (prev === 'in_progress' && result.status !== 'in_progress') {

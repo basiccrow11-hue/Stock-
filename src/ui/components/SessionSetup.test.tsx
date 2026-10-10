@@ -69,3 +69,22 @@ describe('the new replay form and blind replays', () => {
     await store.endSession();
   });
 });
+
+describe('the replay form for a challenge', () => {
+  it('starts a one-day challenge as one day, whatever the last replay was', async () => {
+    const { useSettings } = await import('../state/settingsStore');
+    const { SessionSetup } = await import('./SessionSetup');
+    useSettings.getState().updateReplay({ date: '2024-03-12', endDate: '2024-09-30', multiDay: true, blind: false });
+    const multi = () => [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Multi-day replay'))!.querySelector('input')!;
+    for (const [id, expected] of [['day-max-dd-5', false], ['grow-20-1pct', true]] as const) {
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const root = createRoot(host);
+      await act(async () => root.render(createElement(SessionSetup, { mode: 'replay', onClose: () => undefined, presetChallenge: id })));
+      expect(multi().checked).toBe(expected);
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+});
+

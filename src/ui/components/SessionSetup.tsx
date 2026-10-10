@@ -103,7 +103,8 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     const def = CHALLENGES.find((c) => c.id === challengeId);
     if (def) {
       setBalance(def.setup.startingBalance);
-      if (def.setup.multiDay) setMultiDay(true);
+      // A one-day challenge starts as one day, whatever the last replay was; the user can still change it.
+      if (def.setup.mode === 'replay') setMultiDay(!!def.setup.multiDay);
     }
   }, [challengeId]);
 

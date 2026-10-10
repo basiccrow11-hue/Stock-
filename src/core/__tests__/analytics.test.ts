@@ -1255,3 +1255,14 @@ describe('stops past $1 on sub-dollar trades, pre-market entries, and planned R:
     expect(text).toMatch(/Your loss was capped at your moved stop \(0\.4400; planned at 0\.4380\), though it filled at 0\.43\d\d\./);
   });
 });
+
+describe('challenges over a long replay', () => {
+  it("scores the day's drawdown challenge over more equity points than a call can take as arguments", () => {
+    const c = CHALLENGES.find((x) => x.id === 'day-max-dd-5')!;
+    const t0 = et('2025-01-15', '04:00');
+    const equityCurve = Array.from({ length: 200_000 }, (_, i) => ({ time: t0 + 60 * i, equity: i === 150_000 ? 23_500 : 25_000 }));
+    const result = evaluateChallenge(c, { trips: [], fills: [], equityCurve, startingBalance: 25_000, equity: 25_000, sessionFinished: false, rewound: false, rules: DEFAULT_TRADING_RULES });
+    expect(result).toMatchObject({ status: 'failed', detail: 'Equity fell 6.00% below the start.' });
+  });
+});
+

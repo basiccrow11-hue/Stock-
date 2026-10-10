@@ -1660,7 +1660,56 @@ describe("Size by risk on a trade whose risk can't be measured, with Strict Mode
     expect(w.ok).toBe(true);
     expect(broker.sizeByRisk({ symbol: S, action: 'buy', type: 'limit', limitPrice: 54.5, stopLoss: 53 }, 1)).toEqual({
       ok: false,
-      error: `The stop on your working BUY 50 ${S} LMT 54.00 at 51.00 is at or above the trade's average entry of 50.00, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. Change its stop to one below 50.00.`,
+      error: `The stop on your working BUY 50 ${S} LMT 54.00 at 51.00 is at or above the trade's average entry of 50.00, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. Cancel it and place it again with a stop below 50.00.`,
     });
+  });
+});
+
+describe('a bar whose volume cap is used up, an entry cancelled as a conflict, and a partly filled order moved', () => {
+  it("fires a stop the path crosses once the bar's volume cap is used up, and fills it from the next bar", () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const t0 = et('2025-01-15', '10:00');
+    // A thin stock: 2,000 shares a minute, so the cap is 500.
+    broker.onBar(S, bar(t0, 20, 20.02, 19.98, 20, 2000));
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1000, stopLoss: 19.8, tif: 'gtc' }).ok).toBe(true);
+    expect(broker.position(S).quantity).toBe(500);
+    // The entry's last 500 use the cap at the open; the dip to 19.60 then crosses the stop at 19.80.
+    broker.onBar(S, bar(t0 + 60, 20, 20.02, 19.6, 19.98, 2000));
+    const stop = broker.workingOrders(S).find((o) => o.type === 'stop')!;
+    expect(stop.triggered).toBe(true);
+    expect(broker.position(S).quantity).toBe(1000);
+    for (let i = 2; i < 4; i++) broker.onBar(S, bar(t0 + 60 * i, 19.98, 20.05, 19.95, 20, 2000));
+    expect(broker.position(S).quantity).toBe(0);
+  });
+
+  it('counts the moment a two-sided entry is reached and cancelled toward the daily limit', () => {
+    const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 3, requireStopLoss: true, maxDailyLossPct: 1, maxPositionPctOfEquity: 400 };
+    const broker = new SimBroker({ startingBalance: 20_000, config: { ...ZERO_COST_CONFIG, strictRisk } });
+    const t0 = et('2025-01-15', '09:30');
+    broker.onBar('A', bar(t0, 50, 50.05, 49.95, 50));
+    expect(broker.submit({ symbol: 'A', action: 'buy', type: 'stop', stopPrice: 50.1, quantity: 400, stopLoss: 49, tif: 'day' }).ok).toBe(true);
+    const short = broker.submit({ symbol: 'A', action: 'short', type: 'stop', stopPrice: 49.5, quantity: 100, stopLoss: 50.5, tif: 'day' });
+    expect(short.ok).toBe(true);
+    broker.onBar('A', bar(t0 + 60, 50, 50.2, 50, 50.15)); // long 400 from 50.10
+    // At 49.50, where the short entry is reached (and cancelled: you are long), the account is 1.2% down.
+    broker.onBar('A', bar(t0 + 120, 50.15, 50.15, 49.5, 50));
+    expect(broker.state.orders.find((o) => o.id === short.order!.id)).toMatchObject({ status: 'cancelled', conflict: true });
+    broker.onBar('A', bar(t0 + 180, 50, 50.05, 49.95, 50));
+    expect(broker.submit({ symbol: 'A', action: 'buy', type: 'limit', limitPrice: 49.9, quantity: 10, stopLoss: 49, tif: 'day' }).error).toMatch(/daily loss limit of 1% reached/);
+  });
+
+  it('fills a partly filled order moved through the market at once, as far as the last bar allows', () => {
+    const broker = new SimBroker({ startingBalance: 100_000, config: DEFAULT_EXECUTION_CONFIG });
+    const t0 = et('2025-01-15', '10:00');
+    for (let i = 0; i < 4; i++) broker.onBar(S, bar(t0 + 60 * i, 20, 20.05, 19.95, 20, 4000));
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 3000, tif: 'gtc' }).ok).toBe(true);
+    for (let i = 4; i < 8; i++) broker.onBar(S, bar(t0 + 60 * i, 20, 20.05, 19.95, 20, 4000));
+    expect(broker.position(S).quantity).toBe(3000);
+    const tp = broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 20.1, quantity: 3000, tif: 'gtc' }).order!;
+    broker.onBar(S, bar(t0 + 480, 20.05, 20.15, 20, 20, 4000)); // touches 20.10: the cap sells 1,000
+    broker.onBar(S, bar(t0 + 540, 20, 20, 19.8, 19.8, 4000));
+    expect(broker.state.orders.find((o) => o.id === tp.id)).toMatchObject({ status: 'partially_filled', filledQty: 1000 });
+    expect(broker.modify(tp.id, { limitPrice: 19.7 }).ok).toBe(true);
+    expect(broker.position(S).quantity).toBe(1000);
   });
 });

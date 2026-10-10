@@ -557,13 +557,13 @@ export class SimBroker {
     let fix: string;
     if (at(stopLoss)) {
       whose = "this order's stop";
-      fix = `Use a stop ${below} ${A}${theirs.length ? ' here and on your working entries' : ''}.`;
+      fix = `Use a stop ${below} ${A}${theirs.length ? `, and cancel your working ${theirs.length === 1 ? 'entry' : 'entries'} with that stop and place ${theirs.length === 1 ? 'it' : 'them'} again with one` : ''}.`;
     } else if (theirs.length === 1) {
       whose = `the stop on your working ${describe(theirs[0].order)}`;
-      fix = `Change its stop to one ${below} ${A}.`;
+      fix = `Cancel it and place it again with a stop ${below} ${A}.`;
     } else {
       whose = 'the stop your working entries share';
-      fix = `Change their stop to one ${below} ${A}.`;
+      fix = `Cancel them and place them again with a stop ${below} ${A}.`;
     }
     return `${whose} at ${S} is at or ${long ? 'above' : 'below'} the trade's average entry of ${A}, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. ${fix}`;
   }
@@ -1049,7 +1049,8 @@ export class SimBroker {
     o.updatedAt = this.s.clock;
     o.activeFrom = this.s.clock;
     this.log('info', `${describe(o)} modified`, o.id);
-    if (this.cfg.marketOrderFill === 'last_price' && o.status === 'working') this.tryImmediate(o);
+    // Moved through the market, it fills at once as far as the last bar's volume cap allows, partly filled or not.
+    if (this.cfg.marketOrderFill === 'last_price' && (o.status === 'working' || o.status === 'partially_filled')) this.tryImmediate(o);
     this.touch();
     return { ok: true };
   }
@@ -1308,13 +1309,15 @@ export class SimBroker {
     reach(path[0]);
 
     let seg = 0;
-    for (; seg < path.length - 1 && capacity > 0; seg++) {
+    // The whole path is walked even once the volume cap is used up: nothing more fills in this bar, but
+    // a stop it crosses still fires and an order it reaches counts as reached (see execute).
+    for (; seg < path.length - 1; seg++) {
       let pos = path[seg];
       const end = path[seg + 1];
       const skip = new Set<string>();
       // Orders that start later in the bar sit this part of the path out.
       for (const [id, f] of startsAt) if (f > points[seg].f) skip.add(id);
-      for (let guard = 0; guard < 200 && capacity > 0; guard++) {
+      for (let guard = 0; guard < 200; guard++) {
         const trig = this.nextTrigger(symbol, pos, end, session, skip);
         if (!trig) break;
         pos = trig.level;
@@ -1333,8 +1336,6 @@ export class SimBroker {
       }
       reach(end);
     }
-    // Out of capacity: no more fills this bar, but price still travels the rest of the path.
-    for (let k = seg + 1; k < path.length; k++) reach(path[k]);
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };
@@ -1490,6 +1491,17 @@ export class SimBroker {
   private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>, at: Fill['at'], knownAt: UnixSeconds): number {
     const side = actionSide(o.action);
     const pos = this.position(o.symbol);
+    // Strict's daily limit counts every moment one of the orders is reached.
+    this.noteDayLow(x);
+
+    // With the bar's volume cap used up nothing more trades in it, but a stop the path crosses still
+    // fires: a stop is a market order from then on, a stop-limit a limit, filled from the next bar.
+    if (capacity <= 0) {
+      if (o.type === 'stop_limit' && !o.triggered) return this.fireStopLimit(o, x, time);
+      if (o.type === 'stop') o.triggered = true;
+      skip.add(o.id);
+      return 0;
+    }
 
     // Buy and Short only open or add, as at submit. One placed while flat can meet a position opened
     // the other way since (two-sided entries around a range); it is cancelled, not turned into an exit.
@@ -1501,19 +1513,13 @@ export class SimBroker {
     }
 
     // Under Strict Mode, once the day's loss reaches its limit an entry is cancelled rather than filled.
-    this.noteDayLow(x);
     if (isOpeningAction(o.action) && this.cfg.strictRisk.enabled && this.dailyLimitReached(x)) {
       this.autoCancel(o, time, `Strict Mode: the ${this.cfg.strictRisk.maxDailyLossPct}% daily loss limit was reached.`, "Strict Mode's daily loss limit was reached");
       skip.add(o.id);
       return 0;
     }
 
-    if (o.type === 'stop_limit' && !o.triggered) {
-      o.triggered = true;
-      o.updatedAt = time;
-      this.log('triggered', `${describe(o)} triggered at ${formatTick(x)}; now a limit at ${formatTick(o.limitPrice!)}`, o.id);
-      return 0; // the limit leg is re-evaluated from this point on the path
-    }
+    if (o.type === 'stop_limit' && !o.triggered) return this.fireStopLimit(o, x, time);
     if (o.type === 'stop') o.triggered = true;
 
     // Exits can never exceed the current position (protects against orphaned exit orders).
@@ -1557,6 +1563,14 @@ export class SimBroker {
     this.noteDayLow(x);
     if (isOpen(o)) skip.add(o.id); // partially filled: capacity exhausted for this bar
     return qty;
+  }
+
+  /** A stop-limit's stop fired at path price `x`: it is a limit from now on, re-evaluated from this point on the path. */
+  private fireStopLimit(o: Order, x: number, time: UnixSeconds): number {
+    o.triggered = true;
+    o.updatedAt = time;
+    this.log('triggered', `${describe(o)} triggered at ${formatTick(x)}; now a limit at ${formatTick(o.limitPrice!)}`, o.id);
+    return 0;
   }
 
   /**

@@ -300,8 +300,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const whole = input.now === undefined || input.now >= until;
     if (!whole && !input.ended) afterExitUntil = until;
     else if (post.length) {
-      const hi = Math.max(...post.map((b) => b.high));
-      const lo = Math.min(...post.map((b) => b.low));
+      const hi = post.reduce((m, b) => Math.max(m, b.high), -Infinity);
+      const lo = post.reduce((m, b) => Math.min(m, b.low), Infinity);
       afterExit = {
         barsObserved: post.length,
         span: whole ? window.label : `${post.length} bar${post.length === 1 ? '' : 's'} the replay showed`,
