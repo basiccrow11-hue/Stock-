@@ -10,7 +10,7 @@ import type { Bar, EquityPoint, Fill, Order, RoundTrip, Timeframe } from '../typ
 import { aggregateBars } from '../data/aggregate';
 import { atr } from '../indicators/indicators';
 import { entryPastStop, entryPastTarget, equityBeforeEntry, initialRiskPerShare, plannedRR, plannedRRGap, rMultiple, riskBasis, type RRGap } from '../analytics/stats';
-import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, REGULAR_OPEN } from '../time';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, REGULAR_CLOSE, REGULAR_OPEN } from '../time';
 import { formatTick } from '../util/math';
 import { pctAgainst } from '../risk/risk';
 
@@ -385,11 +385,11 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const past = (stopAt - exitPx) * dir;
     const mainFills = input.fills.filter((f) => f.orderId === main!.order.id && trip.fills.includes(f.id));
     const halfSpread = mainFills.reduce((a, f) => a + f.spreadCost, 0) / Math.max(1, mainFills.reduce((a, f) => a + f.quantity, 0));
-    // A fill at $1 or more is rounded to the cent, which on a sub-dollar trade is many of its ticks: that
-    // rounding is not the fill going past the stop either.
+    // At least two ticks of the price it filled at, so that rounding to the tick alone is not the fill
+    // going past the stop: a cent at $1 or more (many of a sub-dollar trade's ticks), else 0.0001.
     const fillTick = exitPx >= 1 ? 0.01 : 0.0001;
-    const beyond = past - halfSpread - (fillTick > tick ? fillTick : 0);
-    const filledPast = beyond >= 2 * Math.max(tick, fillTick) - 1e-9 && beyond > 0.25 * riskPerShare;
+    const beyond = past - halfSpread;
+    const filledPast = beyond >= 2 * fillTick - 1e-9 && beyond > 0.25 * riskPerShare;
     // The closing stop is judged by its own history: the stop an add brought with it (its own bracket)
     // starts at that add's stop loss, any other at the first stop; a price other than its start is the
     // user's move.
@@ -482,7 +482,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         ? `at ${theStop} (${formatTick(stopAt)}${moved ? `; placed at ${formatTick(origin)}` : ''}; your first stop was at ${formatTick(trip.initialStop!)})`
         : moved
           ? `at ${theStop} (${formatTick(stopAt)}; planned at ${formatTick(trip.initialStop!)})`
-          : 'where you planned';
+          : past > 0.25 * riskPerShare + 1e-9
+            ? `at your stop at ${formatTick(stopAt)}, though it filled at ${formatTick(exitPx)}`
+            : 'where you planned';
       findings.push({
         tone: 'good',
         title: 'Stop did its job',
@@ -494,13 +496,20 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   }
 
   if (pastTarget) {
-    const how = entryPast(targetOrder, trip.targetPlanned ?? trip.plannedEntry, trip.targetEntry ?? bracketEntry, 'target', trip.initialTarget!);
-    // Planned reward:risk falls back to the order's own price when the entry R uses is past the target too.
+    const planned = trip.targetPlanned ?? trip.plannedEntry;
+    const how = entryPast(targetOrder, planned, trip.targetEntry ?? bracketEntry, 'target', trip.initialTarget!);
+    // Planned reward:risk falls back to where the order was expected to fill when the entry R uses is past the target too.
     const fromPlan = rr !== null && basis !== null && (trip.initialTarget! - basis.entry) * dir <= 0;
+    const plannedFrom =
+      targetOrder?.type === 'market'
+        ? 'the price when you placed the order'
+        : expectedElsewhere(targetOrder, planned)
+          ? `${formatTick(planned!)}, where the order was expected to fill`
+          : 'the price you placed the order at';
     findings.push({
       tone: 'neutral',
       title: 'Entry filled past your target',
-      detail: `${how.text} The trade then closed at ${(trip.avgExit !== undefined ? formatTick(trip.avgExit) : '—')}: ${signed(trip.pnl)} after costs.${fromPlan ? ' Planned reward:risk is measured from the price you placed the order at.' : ''}${how.gap ? gapNote('target') : ''}`,
+      detail: `${how.text} The trade then closed at ${(trip.avgExit !== undefined ? formatTick(trip.avgExit) : '—')}: ${signed(trip.pnl)} after costs.${fromPlan ? ` Planned reward:risk is measured from ${plannedFrom}.` : ''}${how.gap ? gapNote('target') : ''}`,
     });
   } else if (targetDistance !== null) {
     // A limit that took profit short of the original target (or a target moved closer) did not reach it.
@@ -622,8 +631,10 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   const n = sameDay.findIndex((t) => t.id === trip.id) + 1;
   if (rules.maxTradesPerDay > 0) out.push({ rule: `Max ${rules.maxTradesPerDay} trades per day`, passed: n <= rules.maxTradesPerDay, detail: `Trade #${n} of the day` });
   if (rules.noTradesFirstMinutes > 0) {
-    const mins = exchangeMinuteOfDay(trip.entryTime) - REGULAR_OPEN;
-    out.push({ rule: `No entries in the first ${rules.noTradesFirstMinutes} min`, passed: mins >= rules.noTradesFirstMinutes || mins < 0, detail: `Entered ${mins} min after the open` });
+    const minute = exchangeMinuteOfDay(trip.entryTime);
+    const mins = minute - REGULAR_OPEN;
+    const detail = mins < 0 ? `Entered in the pre-market, ${-mins} min before the open` : minute >= REGULAR_CLOSE ? 'Entered after the close' : `Entered ${mins} min after the open`;
+    out.push({ rule: `No entries in the first ${rules.noTradesFirstMinutes} min`, passed: mins >= rules.noTradesFirstMinutes || mins < 0, detail });
   }
   if (rules.maxDailyLossPct > 0) {
     // The day's P/L at entry as the account's Day P/L and Strict Mode count it: from the equity the day

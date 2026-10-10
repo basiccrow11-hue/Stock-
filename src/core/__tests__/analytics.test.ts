@@ -1113,3 +1113,72 @@ describe('a risk just over the limit', () => {
   });
 });
 
+
+describe('stops past $1 on sub-dollar trades, pre-market entries, and planned R:R from the expected fill', () => {
+  const runTrade = (cfg: typeof DEFAULT_EXECUTION_CONFIG, startAt: string, prep: (b: SimBroker, next: (o: number, h: number, l: number, c: number) => void) => void, rules = DEFAULT_TRADING_RULES) => {
+    const b = new SimBroker({ startingBalance: 100_000, config: cfg });
+    const t0 = et('2025-01-15', startAt);
+    const bars: Bar[] = [];
+    const next = (o: number, h: number, l: number, c: number) => {
+      const nb = bar(t0 + 60 * bars.length, o, h, l, c, 5_000_000);
+      bars.push(nb);
+      b.onBar('T', nb);
+    };
+    prep(b, next);
+    const st = b.state;
+    expect(st.roundTrips[0].closed).toBe(true);
+    const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules });
+    return { review, titles: review.findings.map((f) => f.title), text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+  };
+
+  it("calls a sub-dollar short's stop at $1.00 filled 3 cents past it well past, as on a $5 stock", () => {
+    for (const [p, stop] of [[0.98, 1], [4.98, 5]] as const) {
+      const { titles } = runTrade(DEFAULT_EXECUTION_CONFIG, '10:00', (b, next) => {
+        for (let i = 0; i < 20; i++) next(p, p, p, p);
+        expect(b.submit({ symbol: 'T', action: 'short', type: 'market', quantity: 10_000, stopLoss: stop, tif: 'gtc' }).ok).toBe(true);
+        for (let i = 0; i < 2; i++) next(p, p, p, p);
+        const o = +(stop + 0.02).toFixed(2);
+        for (let i = 0; i < 26; i++) next(o, o + 0.002, o - 0.002, o);
+      });
+      expect(titles).toContain('Stop filled well past its price');
+      expect(titles).not.toContain('Stop did its job');
+    }
+  });
+
+  it('calls a stop filled well past it by the ticks of the price it filled at, below $1 for a trade above it', () => {
+    const { titles } = runTrade(ZERO_COST_CONFIG, '10:00', (b, next) => {
+      for (let i = 0; i < 20; i++) next(1.03, 1.03, 1.03, 1.03);
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'market', quantity: 10_000, stopLoss: 1.01, tif: 'gtc' }).ok).toBe(true);
+      // Gaps to 0.9878: 2.2 cents, over a whole R, past the stop at 1.01.
+      for (let i = 0; i < 26; i++) next(0.9878, 0.9878, 0.9878, 0.9878);
+    });
+    expect(titles).toContain('Stop filled well past its price');
+  });
+
+  it('says a pre-market entry came before the open in the first-minutes rule', () => {
+    const { review } = runTrade(
+      DEFAULT_EXECUTION_CONFIG,
+      '08:00',
+      (b, next) => {
+        for (let i = 0; i < 20; i++) next(10, 10, 10, 10);
+        expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 10.05, extendedHours: true, quantity: 100, tif: 'gtc' }).ok).toBe(true);
+        for (let i = 0; i < 3; i++) next(10, 10, 10, 10);
+        expect(b.submit({ symbol: 'T', action: 'sell', type: 'limit', limitPrice: 9.95, extendedHours: true, quantity: 100, tif: 'gtc' }).ok).toBe(true);
+        for (let i = 0; i < 3; i++) next(10, 10, 10, 10);
+      },
+      { ...DEFAULT_TRADING_RULES, noTradesFirstMinutes: 15 },
+    );
+    expect(review.rules.find((r) => r.rule === 'No entries in the first 15 min')).toMatchObject({ passed: true, detail: 'Entered in the pre-market, 70 min before the open' });
+  });
+
+  it('measures planned R:R from where a limit already through the market was expected to fill, and says so', () => {
+    const { text } = runTrade(ZERO_COST_CONFIG, '09:00', (b, next) => {
+      for (let i = 0; i < 30; i++) next(100, 100, 100, 100);
+      // Placed in the pre-market for the open, above the last price: expected to fill near 100.
+      expect(b.submit({ symbol: 'T', action: 'buy', type: 'limit', limitPrice: 101, quantity: 100, stopLoss: 99, takeProfit: 100.5, tif: 'day' }).ok).toBe(true);
+      // The open gaps to 100.80, past the target.
+      for (let i = 0; i < 3; i++) next(100.8, 100.8, 100.8, 100.8);
+    });
+    expect(text).toContain('Planned reward:risk is measured from 100.00, where the order was expected to fill.');
+  });
+});

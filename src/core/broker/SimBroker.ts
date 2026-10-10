@@ -72,12 +72,11 @@ export interface BrokerState {
   sessionDate: string;
   dayStartEquity: number;
   /**
-   * The lowest equity since the session began at a moment every bar ending then had been processed
-   * (Strict Mode's daily limit holds once reached). The latest moment is read live, not from here.
+   * The lowest equity since the session began at a moment every bar ending then had been processed,
+   * taken as each such moment's bars begin (Strict Mode's daily limit holds once reached). The latest
+   * moment is read live, not from here.
    */
   dayLowEquity?: number;
-  /** The time of the session's first bar: equity points after it count toward dayLowEquity. */
-  dayStartTime?: UnixSeconds;
   /**
    * Equity when the bars ending at `time` began to be processed (the last moment every bar had closed):
    * what Strict Mode's daily limit is judged on while they fill, with each bar's own fills.
@@ -176,10 +175,13 @@ export class SimBroker {
    */
   private openFrom = 0;
   /**
-   * While onBar runs: the equity at the start of its step (stepStart) less the equity when this bar
-   * began, so the daily limit leaves out the bars processed before it at the same time. 0 otherwise.
+   * While onBar runs, what the daily limit adds to the account's equity to judge it as of this bar's
+   * own fills: `offset`, the step's starting equity (stepStart) less the equity when this bar began, so
+   * other symbols' bars processed before it at the same time are left out; and `adj`, which values the
+   * shares this bar opened (and still holds, `held`, signed) at what was paid rather than at the
+   * symbol's previous close. Undefined otherwise.
    */
-  private stepOffset = 0;
+  private bar?: { symbol: string; offset: number; held: number; adj: number };
 
   private liveOrders(): Order[] {
     const list = this.s.orders;
@@ -506,11 +508,13 @@ export class SimBroker {
    * Whether today's loss has reached Strict Mode's daily limit: now, or at any earlier moment since the
    * session began once every bar ending then had closed, so the limit holds until the next session
    * even if open trades recover. While a bar fills, "now" is the last such moment plus that bar's own
-   * fills: other symbols' bars ending at the same time, processed before it, are not counted yet.
+   * fills, with the shares they opened worth what was paid: other symbols' bars ending at the same
+   * time, processed before it, are not counted yet.
    */
   private dailyLimitReached(): boolean {
     const start = this.s.dayStartEquity;
-    const low = Math.min(this.account().equity + this.stepOffset, this.s.dayLowEquity ?? Infinity);
+    const now = this.account().equity + (this.bar ? this.bar.offset + this.bar.adj : 0);
+    const low = Math.min(now, this.s.dayLowEquity ?? Infinity);
     return start > 0 && (money(start - low) / start) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
   }
 
@@ -585,7 +589,13 @@ export class SimBroker {
       }
       const risk = this.tradeRiskOf({ symbol: sym, action: o.action, quantity: o.quantity, fillAt, stopLoss: o.stopLoss }, own)!;
       if (risk.unmeasurable) {
-        return `Strict risk: the trade's average entry is at or ${below} its first stop at ${formatTick(S)}, so its risk can't be measured. No adds to this trade.`;
+        if (t.fromTrip) return `Strict risk: the trade's average entry is at or ${below} its first stop at ${formatTick(S)}, so its risk can't be measured. No adds to this trade.`;
+        // No first stop yet: S is the one this order (and its working entries) would give the trade.
+        const A = formatTick(t.trip!.avgEntry);
+        const whose = o.stopLoss !== undefined ? "this order's stop" : 'the stop your working entries share';
+        const shared = o.stopLoss !== undefined && t.entries.some((e) => e.order.stopLoss !== undefined);
+        const fix = o.stopLoss !== undefined ? `Use a stop ${below} ${A}${shared ? ' here and on your working entries' : ''}.` : `Change their stop to one ${below} ${A}.`;
+        return `Strict risk: ${whose} at ${formatTick(S)} is at or ${long ? 'above' : 'below'} the trade's average entry of ${A}, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. ${fix}`;
       }
       if (risk.pct > L + EPS) {
         if (!risk.held && !risk.working) return `Strict risk: this trade risks ${over(risk.pct, L, 2)}% (limit ${L}%).`;
@@ -1161,7 +1171,6 @@ export class SimBroker {
     if (date !== this.s.sessionDate) {
       if (this.s.sessionDate) this.s.dayStartEquity = this.account().equity;
       this.s.dayLowEquity = undefined;
-      this.s.dayStartTime = barTime;
       this.s.sessionDate = date;
     }
     const session = marketSession(barTime);
@@ -1188,8 +1197,13 @@ export class SimBroker {
     const fillsBefore = this.s.fills.length;
     this.rollDay(bar.time);
     const end = bar.time + barSeconds;
-    if (this.s.stepStart?.time !== end) this.s.stepStart = { time: end, equity: this.account().equity };
-    this.stepOffset = this.s.stepStart.equity - this.account().equity;
+    const equity = this.account().equity;
+    if (this.s.stepStart?.time !== end) {
+      // The first bar ending at `end`: every bar ending earlier has closed, so the account really has this equity.
+      this.s.stepStart = { time: end, equity };
+      this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? equity, equity);
+    }
+    this.bar = { symbol, offset: this.s.stepStart.equity - equity, held: 0, adj: 0 };
     const session = marketSession(bar.time);
     // Pending orders become working once their session arrives.
     for (const o of this.liveOrders()) {
@@ -1273,7 +1287,7 @@ export class SimBroker {
     (this.s.barVolumeUsed ??= {})[symbol] = traded;
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
 
-    this.stepOffset = 0;
+    this.bar = undefined;
     this.recordEquity(bar.time + barSeconds);
     this.touch();
     return this.s.fills.slice(fillsBefore);
@@ -1297,12 +1311,7 @@ export class SimBroker {
     const curve = this.s.equityCurve;
     const last = curve[curve.length - 1];
     if (last && last.time === time) last.equity = eq;
-    else if (!last || time > last.time) {
-      // A later moment: every bar ending at the last point's time has been processed, so the account
-      // really had that equity (in between, one symbol's new close sat beside the others' old ones).
-      if (last && last.time > (this.s.dayStartTime ?? -Infinity)) this.s.dayLowEquity = Math.min(this.s.dayLowEquity ?? last.equity, last.equity);
-      curve.push({ time, equity: eq });
-    }
+    else if (!last || time > last.time) curve.push({ time, equity: eq });
   }
 
   private intrabarPath(symbol: string, bar: Bar): number[] {
@@ -1539,6 +1548,16 @@ export class SimBroker {
     }
     pos.realizedPnl += realizedGross - commission;
     this.s.positions[symbol] = pos;
+    // The daily limit values shares this bar opened at their price; an exit closes those first.
+    const b = this.bar?.symbol === symbol ? this.bar : undefined;
+    if (b && opening) {
+      b.held += signed;
+      b.adj += signed * (price - markBefore);
+    } else if (b && b.held !== 0) {
+      const k = Math.min(qty, Math.abs(b.held));
+      b.adj -= (b.adj * k) / Math.abs(b.held);
+      b.held -= Math.sign(b.held) * k;
+    }
 
     // ---- cash
     this.s.cash += side === 'buy' ? -qty * price : qty * price;

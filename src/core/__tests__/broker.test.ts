@@ -1485,3 +1485,55 @@ describe('the daily limit while a step fills, sub-dollar limits, stop-limits thr
     expect(size).toMatchObject({ ok: true, quantity: broker.affordableQuantity(req) });
   });
 });
+
+describe("the daily limit at the bar after a breach and with a bar's own entries, and a stop past a trade's average", () => {
+  const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 1, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+
+  it('values the shares a bar buys at what was paid, so a second entry in a strong bar fills on a day never at the limit', () => {
+    const DAY = 6.5 * 3600;
+    const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, strictRisk } });
+    broker.onBar(S, bar(et('2025-01-14', '09:30'), 100, 101, 99, 100, 20_000_000), DAY);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 104, quantity: 880, stopLoss: 103, tif: 'gtc' }).ok).toBe(true);
+    const add = broker.submit({ symbol: S, action: 'buy', type: 'stop', stopPrice: 104.5, quantity: 50, stopLoss: 103, tif: 'gtc' });
+    expect(add.ok).toBe(true);
+    // Bought at 104, 4 above the last close: valued at the last close that was a 3.5% loss, which never happened.
+    broker.onBar(S, bar(et('2025-01-15', '09:30'), 100.2, 105.3, 100.2, 105, 20_000_000), DAY);
+    expect(broker.position(S).quantity).toBe(930);
+    expect(broker.state.orders.some((o) => o.conflict)).toBe(false);
+    expect(broker.account().equity).toBeGreaterThan(100_000);
+  });
+
+  for (const order of [['AAA', 'BBB'], ['BBB', 'AAA']]) {
+    it(`cancels a working entry in the bar right after the limit was reached at a close, even once an exit lifts equity (${order.join(', ')})`, () => {
+      const broker = new SimBroker({ startingBalance: 20_000, config: { ...ZERO_COST_CONFIG, strictRisk: { ...strictRisk, maxRiskPctPerTrade: 5, maxDailyLossPct: 1 } } });
+      let t = et('2025-01-15', '10:00');
+      const minute = (o: number, h: number, l: number, c: number) => {
+        for (const sym of order) broker.onBar(sym, sym === 'AAA' ? bar(t, o, h, l, c, 1_000_000) : bar(t, 50, 50, 50, 50, 1_000_000));
+        t += 60;
+      };
+      minute(10, 10, 10, 10);
+      expect(broker.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 500, stopLoss: 9.5, takeProfit: 10.05, tif: 'gtc' }).ok).toBe(true);
+      expect(broker.submit({ symbol: 'AAA', action: 'buy', type: 'market', quantity: 500, stopLoss: 9.5, tif: 'gtc' }).ok).toBe(true);
+      const add = broker.submit({ symbol: 'AAA', action: 'buy', type: 'limit', limitPrice: 9.7, quantity: 500, stopLoss: 9.5, tif: 'gtc' });
+      expect(add.ok).toBe(true);
+      minute(10, 10, 9.78, 9.78); // closes 1.1% down: the limit is reached
+      expect(broker.submit({ symbol: 'AAA', action: 'buy', type: 'limit', limitPrice: 9, quantity: 1, stopLoss: 8.9 }).error).toMatch(/daily loss limit of 1% reached/);
+      // Up through the target at 10.05, which takes the day back above the limit, then down through the add at 9.70.
+      minute(9.78, 10.08, 9.69, 9.75);
+      const o = broker.state.orders.find((x) => x.id === add.order!.id)!;
+      expect(o).toMatchObject({ status: 'cancelled', conflict: true });
+      expect(o.rejectReason).toMatch(/daily loss limit was reached/);
+      expect(broker.position('AAA').quantity).toBe(500);
+    });
+  }
+
+  it("names the order's own stop when an add to a trade with no first stop has its stop past the average", () => {
+    const { broker, next } = setup({ strictRisk: { ...strictRisk, maxRiskPctPerTrade: 10, requireStopLoss: false } }, 10_000, 50);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 100 }).ok).toBe(true);
+    next(55, 55, 55, 55);
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 20, stopLoss: 52 }).error).toBe(
+      "Strict risk: this order's stop at 52.00 is at or above the trade's average entry of 50.00, so it would lock in a gain rather than cap a loss, and the trade's risk can't be measured. Use a stop below 50.00.",
+    );
+    expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 20, stopLoss: 49 }).ok).toBe(true);
+  });
+});
