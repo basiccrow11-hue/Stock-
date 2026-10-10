@@ -9,7 +9,7 @@ import type { Bar, RoundTrip } from '../types';
 import { ReplaySession } from '../replay/ReplaySession';
 import { ReplayEngine } from '../replay/ReplayEngine';
 import { bar, et, minuteBars } from './helpers';
-import { sameAtTick } from '../util/math';
+import { formatTick, sameAtTick } from '../util/math';
 
 function trip(p: Partial<RoundTrip>): RoundTrip {
   return {
@@ -1694,7 +1694,7 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(riskBasis(t)).toBeNull();
     expect(rMultiple(t)).toBeNull();
     expect([review.rMultiple, review.riskDollars]).toEqual([null, null]);
-    expect(text).toContain("Risk not measurable: Your stop at 50.01, placed 2m after you entered, was at your average entry: it risked less than half a cent a share before costs, so the trade's risk cannot be measured in R.");
+    expect(text).toContain("Risk not measurable: Your stop at 50.01, placed 2m after you entered, was at your average entry: it risked at most half a cent a share before costs, so the trade's risk cannot be measured in R.");
     expect(challenge('achieved-rr-2')).toMatchObject({ status: 'failed', detail: 'A trade on X had no stop its risk could be measured from, so its R is unknown.' });
     const losses = Array.from({ length: 9 }, () => trip({ initialStop: 99, pnl: -100 }));
     expect(computeStats([...losses, t], [], 10_000).averageR).toBeCloseTo(-1, 9);
@@ -1734,6 +1734,35 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(b.text).not.toContain('which cost');
   });
 
+  it('says a stop placed late, or moved, past the market filled at once there, and does not judge it against what it allowed', () => {
+    const late = setup();
+    late.next(50, 50, 50, 50);
+    late.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day' });
+    late.next(50, 50.05, 49.2, 49.3);
+    expect(late.broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 49.5, quantity: 100, tif: 'day' }).ok).toBe(true);
+    late.next(49.3, 49.4, 49.2, 49.3);
+    const a = late.result();
+    expect([a.trip.closed, a.trip.avgExit, a.review.rMultiple]).toEqual([true, 49.3, expect.closeTo(-1.4, 9)]);
+    expect(a.review.findings.find((f) => f.title === 'Stop filled past its price')).toEqual({
+      tone: 'neutral',
+      title: 'Stop filled past its price',
+      detail: 'Your stop at 49.50 was already past the market when you placed or changed it, so it filled at once at 49.30, 0.20 past its price: -1.40R per share.',
+    });
+    expect(a.text).not.toMatch(/well past|planned -1\.00R|turns into a market order/);
+
+    const moved = setup();
+    moved.next(50, 50, 50, 50);
+    moved.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day', stopLoss: 49, takeProfit: 52 });
+    moved.next(50, 50.05, 49.45, 49.5);
+    const stop = moved.broker.workingOrders('X').find((o) => o.type === 'stop')!;
+    expect(moved.broker.modify(stop.id, { stopPrice: 49.8 }).ok).toBe(true);
+    moved.next(49.5, 49.6, 49.4, 49.5);
+    const b = moved.result();
+    expect([b.trip.closed, b.trip.avgExit, b.review.rMultiple]).toEqual([true, 49.5, expect.closeTo(-0.5, 9)]);
+    expect(b.text).toContain('Stop filled past its price: Your stop at 49.80 was already past the market when you placed or changed it, so it filled at once at 49.50, 0.30 past its price: -0.50R per share.');
+    expect(b.text).not.toMatch(/well past|your moved stop allowed|turns into a market order/);
+  });
+
   it('cannot measure R from a short’s breakeven stop placed after several fills at the average as shown', () => {
     const { broker, next, result } = twoFills('short');
     expect(broker.submit({ symbol: 'X', action: 'cover', type: 'stop', stopPrice: 50.01, quantity: 300, tif: 'day' }).ok).toBe(true);
@@ -1745,7 +1774,52 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(t.avgEntry).toBeCloseTo(50.006667, 6);
     expect(riskBasis(t)).toBeNull();
     expect(review.rMultiple).toBeNull();
-    expect(text).toContain('was at your average entry: it risked less than half a cent a share before costs');
+    expect(text).toContain('was at your average entry: it risked at most half a cent a share before costs');
+  });
+
+  /** Two equal lots a tick apart (lo then hi for a long, hi then lo for a short): an average exactly half a tick between them, shown at lo. */
+  function halfTick(direction: 'long' | 'short', lo: number, hi: number, qty: number) {
+    const s = setup();
+    const [first, add] = direction === 'long' ? [lo, hi] : [hi, lo];
+    const action = direction === 'long' ? 'buy' : 'short';
+    s.next(first, first, first, first);
+    s.broker.submit({ symbol: 'X', action, type: 'market', quantity: qty, tif: 'day' });
+    s.next(first, hi, lo, add);
+    s.broker.submit({ symbol: 'X', action, type: 'market', quantity: qty, tif: 'day' });
+    s.next(add, hi, lo, add);
+    return s;
+  }
+
+  it('cannot measure R from a long’s breakeven stop at an average of half a tick, shown at the lower tick', () => {
+    for (const [lo, hi, qty] of [[100, 100.01, 40], [10.04, 10.05, 100]] as const) {
+      const { broker, next, result } = halfTick('long', lo, hi, qty);
+      expect(broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: lo, quantity: 2 * qty, tif: 'day' }).ok).toBe(true);
+      next(hi, hi + 1, hi, hi + 1);
+      broker.closePosition('X');
+      next(hi + 1, hi + 1, hi + 1, hi + 1);
+      const { trip: t, review, text, challenge } = result();
+      expect([t.closed, t.initialStop, formatTick(t.avgEntry)]).toEqual([true, lo, formatTick(lo)]);
+      expect(t.avgEntry).toBeCloseTo(lo + 0.005, 9);
+      // Not +199R from half a cent.
+      expect(riskBasis(t)).toBeNull();
+      expect(review.rMultiple).toBeNull();
+      expect(text).toContain(`Risk not measurable: Your stop at ${formatTick(lo)}, placed 2m after you entered, was at your average entry: it risked at most half a cent a share before costs`);
+      expect(challenge('achieved-rr-2').status).toBe('failed');
+    }
+  });
+
+  it('measures a short’s stop a tick above an average of half a tick shown at the lower tick', () => {
+    for (const [lo, hi, qty] of [[100, 100.01, 40], [10.04, 10.05, 100]] as const) {
+      const { broker, next, result } = halfTick('short', lo, hi, qty);
+      expect(broker.submit({ symbol: 'X', action: 'cover', type: 'stop', stopPrice: hi, quantity: 2 * qty, tif: 'day' }).ok).toBe(true);
+      next(lo, hi + 0.02, lo, hi + 0.01); // stopped at the stop's price
+      const { trip: t, review, text } = result();
+      expect([t.direction, t.closed, t.initialStop, t.avgExit, formatTick(t.avgEntry)]).toEqual(['short', true, hi, hi, formatTick(lo)]);
+      expect(riskBasis(t)).toEqual({ entry: t.avgEntry, risk: expect.closeTo(0.005, 9), from: 'average' });
+      expect(review.rMultiple).toBeCloseTo(-1, 9);
+      expect(text).not.toContain('Risk not measurable');
+      expect(text).not.toContain('was at your average entry');
+    }
   });
 
   it('counts two prices as the same when each, written to its own tick, shows as the same price', () => {
@@ -1753,6 +1827,8 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect([sameAtTick(0.50004, 0.5), sameAtTick(0.50006, 0.5), sameAtTick(0.99996, 1), sameAtTick(1.004, 1)]).toEqual([true, false, true, true]);
     // An average shown as 0.9960 is not at a stop at 1.00, 40 of its ticks away.
     expect([sameAtTick(0.996, 1), sameAtTick(0.9999, 1)]).toEqual([false, false]);
+    // Half ticks go the way the app writes them (100.005 shows as 100.00), not the way roundToTick rounds them.
+    expect([sameAtTick(100.005, 100), sameAtTick(100.005, 100.01), sameAtTick(10.045, 10.04), sameAtTick(10.045, 10.05), sameAtTick(0.50005, 0.5)]).toEqual([true, false, true, false, true]);
   });
 
   it('measures a stop at 1.00 placed after a short entry at 0.9960, and says a long’s stop there locked in a gain', () => {
@@ -1800,7 +1876,7 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(t.stopPlacedAt).toBeUndefined();
     expect(riskBasis(t)).toBeNull();
     expect(review.rMultiple).toBeNull();
-    expect(text).toContain("No stop on your first entry: Your stop at 50.01 came with a later add, and your average entry came to the stop's own price: it risked less than half a cent a share before costs, so the trade's risk cannot be measured in R.");
+    expect(text).toContain("No stop on your first entry: Your stop at 50.01 came with a later add, and your average entry came to the stop's own price: it risked at most half a cent a share before costs, so the trade's risk cannot be measured in R.");
     expect(text).not.toContain('sat past your average entry');
   });
 

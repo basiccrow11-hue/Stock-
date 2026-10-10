@@ -379,7 +379,7 @@ describe('the chart during fast play with the pointer on it', () => {
     const pointer = (on: boolean) => {
       const k = Math.round(chart.ts.coordinateToLogical(300)!);
       chart.cross = on ? { time: main.points[k].time, price: 100 } : null;
-      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 }, paneIndex: 0 } : {})));
+      act(() => chart.crosshair.forEach((fn) => fn(on ? { time: main.points[k].time, logical: k, point: { x: 300, y: 100 }, paneIndex: 0, sourceEvent: {} } : {})));
     };
     /** The candle under the pointer, and the legend's first row. */
     const underPointer = () => main.points[Math.round(chart.ts.coordinateToLogical(300)!)] as unknown as { time: number; open: number; close: number };
@@ -437,6 +437,19 @@ describe('the chart during fast play with the pointer on it', () => {
     expect(calls.update).toBeGreaterThanOrEqual(steps * chart.series.length);
     expect(chart.crosshairRedone).toBe(0);
     expect(chart.cross?.time).toBe(underPointer().time);
+
+    // The library redoes a shown crosshair on its own (here after a zoom) from where it last put it, which
+    // was a candle's centre: it goes back under the pointer, not onto the candle at that spot.
+    const shown = chart.ts.getVisibleLogicalRange()!;
+    act(() => chart.ts.setVisibleLogicalRange({ from: shown.to - 3 * (shown.to - shown.from), to: shown.to }));
+    const stale = Math.round(chart.ts.coordinateToLogical(330)!);
+    expect(main.points[stale].time).not.toBe(underPointer().time);
+    chart.cross = { time: main.points[stale].time, price: 100 };
+    act(() => chart.crosshair.forEach((fn) => fn({ time: main.points[stale].time, logical: stale, point: { x: 330, y: 100 }, paneIndex: 0 })));
+    expect(chart.cross?.time).toBe(underPointer().time);
+    expect(legend()).toContain(`O ${fmtPrice(underPointer().open)}`);
+    expect(legend()).toContain(`C ${fmtPrice(underPointer().close)}`);
+    act(() => chart.ts.setVisibleLogicalRange(shown));
 
     /** Every series holds what a chart drawn afresh holds, on the candles that one holds. */
     const matchesFresh = async () => {

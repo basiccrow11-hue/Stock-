@@ -13,9 +13,13 @@ export function formatTick(price: number): string {
   return price >= 1 ? price.toFixed(2) : price.toFixed(4);
 }
 
-/** True when two prices, each rounded to its own tick (as they are shown), are the same price. */
+/**
+ * True when two prices, each written to its own tick (as the app shows them), are the same price.
+ * Compares the written prices rather than roundToTick, which rounds half ticks up while the
+ * display truncates them the way toFixed does (an average of 100.005 shows as 100.00).
+ */
 export function sameAtTick(a: number, b: number): boolean {
-  return Math.abs(roundToTick(a) - roundToTick(b)) < 1e-9;
+  return Number(formatTick(a)) === Number(formatTick(b));
 }
 
 export function clamp(v: number, lo: number, hi: number): number {

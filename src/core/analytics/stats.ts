@@ -48,9 +48,9 @@ export interface PerformanceStats {
  * None either when its average sat at or past a stop placed on its own after entry (a breakeven stop, one
  * locking in a gain, or one that shares added after it moved the average past): that stop came with no
  * entry, so the first entry's price and plan say nothing about it. Such a stop, or one an add brought,
- * counts as at the average when the average written to the stop's tick is the stop's price: an average
- * of fills at different prices can sit a fraction of a cent from a breakeven stop, and R from that
- * sliver would be hundreds.
+ * counts as at the average when the average, written to its tick as the app shows it, is the stop's
+ * price: an average of fills at different prices can sit up to half a tick from a breakeven stop, and
+ * R from that sliver would be hundreds.
  */
 export function riskBasis(t: RoundTrip): { entry: number; risk: number; from: 'average' | 'first' | 'planned' } | null {
   if (t.initialStop === undefined || t.initialStop <= 0) return null;

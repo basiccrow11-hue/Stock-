@@ -149,8 +149,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const hoverRef = useRef<number | null>(null);
   /** Where the pointer is on the chart (in that pane's coordinates), or null when it is off it: see rebuildTail. */
   const pointerRef = useRef<{ x: number; y: number; pane: number } | null>(null);
-  /** Follows the crosshair: the legend shows the candle under it. */
-  const onCrosshairRef = useRef<(param: CrosshairParam) => void>(() => undefined);
+  /** Shows the candle at a crosshair position in the legend (the newest when there is none). */
+  const showHoverRef = useRef<(param: CrosshairParam) => void>(() => undefined);
   /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
   const paneTopsRef = useRef<number[]>([]);
   const priceHeightRef = useRef(0);
@@ -205,8 +205,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     chart.panes()[0].setPreserveEmptyPane(true);
 
     // The legend follows the crosshair on its own: moving it never re-renders the chart.
-    const onCrosshair = (param: CrosshairParam) => {
-      pointerRef.current = param.point ? { x: param.point.x, y: param.point.y, pane: param.paneIndex ?? 0 } : null;
+    const showHover = (param: CrosshairParam) => {
       const candles = candlesRef.current;
       let i = -1;
       if (param.time !== undefined && param.logical !== undefined) {
@@ -220,8 +219,19 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       hoverRef.current = hover;
       emitLegend();
     };
-    onCrosshairRef.current = onCrosshair;
-    chart.subscribeCrosshairMove(onCrosshair);
+    showHoverRef.current = showHover;
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.point) pointerRef.current = null;
+      else if (param.sourceEvent) pointerRef.current = { x: param.point.x, y: param.point.y, pane: param.paneIndex ?? 0 };
+      else if (pointerRef.current) {
+        // lightweight-charts redid the crosshair on its own (a zoom, a scroll, new data, a wider price
+        // axis) from where it last put it. After restoreCrosshair that is a candle's centre, not the
+        // pointer, so the crosshair would drift off the pointer: put it back under the pointer instead.
+        restoreCrosshair(pointerRef.current);
+        return;
+      }
+      showHover(param);
+    });
     chart.subscribeClick((param) => {
       const series = candleRef.current;
       if (!param.point || !series || !useTrading.getState().pickTarget) return;
@@ -748,9 +758,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   /**
-   * Puts the crosshair back under the pointer after rebuildTail hid it, as lightweight-charts would have
-   * put it, and shows the candle under it in the legend (setCrosshairPosition sends no crosshair event).
-   * Past the newest candle it stays hidden until the pointer moves, and the legend shows the newest.
+   * Puts the crosshair back under the pointer after rebuildTail hid it or lightweight-charts redid it from
+   * a stale spot, as lightweight-charts would have put it, and shows the candle under it in the legend
+   * (setCrosshairPosition sends no crosshair event). Past the newest candle it is hidden until the
+   * pointer moves, and the legend shows the newest.
    */
   function restoreCrosshair(p: { x: number; y: number; pane: number }): void {
     const chart = chartRef.current;
@@ -762,12 +773,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const price = series?.coordinateToPrice(p.y) ?? null;
     const point = { x: p.x, y: p.y } as CrosshairParam['point'];
     if (!chart || !series || k < 0 || start + k >= candles.length || price === null) {
-      onCrosshairRef.current({ point, paneIndex: p.pane });
+      chart?.clearCrosshairPosition();
+      showHoverRef.current({ point, paneIndex: p.pane });
       return;
     }
     const time = ct(candles[start + k].time);
     chart.setCrosshairPosition(price, time, series as never);
-    onCrosshairRef.current({ time, logical: k as Logical, point, paneIndex: p.pane });
+    showHoverRef.current({ time, logical: k as Logical, point, paneIndex: p.pane });
   }
 
   /** Re-aggregate from the bucket containing base index `from` and push updates. */
