@@ -78,6 +78,11 @@ export interface BrokerState {
   dayLowEquity?: number;
   /** The time of the session's first bar: equity points after it count toward dayLowEquity. */
   dayStartTime?: UnixSeconds;
+  /**
+   * Equity when the bars ending at `time` began to be processed (the last moment every bar had closed):
+   * what Strict Mode's daily limit is judged on while they fill, with each bar's own fills.
+   */
+  stepStart?: { time: UnixSeconds; equity: number };
   equityCurve: EquityPoint[];
   events: BrokerEvent[];
   version: number;
@@ -130,7 +135,10 @@ export interface TradeRisk {
   unmeasurable: boolean;
 }
 
-const TICK = 0.01;
+/** The tick a price trades in: a cent, or a hundredth of a cent below $1. */
+function tickOf(price: number): number {
+  return price >= 1 ? 0.01 : 0.0001;
+}
 /** Market impact is charged on at most one bar's whole volume (see execute). */
 const MAX_IMPACT_PCT = 100;
 /** The lowest price a fill can print at: one tick of a sub-dollar stock. */
@@ -167,6 +175,11 @@ export class SimBroker {
    * index can be skipped. Keeps per-bar work independent of how many orders the session has seen.
    */
   private openFrom = 0;
+  /**
+   * While onBar runs: the equity at the start of its step (stepStart) less the equity when this bar
+   * began, so the daily limit leaves out the bars processed before it at the same time. 0 otherwise.
+   */
+  private stepOffset = 0;
 
   private liveOrders(): Order[] {
     const list = this.s.orders;
@@ -492,11 +505,12 @@ export class SimBroker {
   /**
    * Whether today's loss has reached Strict Mode's daily limit: now, or at any earlier moment since the
    * session began once every bar ending then had closed, so the limit holds until the next session
-   * even if open trades recover.
+   * even if open trades recover. While a bar fills, "now" is the last such moment plus that bar's own
+   * fills: other symbols' bars ending at the same time, processed before it, are not counted yet.
    */
   private dailyLimitReached(): boolean {
     const start = this.s.dayStartEquity;
-    const low = Math.min(this.account().equity, this.s.dayLowEquity ?? Infinity);
+    const low = Math.min(this.account().equity + this.stepOffset, this.s.dayLowEquity ?? Infinity);
     return start > 0 && (money(start - low) / start) * 100 >= this.cfg.strictRisk.maxDailyLossPct - EPS;
   }
 
@@ -603,6 +617,39 @@ export class SimBroker {
   }
 
   /**
+   * A bracket error, saying where the entry was checked when that is not the order's own price: near
+   * the last price for an order already through the market, or a stop-limit's stop.
+   */
+  private bracketMessage(
+    o: Pick<Order, 'type' | 'limitPrice' | 'extendedHours'>,
+    expected: ReturnType<SimBroker['expectedEntry']>,
+    error: string,
+  ): string {
+    if (expected.through) {
+      const fill = expected.atOnce ? this.cfg.marketOrderFill : o.type === 'limit' && o.extendedHours && this.cfg.allowExtendedHours ? 'next' : 'regular';
+      return throughTheMarket(error, o.type, expected.price, fill);
+    }
+    if (o.type === 'stop_limit' && expected.price !== o.limitPrice) return `${error.replace(/\.$/, '')}: this stop-limit would fill at about ${formatTick(expected.price)}, where its stop fires.`;
+    return error;
+  }
+
+  /**
+   * What submit would say is wrong with an opening order's stop loss or target, checked where the order
+   * is expected to fill (the ticket shows these before submit). Empty when they are fine, or when the
+   * order is not complete enough to check.
+   */
+  bracketErrors(input: OrderRequest, now?: UnixSeconds): string[] {
+    return this.at(now, (b) => {
+      const p = b.prepare(input);
+      if ('error' in p || !isOpeningAction(p.req.action)) return [];
+      const o = { ...p.req, extendedHours: !!p.req.extendedHours };
+      const expected = b.expectedEntry(o);
+      const { errors } = assessRisk({ action: o.action, quantity: o.quantity, entryPrice: expected.price, stopLoss: o.stopLoss, takeProfit: o.takeProfit, equity: 0 });
+      return errors.map((e) => b.bracketMessage(o, expected, e));
+    });
+  }
+
+  /**
    * The checks an opening order must pass when it is placed or changed: its stop loss and target on the
    * right side of where it is expected to fill, Strict Mode (strictViolation), and buying power. `own`
    * is the working order being changed: it is left out of the trade it joins, and the buying power it
@@ -611,16 +658,16 @@ export class SimBroker {
   private openingCheck(
     o: Pick<Order, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'stopLoss' | 'takeProfit' | 'extendedHours'> & { quantity: number },
     own?: Order,
-  ): { error?: string; warnings: string[]; quote: number } {
+  ): { error?: string; warnings: string[]; quote: number; price: number } {
     // Orders are checked against the price they would actually get: buys pay the ask, sells hit the bid.
     const expected = this.expectedEntry(o);
     const refPrice = expected.price;
-    const fail = (error: string) => ({ error, warnings: [], quote: expected.quote });
+    const fail = (error: string) => ({ error, warnings: [], quote: expected.quote, price: refPrice });
     const acct = this.account();
     const assess = (px: number) =>
       assessRisk({ action: o.action, quantity: o.quantity, entryPrice: px, stopLoss: o.stopLoss, takeProfit: o.takeProfit, equity: acct.equity, commissionEstimate: commissionFor(this.cfg, o.quantity, px) });
     const risk = assess(refPrice);
-    if (risk.errors.length) return fail(expected.through ? throughTheMarket(risk.errors[0], o.type, refPrice, expected.atOnce ? this.cfg.marketOrderFill : o.type === 'limit' && o.extendedHours && this.cfg.allowExtendedHours ? 'next' : 'regular') : risk.errors[0]);
+    if (risk.errors.length) return fail(this.bracketMessage(o, expected, risk.errors[0]));
     // The risk itself is measured at the price the order is expected to fill at with its costs, as
     // the ticket sizes it and the review judges it.
     const fillAt = this.estimateFill(o) ?? refPrice;
@@ -634,7 +681,7 @@ export class SimBroker {
     const needed = o.quantity * (o.type === 'limit' || o.type === 'stop_limit' ? o.limitPrice! : refPrice);
     const avail = this.availableBuyingPower() + (own ? this.reservation(own) : 0);
     if (needed > avail + 0.005) return fail(`Insufficient buying power: need $${needed.toFixed(2)}, have $${avail.toFixed(2)}.`);
-    return { warnings: costed.warnings, quote: expected.quote };
+    return { warnings: costed.warnings, quote: expected.quote, price: refPrice };
   }
 
   /**
@@ -665,7 +712,7 @@ export class SimBroker {
   /**
    * Size by risk: the most shares of a new opening order whose trade risks at most `riskPct`% as
    * tradeRiskOf counts it, cut to what submit would accept (Strict Mode's other limits, buying power)
-   * and, for an order that does not fill at its own limit, to the buying power left with room for the
+   * and, for a market or stop order (which has no limit), to the buying power left with room for the
    * price to move before it fills. `reason` says what cut it below the asked risk, as a sentence.
    */
   sizeByRisk(
@@ -728,7 +775,8 @@ export class SimBroker {
         const why = refusal(accepted + 1)!;
         reason = why.startsWith('Strict risk: ') ? `Strict Mode refuses ${accepted + 1}: ${why.slice('Strict risk: '.length)}` : `${accepted + 1} would be refused: ${why}`;
       }
-      if (req.type !== 'limit') {
+      // A market or stop order can fill above the price buying power was checked at; a limit never does.
+      if (req.type === 'market' || req.type === 'stop') {
         const covered = Math.floor(b.affordableQuantity(req) * 0.995);
         if (covered < 1) return { ok: false as const, error: 'No buying power is left for this order.' };
         if (covered < quantity) {
@@ -828,11 +876,13 @@ export class SimBroker {
 
     const opening = isOpeningAction(req.action);
     let quote = this.expectedEntry({ ...req, symbol, extendedHours: !!req.extendedHours }).quote;
+    let checkedAt: number | undefined;
     if (opening) {
       const check = this.openingCheck({ ...req, symbol, quantity: qty, extendedHours: !!req.extendedHours });
       if (check.error) return reject(check.error);
       warnings.push(...check.warnings);
       quote = check.quote;
+      checkedAt = check.price;
     } else if (req.stopLoss || req.takeProfit) {
       return reject('Stop loss / take profit brackets can only be attached to opening orders (Buy or Short).');
     }
@@ -859,7 +909,7 @@ export class SimBroker {
       triggered: false,
       sessionDate: this.orderSessionDate(now),
       activeFrom: now,
-      ...(req.type === 'market' ? { quotedPrice: quote } : {}),
+      ...(checkedAt !== undefined ? { quotedPrice: checkedAt } : req.type === 'market' ? { quotedPrice: quote } : {}),
     };
     if (!this.eligible(order, this.symbolSession(symbol))) {
       order.status = 'pending';
@@ -924,8 +974,9 @@ export class SimBroker {
         // Its unfilled shares take the live bracket's stop and target once it has started filling.
         const px = this.entryPrice({ symbol: o.symbol, limitPrice, stopPrice });
         const next = { ...o, ...this.bracketLevels(o, px), limitPrice, stopPrice, quantity: (changes.quantity ?? o.quantity) - o.filledQty };
-        const { error } = this.openingCheck(next, o);
+        const { error, price } = this.openingCheck(next, o);
         if (error) return { ok: false, error };
+        o.quotedPrice = price;
       }
     } else if (stopPrice !== undefined && stopPrice !== o.stopPrice) {
       const violation = this.exitStopViolation(o.symbol, o.action, stopPrice, o.stopPrice);
@@ -1077,6 +1128,11 @@ export class SimBroker {
     return this.marketFill(actionSide(o.action), x, qty, volume, false).price;
   }
 
+  /** How far past a limit price must trade before it fills: nothing when touching it is enough, else one tick of its price. */
+  private limitThrough(L: number): number {
+    return this.cfg.limitFill === 'trade_through' ? tickOf(L) : 0;
+  }
+
   /** Shares that can still trade against a bar of `volume` once `used` have: a bar without volume (none recorded) is not capped. */
   private barCapacity(volume: number, used = 0): number {
     return this.cfg.maxParticipation > 0 && volume > 0 ? Math.max(0, Math.floor(volume * this.cfg.maxParticipation) - used) : Infinity;
@@ -1131,6 +1187,9 @@ export class SimBroker {
     symbol = symbol.toUpperCase();
     const fillsBefore = this.s.fills.length;
     this.rollDay(bar.time);
+    const end = bar.time + barSeconds;
+    if (this.s.stepStart?.time !== end) this.s.stepStart = { time: end, equity: this.account().equity };
+    this.stepOffset = this.s.stepStart.equity - this.account().equity;
     const session = marketSession(bar.time);
     // Pending orders become working once their session arrives.
     for (const o of this.liveOrders()) {
@@ -1214,6 +1273,7 @@ export class SimBroker {
     (this.s.barVolumeUsed ??= {})[symbol] = traded;
     this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
 
+    this.stepOffset = 0;
     this.recordEquity(bar.time + barSeconds);
     this.touch();
     return this.s.fills.slice(fillsBefore);
@@ -1294,7 +1354,7 @@ export class SimBroker {
     };
     const limitCond = (L: number): [(x: number) => boolean, number] => {
       const hs = halfSpread(this.cfg, L, ext);
-      const through = this.cfg.limitFill === 'trade_through' ? TICK : 0;
+      const through = this.limitThrough(L);
       if (side === 'buy') {
         const b = L - hs - through;
         return [(x) => x <= b + EPS, b];
@@ -1345,7 +1405,13 @@ export class SimBroker {
     const used = this.s.barVolumeUsed?.[o.symbol] ?? 0;
     const capacity = this.barCapacity(bar.volume, used);
     const skip = new Set<string>();
-    const filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
+    const fired = o.type === 'stop_limit' && !o.triggered;
+    let filled = this.execute(o, level, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
+    // A stop-limit whose stop has just fired is now a limit: one the market already meets fills at once.
+    if (fired && o.triggered && isOpen(o) && !skip.has(o.id)) {
+      const at = this.triggerLevel(o, last, last, session !== 'regular');
+      if (at !== null) filled = this.execute(o, at, this.s.clock, capacity, bar.volume, session !== 'regular', skip, 'placed', this.s.clock);
+    }
     if (filled > 0) (this.s.barVolumeUsed ??= {})[o.symbol] = used + filled;
     // A stop-limit may have triggered without filling; that's fine, it now rests as a limit.
     return isOpen(o) && capacity - filled <= 0 ? 'capped' : undefined;
@@ -1412,8 +1478,12 @@ export class SimBroker {
       slippage = Math.abs(price - fill.quote) * qty;
     } else {
       // Limit (or triggered stop-limit): never worse than the limit; better if the market gapped through.
+      // Reached on the path in trade-through mode (price traded a tick past it), it fills at its price.
       const L = o.limitPrice!;
-      price = side === 'buy' ? Math.min(L, ceilTick(x + hs)) : Math.max(L, floorTick(x - hs));
+      const through = this.limitThrough(L);
+      const hsL = halfSpread(this.cfg, L, ext);
+      const crossed = through > 0 && Math.abs(x - (side === 'buy' ? L - hsL - through : L + hsL + through)) <= EPS;
+      price = crossed ? L : side === 'buy' ? Math.min(L, ceilTick(x + hs)) : Math.max(L, floorTick(x - hs));
     }
     const spreadCost = hs * qty;
 
@@ -1690,9 +1760,13 @@ function throughTheMarket(error: string, type: OrderType, price: number, fill: E
   return `${error.replace(/\.$/, '')}: this ${type === 'stop' ? 'stop' : type === 'stop_limit' ? 'stop-limit' : 'limit'} is already through the market, so it would fill ${when}.`;
 }
 
-/** The price an entry order was placed at: its limit, its stop, or for a market order the price it was checked against. */
+/**
+ * The price an entry order was planned at: the price it was checked against when placed or last
+ * changed (the quote for a market order; near the quote for a stop or limit already through the
+ * market; a stop-limit's stop, never past its limit), else its limit or stop.
+ */
 function plannedPrice(o: Order): number | undefined {
-  return o.type === 'limit' ? o.limitPrice : o.type === 'market' ? o.quotedPrice : o.stopPrice;
+  return o.quotedPrice ?? (o.type === 'limit' ? o.limitPrice : o.type === 'market' ? undefined : o.stopPrice);
 }
 
 export function describe(o: Order): string {

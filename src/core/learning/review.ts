@@ -231,6 +231,13 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const entryOrders = tripFills.map((f) => f && input.orders.find((o) => o.id === f.orderId)).filter((o) => o?.action === 'buy' || o?.action === 'short');
   const stopOrder = (trip.stopFromAdd && entryOrders.find((o) => o?.stopLoss !== undefined)) || entryOrders[0];
   const targetOrder = entryOrders.find((o) => o?.takeProfit !== undefined) ?? entryOrders[0];
+  /** An entry order's own price (its limit, else its stop; a market order has none). */
+  const ownPrice = (o: Order | undefined) => (!o || o.type === 'market' ? undefined : o.type === 'limit' ? o.limitPrice : o.stopPrice);
+  /** The order was checked at, and expected to fill near, a price other than its own (already through the market, or a stop-limit's limit). */
+  const expectedElsewhere = (o: Order | undefined, planned: number | undefined) => {
+    const own = ownPrice(o);
+    return own !== undefined && planned !== undefined && Math.abs(planned - own) > 1e-9;
+  };
   // How that order came to fill past its own stop or target: a gap at a bar's open (also older trades,
   // which did not record it), the spread and slippage, a limit through the market, or price moving past
   // both before the order could fill (an order placed while a daily bar was still hidden).
@@ -238,7 +245,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const fill = order && tripFills.find((f) => f?.orderId === order.id);
     const market = order?.type === 'market';
     const name = order && order !== entryOrders[0] ? (market ? 'market add' : 'add') : market ? 'market order' : 'entry order';
-    const at = planned !== undefined ? ` at ${formatTick(planned)}` : '';
+    const own = ownPrice(order);
+    const at = own !== undefined ? ` at ${formatTick(own)}` : planned !== undefined ? ` at ${formatTick(planned)}` : '';
     // Capped by bar volume, the order filled in parts and only the later ones went past the level.
     const parts = tripFills.filter((f) => f && order && f.orderId === order.id).length;
     const sign = long ? 1 : -1;
@@ -253,7 +261,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         gap: true,
         text: market
           ? `Your ${name} was placed${planned !== undefined ? ` with price at ${formatTick(planned)}` : ''} and filled at the next open, ${formatTick(price)}, already past your ${what} at ${formatTick(level)}.`
-          : `Price gapped through both your ${name}${at} and your ${what} at ${formatTick(level)}, so it filled at ${formatTick(price)}.`,
+          : expectedElsewhere(order, planned)
+            ? `Your ${name}${at} was expected to fill near ${formatTick(planned!)}, but price gapped past your ${what} at ${formatTick(level)} before it could, so it filled at ${formatTick(price)}.`
+            : `Price gapped through both your ${name}${at} and your ${what} at ${formatTick(level)}, so it filled at ${formatTick(price)}.`,
       };
     }
     // The market price before this fill's spread and slippage: if that was short of the level, the costs carried it past.
@@ -348,7 +358,15 @@ export function reviewTrade(input: ReviewInput): TradeReview {
       tone: tight ? 'bad' : 'neutral',
       title: tight ? 'Stop was tight relative to normal movement' : 'Stop distance',
       detail: `Your stop was ${dist(riskPerShare)} away${
-        basis?.from === 'planned' ? (stopOrder?.type === 'market' ? ' from the price when you placed your order' : ' from your order’s price') : basis?.from === 'first' ? ' from your first entry' : ''
+        basis?.from === 'planned'
+          ? stopOrder?.type === 'market'
+            ? ' from the price when you placed your order'
+            : expectedElsewhere(stopOrder, basis.entry)
+              ? ' from where your order was expected to fill'
+              : ' from your order’s price'
+          : basis?.from === 'first'
+            ? ' from your first entry'
+            : ''
       }, ${stopDistanceAtr.toFixed(2)}× the ATR(14) of ${input.timeframe} candles at entry (${atrAtEntry! < 0.01 ? atrAtEntry!.toFixed(4) : dist(atrAtEntry!)}).${
         tight ? ' Stops well inside one ATR are often hit by ordinary noise rather than by the setup failing.' : ''
       }`,
@@ -526,7 +544,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     findings.push({
       tone: 'bad',
       title: 'Added past your stop',
-      detail: `You added at prices past your original stop at ${formatTick(trip.initialStop!)}, which moved your average entry to ${formatTick(trip.avgEntry)}. Your plan risked ${dist(riskPerShare!)} per share from your first entry at ${formatTick(bracketEntry)} (${money(riskDollars!)} at this size). Shares bought past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
+      detail: `You added at prices past your original stop at ${formatTick(trip.initialStop!)}, which moved your average entry to ${formatTick(trip.avgEntry)}. Your plan risked ${dist(riskPerShare!)} per share from your first entry at ${formatTick(bracketEntry)} (${money(riskDollars!)} at this size). Shares added past the stop cannot be closed by it at the planned loss, so the trade risked more than you planned.`,
     });
   } else if (riskPctOfEquity !== null) {
     findings.push({

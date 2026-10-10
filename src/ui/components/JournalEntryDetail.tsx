@@ -146,7 +146,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
 
       {snapshot && <img className="snapshot-img" src={snapshot} alt={`Chart when the ${entry.symbol} trade closed`} />}
 
-      {showReview && r && <ReviewView review={r} />}
+      {showReview && r && <ReviewView review={r} hasStop={entry.stopLoss !== undefined} />}
 
       <div>
         <div className="section-title">
@@ -186,7 +186,7 @@ export function JournalEntryDetail({ entry, showReview = true }: { entry: Journa
   );
 }
 
-function ReviewView({ review: r }: { review: TradeReview }) {
+function ReviewView({ review: r, hasStop }: { review: TradeReview; hasStop: boolean }) {
   return (
     <div className="stack" style={{ gap: 10 }}>
       <div className="section-title">
@@ -200,7 +200,7 @@ function ReviewView({ review: r }: { review: TradeReview }) {
         <Stat k="Kept of best open profit" v={r.capturePct !== null ? `${r.capturePct.toFixed(0)}%` : '—'} />
         <Stat
           k="Risk taken"
-          v={r.riskDollars === null ? 'No stop' : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)}${r.riskPctOfEquity === null ? '' : ` · ${pctAgainst(r.riskPctOfEquity, r.riskLimitPct)}%`}`}
+          v={r.riskDollars === null ? (hasStop ? 'Not measurable' : 'No stop') : r.addedPastStop ? `More than planned (${money(r.riskDollars)} planned)` : `${money(r.riskDollars)}${r.riskPctOfEquity === null ? '' : ` · ${pctAgainst(r.riskPctOfEquity, r.riskLimitPct)}%`}`}
           cls={r.riskDollars === null || r.addedPastStop ? 'warn' : ''}
         />
         <Stat k="Planned R:R" v={r.plannedRR !== null ? `${r.plannedRR.toFixed(2)}:1` : '—'} />

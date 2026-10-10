@@ -1342,15 +1342,16 @@ describe('estimates once the last bar is used, stop-limit brackets, and the dail
       const placed = broker.submit({ ...entry, stopPrice: 50 });
       expect(placed.ok).toBe(true);
       // With its trigger under the stop loss it would fill below it and stop out at once.
-      const below = 'Stop loss must be below the entry price for a long.';
+      const below = 'Stop loss must be below the entry price for a long: this stop-limit would fill at about 49.60, where its stop fires.';
       expect(broker.modify(placed.order!.id, { stopPrice: 49.6 })).toMatchObject({ ok: false, error: below });
       expect(broker.submit({ ...entry, stopPrice: 49.6 }).error).toBe(below);
+      expect(broker.bracketErrors({ ...entry, stopPrice: 49.6 })).toEqual([below]);
       expect(broker.submit({ ...entry, stopPrice: 49, limitPrice: 52 }).error).toBe(
         'Stop loss must be below the entry price for a long: this stop-limit is already through the market, so it would fill at once at about 49.50.',
       );
       // A short whose stop loss sits between its limit and its stop.
       expect(broker.submit({ symbol: S, action: 'short', type: 'stop_limit', stopPrice: 49.2, limitPrice: 48.9, quantity: 50, stopLoss: 49.1, tif: 'day' }).error).toBe(
-        'Stop loss must be above the entry price for a short.',
+        'Stop loss must be above the entry price for a short: this stop-limit would fill at about 49.20, where its stop fires.',
       );
     }
   });
@@ -1411,5 +1412,76 @@ describe('estimates once the last bar is used, stop-limit brackets, and the dail
     minute(93, 46.5);
     expect(broker.account().dayPnl).toBeCloseTo(0, 6);
     expect(broker.submit({ symbol: 'C', action: 'buy', type: 'limit', limitPrice: 9.9, quantity: 10, stopLoss: 9.5 }).ok).toBe(true);
+  });
+});
+
+describe('the daily limit while a step fills, sub-dollar limits, stop-limits through the market, and the planned entry', () => {
+  const strictRisk: ExecutionConfig['strictRisk'] = { enabled: true, maxRiskPctPerTrade: 10, requireStopLoss: true, maxDailyLossPct: 3, maxPositionPctOfEquity: 100 };
+
+  for (const order of [['A', 'B'], ['B', 'A']]) {
+    it(`fills an entry whose trade's day is not down, whichever symbol's bar comes first (${order.join(', ')})`, () => {
+      const broker = new SimBroker({ startingBalance: 30_000, config: { ...ZERO_COST_CONFIG, strictRisk } });
+      let t = et('2025-01-15', '10:00');
+      const minute = (prices: Record<string, [number, number]>) => {
+        for (const sym of order) {
+          const [o, c] = prices[sym];
+          broker.onBar(sym, bar(t, o, Math.max(o, c), Math.min(o, c), c, 1_000_000));
+        }
+        t += 60;
+      };
+      minute({ A: [100, 100], B: [50, 50] });
+      expect(broker.submit({ symbol: 'A', action: 'buy', type: 'market', quantity: 150, stopLoss: 90 }).ok).toBe(true);
+      expect(broker.submit({ symbol: 'B', action: 'short', type: 'market', quantity: 300, stopLoss: 55 }).ok).toBe(true);
+      expect(broker.submit({ symbol: 'B', action: 'short', type: 'stop', stopPrice: 49, quantity: 20, stopLoss: 55, tif: 'gtc' }).ok).toBe(true);
+      // Both fall 7%: A's loss and B's gain cancel out. The add fills on B's way down whichever bar is
+      // processed first, since the account was never 3% down.
+      minute({ A: [100, 93], B: [50, 46.5] });
+      expect(broker.position('B').quantity).toBe(-320);
+      expect(broker.state.orders.some((o) => o.conflict)).toBe(false);
+    });
+  }
+
+  it('trades through a sub-dollar limit by its own tick, and fills it at its price', () => {
+    const { broker, next } = setup({ limitFill: 'trade_through' }, 10_000, 0.46);
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 1000, limitPrice: 0.452 });
+    next(0.46, 0.46, 0.452, 0.455); // touches it only
+    expect(broker.state.fills).toHaveLength(0);
+    next(0.455, 0.455, 0.4519, 0.453); // one tick through
+    expect(broker.state.fills.map((f) => f.price)).toEqual([0.452]);
+  });
+
+  it('fills a stop-limit whose stop has passed at once when its limit meets the market', () => {
+    const { broker } = setup({}, 10_000, 50);
+    const r = broker.submit({ symbol: S, action: 'buy', type: 'stop_limit', stopPrice: 49.9, limitPrice: 50.2, quantity: 10, tif: 'day' });
+    expect(r.order!.status).toBe('filled');
+    expect(broker.state.fills.map((f) => f.price)).toEqual([50]);
+    // One whose limit the market is already past rests as a limit.
+    const rest = broker.submit({ symbol: S, action: 'buy', type: 'stop_limit', stopPrice: 49.5, limitPrice: 49.8, quantity: 10, tif: 'day' });
+    expect(rest.order).toMatchObject({ status: 'working', triggered: true });
+  });
+
+  it('measures a gapped stop entry from the price it was checked at, not its own stop', () => {
+    const broker = new SimBroker({ startingBalance: 10_000, config: { ...ZERO_COST_CONFIG, strictRisk: { ...strictRisk, maxRiskPctPerTrade: 1 } } });
+    let t = et('2025-01-15', '08:00');
+    for (let i = 0; i < 5; i++, t += 60) broker.onBar(S, bar(t, 10.8, 10.8, 10.8, 10.8, 1_000_000));
+    // A buy stop at 10 placed in the pre-market fills at the open near 10.80, so its stop loss at 10.40 is below it.
+    const req = { symbol: S, action: 'buy' as const, type: 'stop' as const, stopPrice: 10, stopLoss: 10.4, tif: 'day' as const };
+    const size = broker.sizeByRisk(req, 1);
+    expect(size.ok).toBe(true);
+    if (!size.ok) return;
+    expect(broker.submit({ ...req, quantity: size.quantity }).order!.status).toBe('pending');
+    // The open gaps to 10.30, under the stop loss: it fills there and stops out.
+    broker.onBar(S, bar(et('2025-01-15', '09:30'), 10.3, 10.3, 10.3, 10.3, 1_000_000));
+    broker.onBar(S, bar(et('2025-01-15', '09:31'), 10.3, 10.3, 10.3, 10.3, 1_000_000));
+    const trip = broker.state.roundTrips[0];
+    expect(trip.closed).toBe(true);
+    expect(riskBasis(trip)).toEqual({ entry: 10.8, risk: expect.closeTo(0.4, 6), from: 'planned' });
+  });
+
+  it('sizes a stop-limit to all the buying power its limit leaves, as it never fills above it', () => {
+    const { broker } = setup({}, 10_000, 50);
+    const req = { symbol: S, action: 'buy' as const, type: 'stop_limit' as const, stopPrice: 50.5, limitPrice: 51, stopLoss: 40, tif: 'day' as const };
+    const size = broker.sizeByRisk(req, 50);
+    expect(size).toMatchObject({ ok: true, quantity: broker.affordableQuantity(req) });
   });
 });

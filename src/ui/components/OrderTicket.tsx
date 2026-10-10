@@ -4,7 +4,7 @@ import { assessRisk, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
 import { formatTick, roundToTick } from '../../core/util/math';
-import { closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
+import { bracketErrors, closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
@@ -146,6 +146,13 @@ export function OrderTicket() {
     const r = tradeRisk({ ...request(), quantity: q });
     return r && r.held + r.working > 0 ? r : null;
   }, [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion]);
+
+  // The stop loss and target checked as submit checks them: where the order is expected to fill, which
+  // for a stop-limit or an order already through the market is not the Est. entry shown above.
+  const bracket = useMemo(
+    () => (opening && session ? bracketErrors({ ...request(), quantity: Math.max(1, q) }) : []),
+    [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
+  );
 
   if (!session) return null;
 
@@ -364,7 +371,7 @@ export function OrderTicket() {
         <span className="muted">Est. commission</span>
         <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
       </div>
-      {risk?.errors.map((e) => (
+      {bracket.map((e) => (
         <div key={e} className="alert error">
           {e}
         </div>
@@ -379,7 +386,7 @@ export function OrderTicket() {
           Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
-      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || !!risk?.errors.length}>
+      <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0 || bracket.length > 0}>
         {label}
       </button>
       {result && (

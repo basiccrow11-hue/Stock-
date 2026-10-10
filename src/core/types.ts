@@ -102,7 +102,11 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
    * trade it had partly filled into closed; or under Strict Mode because the trade it was measured with closed.
    */
   conflict?: boolean;
-  /** Market orders: the price they were checked against when placed (last price plus or minus half the spread). */
+  /**
+   * The price the order was checked against when placed or last changed: for a market order the last
+   * price plus or minus half the spread; for an entry, where it was expected to fill (near that quote
+   * when already through the market, a stop-limit's stop never past its limit, else its own price).
+   */
   quotedPrice?: number;
   /** When the order's current terms took effect (placed, or its price or size last changed): it trades only on prices after this. */
   activeFrom?: UnixSeconds;

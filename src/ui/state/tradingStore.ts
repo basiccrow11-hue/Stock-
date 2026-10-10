@@ -857,6 +857,12 @@ export function tradeRisk(req: OrderRequest): TradeRisk | null {
   return broker()?.tradeRisk(req, now) ?? null;
 }
 
+/** What submit would say is wrong with a Buy or Short order's stop loss or target (SimBroker.bracketErrors), at the time submit would place it. */
+export function bracketErrors(req: OrderRequest): string[] {
+  const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
+  return broker()?.bracketErrors(req, now) ?? [];
+}
+
 /** Size by risk: the most shares whose trade risks at most `riskPct`% and that submit would accept (SimBroker.sizeByRisk). */
 export function sizeByRisk(input: Omit<OrderRequest, 'quantity'>, riskPct: number): ReturnType<SimBroker['sizeByRisk']> {
   const now = eng.replay ? eng.replay.now : eng.sim?.market.clock;
