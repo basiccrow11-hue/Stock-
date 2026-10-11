@@ -408,14 +408,20 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   const main = mainExit(parts);
   /**
    * How the closing order filled when it was a stop already past the market when placed or changed:
-   * at once at the last price ('once'), or at the next bar's open ('open': in next-bar-open mode, or
-   * placed before its session opened, or with no room left under the last bar's volume cap).
+   * at once at the last price ('once'); at the open of the next bar ('next': in next-bar-open mode, or
+   * with no room left under the last bar's volume cap); or, placed outside the regular session, at its
+   * open after the extended-hours bars in between, where a stop cannot trade ('regular').
    */
-  const placedPast = (): 'once' | 'open' | undefined => {
+  const placedPast = (): 'once' | 'next' | 'regular' | undefined => {
     const first = main && input.fills.find((f) => f.orderId === main.order.id && trip.fills.includes(f.id));
-    return first?.at === 'placed' ? 'once' : first?.at === 'open' && main!.order.placedThrough ? 'open' : undefined;
+    if (first?.at === 'placed') return 'once';
+    if (first?.at !== 'open' || !main!.order.placedThrough) return undefined;
+    const a = barAt((main!.order.activeFrom ?? main!.order.createdAt) - 1);
+    const b = barAt(first.time);
+    return a >= 0 && b - a > 1 ? 'regular' : 'next';
   };
-  const filledThrough = (how: 'once' | 'open', px: number) => (how === 'once' ? `filled at once at ${formatTick(px)}` : `filled at the next bar's open, ${formatTick(px)}`);
+  const filledThrough = (how: 'once' | 'next' | 'regular', px: number) =>
+    how === 'once' ? `filled at once at ${formatTick(px)}` : how === 'next' ? `filled at the next bar's open, ${formatTick(px)}` : `filled when the regular session opened, at ${formatTick(px)}`;
   // A limit exit at or beyond the original target reached it.
   const reachedTarget = (p: ExitPart) => trip.initialTarget !== undefined && p.order.type === 'limit' && (p.price - trip.initialTarget) * dir >= -1e-9;
   findings.push({
@@ -487,7 +493,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const how = main && main.order.createdAt === placedAt && main.order.stopPrice === S ? placedPast() : undefined;
     if (how) {
       const closed = parts.length > 1 ? `${main!.qty} of your ${trip.exitQtyTotal} shares` : 'the trade';
-      return `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was ${atAverage ? 'at your average entry' : `past your average entry of ${formatTick(trip.avgEntry)}`} and already past the market: it ${filledThrough(how, main!.price)} and closed ${closed} there, ${end}`;
+      return `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was ${atAverage ? 'at your average entry' : `past your average entry of ${formatTick(trip.avgEntry)}`} and already past the market: it ${filledThrough(how, main!.price)}${how === 'once' ? '' : ','} and closed ${closed} there, ${end}`;
     }
     // The average of the shares held when it was placed: the entries known by then.
     const then = avgOf(entries.filter((f) => (f.knownAt ?? f.time) <= placedAt));

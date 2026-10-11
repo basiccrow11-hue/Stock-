@@ -1473,8 +1473,11 @@ export class SimBroker {
       }
       reach(end);
     }
-    // A stop placed through the market fills at its first chance: one this bar left unfilled is now an ordinary stop.
-    for (const o of this.s.orders) if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0) delete o.placedThrough;
+    // A stop placed through the market fills at its first chance: one this bar could trade in (a stop
+    // trades in the regular session only) but left unfilled is now an ordinary stop.
+    for (const o of this.liveOrders()) {
+      if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0 && this.eligible(o, session)) delete o.placedThrough;
+    }
 
     this.s.lastPrice[symbol] = bar.close;
     this.s.lastBar[symbol] = { ...bar };

@@ -116,8 +116,9 @@ export interface Order extends Required<Pick<OrderRequest, 'symbol' | 'action' |
   quotedPrice?: number;
   /**
    * A stop or stop-limit already through the market when it was placed or its price last changed: it
-   * fills near the last price, not at its stop, at once or at the next bar's open (in next-bar-open mode,
-   * or before its session opens). Cleared when a bar it could trade in passes with none of it filled.
+   * fills near the last price, not at its stop, at once, or at the next bar's open in next-bar-open mode,
+   * or at the regular session's open when placed outside it. Cleared when a bar it could trade in passes
+   * with none of it filled.
    */
   placedThrough?: boolean;
   /** When the order's current terms took effect (placed, or its price or size last changed): it trades only on prices after this. */
