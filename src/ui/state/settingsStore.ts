@@ -19,6 +19,7 @@ import {
   type ChartColors,
   type ThemeId,
 } from '../theme/themes';
+import { isHex, normHex } from '../theme/color';
 
 const INDICATOR_TYPES = ['sma', 'ema', 'vwap', 'bb', 'rsi', 'macd', 'atr', 'volume'] as const;
 export type IndicatorType = (typeof INDICATOR_TYPES)[number];
@@ -119,15 +120,18 @@ const CHOICES: Record<string, readonly string[]> = {
   alpacaFeed: ['iex', 'sip'] satisfies Settings['alpacaFeed'][],
 };
 
-function validIndicator(v: unknown): v is IndicatorConfig {
-  return (
-    isObj(v) &&
-    typeof v.id === 'string' &&
-    INDICATOR_TYPES.includes(v.type as IndicatorType) &&
-    typeof v.enabled === 'boolean' &&
-    typeof v.color === 'string' &&
-    (['period', 'mult', 'fast', 'slow', 'signal'] as const).every((k) => v[k] === undefined || (typeof v[k] === 'number' && Number.isFinite(v[k])))
-  );
+/**
+ * `v` as an indicator the chart can compute and draw, or null when it is not one: a known kind, its
+ * periods whole numbers. A colour that is not a hex colour is replaced by the default for that indicator
+ * (or its kind).
+ */
+function readIndicator(v: unknown): IndicatorConfig | null {
+  if (!isObj(v) || typeof v.id !== 'string' || !INDICATOR_TYPES.includes(v.type as IndicatorType) || typeof v.enabled !== 'boolean') return null;
+  if (!(['period', 'fast', 'slow', 'signal'] as const).every((k) => v[k] === undefined || (Number.isInteger(v[k]) && (v[k] as number) >= 1))) return null;
+  if (v.mult !== undefined && !(typeof v.mult === 'number' && Number.isFinite(v.mult))) return null;
+  const ind = v as unknown as IndicatorConfig;
+  const fallback = (DEFAULT_INDICATORS.find((d) => d.id === ind.id) ?? DEFAULT_INDICATORS.find((d) => d.type === ind.type))!.color;
+  return { ...ind, color: isHex(ind.color) ? normHex(ind.color) : fallback };
 }
 
 /**
@@ -158,7 +162,7 @@ export function savedSettings(raw: unknown): SavedSettings {
   if (!isObj(raw)) return s;
   if (Array.isArray(raw.watchlist)) s.watchlist = raw.watchlist.filter(isText);
   // An empty list is a choice (a price-only chart), not a missing value.
-  if (Array.isArray(raw.indicators)) s.indicators = raw.indicators.filter(validIndicator);
+  if (Array.isArray(raw.indicators)) s.indicators = raw.indicators.map(readIndicator).filter((i) => i !== null);
   if (isObj(raw.rules) && Array.isArray(raw.rules.custom)) s.rules = { ...s.rules, custom: raw.rules.custom.filter(isText) };
   if (isObj(raw.appearance)) s.appearance = sanitizeAppearance(raw.appearance);
   return s;

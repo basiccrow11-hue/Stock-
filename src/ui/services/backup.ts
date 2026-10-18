@@ -15,11 +15,12 @@ import type { CsvDataset } from '../../core/data/csvProvider';
 import type { StreakData } from '../../core/streak/streak';
 import { sanitizeStreak } from '../../core/streak/streak';
 import { useJournal } from '../state/journalStore';
-import { useChallenges, type ChallengeAttempt } from '../state/challengeStore';
+import { useChallenges, validAttempt, type ChallengeAttempt } from '../state/challengeStore';
 import { readStreak, restoreStreak } from '../state/streakStore';
 import { savedSettings, useSettings } from '../state/settingsStore';
-import { allDrawings, mergeDrawings, POINTS_NEEDED, type Drawing } from '../chart/drawings';
+import { allDrawings, mergeDrawings, readDrawing, type Drawing } from '../chart/drawings';
 import { TIMEFRAMES } from '../../core/types';
+import { isCalendarTime } from '../../core/time';
 import { csvProvider, saveCsvDataset, sessionStamped, showStoredCsvDataset } from '../state/dataRegistry';
 
 export const BACKUP_FORMAT = 'stock-replay-backup';
@@ -121,6 +122,7 @@ export function backupFileName(b: Backup): string {
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const isStr = (v: unknown): v is string => typeof v === 'string';
+const numOrNull = (v: unknown) => v === null || isNum(v);
 const NOTE_FIELDS = ['why', 'setup', 'good', 'bad', 'change', 'other'] as const;
 
 /** Whether `v` has the shape the journal, analytics and review pages read from an entry. */
@@ -131,29 +133,35 @@ function validEntry(v: unknown): v is JournalEntry {
   if (e.direction !== 'long' && e.direction !== 'short') return false;
   if (e.mode !== 'replay' && e.mode !== 'sim') return false;
   if (!isStr(e.source)) return false;
-  if (![e.entryTime, e.exitTime, e.avgEntry, e.avgExit, e.quantity, e.pnl, e.returnPct, e.holdingSeconds, e.commission, e.createdAt].every(isNum)) return false;
-  if (!isObj(e.notes) || !NOTE_FIELDS.every((k) => isStr((e.notes as Record<string, unknown>)[k]))) return false;
+  if (![e.avgEntry, e.avgExit, e.quantity, e.pnl, e.returnPct, e.holdingSeconds, e.commission, e.createdAt].every(isNum)) return false;
+  // Shown as dates: in a year the calendar has.
+  if (![e.entryTime, e.exitTime].every(isCalendarTime)) return false;
+  // Every note is searched as text, not only the ones the page shows.
+  if (!isObj(e.notes) || !NOTE_FIELDS.every((k) => isStr((e.notes as Record<string, unknown>)[k])) || !Object.values(e.notes).every(isStr)) return false;
   if (typeof e.rewound !== 'boolean') return false;
+  if (e.review !== undefined && !validReview(e.review)) return false;
   const t = e.trip;
   if (!isObj(t) || !isStr(t.id) || !isStr(t.symbol) || !isNum(t.entryTime) || !isNum(t.avgEntry) || !isNum(t.pnl) || !Array.isArray(t.fills)) return false;
   return true;
 }
 
-function validAttempt(v: unknown): v is ChallengeAttempt {
-  return isObj(v) && isStr(v.id) && isStr(v.challengeId) && isStr(v.sessionId) && isStr(v.label) && isNum(v.startedAt) && isObj(v.result) && isStr(v.result.status);
+/** Whether `v` has what the trade review shows: its figures numbers (or none), its findings and rule checks text. */
+function validReview(v: unknown): boolean {
+  if (!isObj(v) || !isStr(v.exitReason) || !isObj(v.mfe) || !isObj(v.mae)) return false;
+  if (![v.rMultiple, v.plannedRR, v.capturePct, v.riskDollars, v.riskPctOfEquity, v.atrAtEntry, v.stopDistanceAtr, v.mfe.r, v.mae.r].every(numOrNull)) return false;
+  if (!(v.riskLimitPct === undefined || isNum(v.riskLimitPct)) || !(v.largestRiskPct === undefined || numOrNull(v.largestRiskPct))) return false;
+  if (!Array.isArray(v.findings) || !v.findings.every((f) => isObj(f) && [f.tone, f.title, f.detail].every(isStr))) return false;
+  return Array.isArray(v.rules) && v.rules.every((c) => isObj(c) && isStr(c.rule) && isStr(c.detail));
 }
 
-function validDrawing(v: unknown): v is Drawing {
-  if (!isObj(v) || !isStr(v.id) || !isStr(v.type) || !Object.hasOwn(POINTS_NEEDED, v.type) || !isStr(v.color) || !Array.isArray(v.points)) return false;
-  return v.points.length === POINTS_NEEDED[v.type as Drawing['type']] && v.points.every((p) => isObj(p) && isNum(p.time) && isNum(p.price));
-}
-
+/** Whether `v` is imported data the replay, the new replay form and the data list can use. */
 function validDataset(v: unknown): v is CsvDataset {
-  if (!isObj(v) || !isStr(v.symbol) || !v.symbol.trim() || !TIMEFRAMES.includes(v.baseTimeframe as CsvDataset['baseTimeframe']) || !Array.isArray(v.bars) || !v.bars.length) return false;
+  if (!isObj(v) || !isStr(v.symbol) || !v.symbol.trim() || !isStr(v.name) || !isStr(v.fileName)) return false;
+  if (!TIMEFRAMES.includes(v.baseTimeframe as CsvDataset['baseTimeframe']) || !Array.isArray(v.bars) || !v.bars.length) return false;
   let last = -Infinity;
   for (const b of v.bars as unknown[]) {
-    if (!isObj(b) || ![b.time, b.open, b.high, b.low, b.close].every(isNum) || (b.time as number) <= last) return false;
-    last = b.time as number;
+    if (!isObj(b) || ![b.open, b.high, b.low, b.close, b.volume].every(isNum) || !isCalendarTime(b.time) || b.time <= last) return false;
+    last = b.time;
   }
   return true;
 }
@@ -177,19 +185,26 @@ export function parseBackup(text: string): BackupContents {
   if (!isObj(raw) || raw.format !== BACKUP_FORMAT) throw new Error('This file is not a Stock Replay backup.');
   if (!isNum(raw.version) || raw.version > BACKUP_VERSION) throw new Error('This backup was made by a newer version of the app. Reload the app to update it, then try again.');
   let skipped = 0;
-  const keep = <T>(list: unknown, ok: (v: unknown) => v is T): T[] => {
+  /** The items of `list` as `read` reads them; those it cannot read (null) are skipped. */
+  const keep = <T>(list: unknown, read: (v: unknown) => T | null): T[] => {
     if (!Array.isArray(list)) return [];
-    const good = list.filter(ok);
+    const good = list.map(read).filter((v) => v !== null);
     skipped += list.length - good.length;
     return good;
   };
-  const journal = keep(raw.journal, validEntry);
+  /** A check as a reader: the item itself when it passes. */
+  const checked =
+    <T>(ok: (v: unknown) => v is T) =>
+    (v: unknown): T | null =>
+      ok(v) ? v : null;
+  const journal = keep(raw.journal, checked(validEntry));
   const snapshots: Record<string, string> = {};
   if (isObj(raw.snapshots)) for (const [k, v] of Object.entries(raw.snapshots)) if (isStr(v) && v.startsWith('data:image/')) snapshots[k] = v;
   const drawings: Record<string, Drawing[]> = {};
   if (isObj(raw.drawings)) {
     for (const [sym, list] of Object.entries(raw.drawings)) {
-      const good = keep(list, validDrawing);
+      // A drawing whose colour is not one is kept, in the default colour (readDrawing).
+      const good = keep(list, readDrawing);
       if (sym && good.length) drawings[sym] = good;
     }
   }
@@ -201,11 +216,11 @@ export function parseBackup(text: string): BackupContents {
     createdAt: isNum(raw.createdAt) ? raw.createdAt : 0,
     journal,
     snapshots,
-    challenges: keep(raw.challenges, validAttempt),
+    challenges: keep(raw.challenges, checked(validAttempt)),
     streak: sanitizeStreak(raw.streak),
     settings: Object.keys(settings).length ? settings : null,
     drawings,
-    ...(raw.datasets !== undefined ? { datasets: keep(raw.datasets, validDataset) } : {}),
+    ...(raw.datasets !== undefined ? { datasets: keep(raw.datasets, checked(validDataset)) } : {}),
   };
   return { backup, skipped };
 }

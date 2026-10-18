@@ -12,14 +12,16 @@ import { CHALLENGES } from '../../core/challenges/challenges';
  * IndexedDB stand-in: one Map per store, kept across module resets as a browser keeps it across a reload.
  * `written`: the keys written, in order. `held`: while set, deleting a session's summary waits for it.
  * `commitMs`: while set, each call waits for those before it and then takes that long, as IndexedDB runs
- * its transactions one after another (`queue` is the last one).
+ * its transactions one after another (`queue` is the last one). `readMs`: per store, how long a read of
+ * it takes, alongside any others, as reads run side by side (a large store takes longer).
  */
-const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), written: [] as string[], held: null as Promise<void> | null, commitMs: 0, queue: Promise.resolve() as Promise<unknown> }));
+const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), written: [] as string[], held: null as Promise<void> | null, commitMs: 0, queue: Promise.resolve() as Promise<unknown>, readMs: {} as Record<string, number> }));
 vi.mock('../services/idb', () => {
   const store = (name: string) => {
     if (!db.stores.has(name)) db.stores.set(name, new Map());
     return db.stores.get(name)!;
   };
+  const read = <T>(s: string, fn: () => T): Promise<T> => (db.readMs[s] ? new Promise((r) => setTimeout(r, db.readMs[s])).then(fn) : run(fn));
   const run = <T>(fn: () => T | Promise<T>): Promise<T> => {
     if (!db.commitMs) {
       try {
@@ -34,15 +36,15 @@ vi.mock('../services/idb', () => {
   };
   return {
     idb: {
-      all: (s: string) => run(() => [...store(s).values()].map((v) => structuredClone(v))),
+      all: (s: string) => read(s, () => [...store(s).values()].map((v) => structuredClone(v))),
       withPrefix: (s: string, prefix: string) =>
-        run(() =>
+        read(s, () =>
           [...store(s).entries()]
             .filter(([k]) => k.startsWith(prefix))
             .sort(([a], [b]) => (a < b ? -1 : 1))
             .map(([, v]) => structuredClone(v)),
         ),
-      get: (s: string, k: string) => run(() => structuredClone(store(s).get(k))),
+      get: (s: string, k: string) => read(s, () => structuredClone(store(s).get(k))),
       set: (s: string, k: string, v: unknown) =>
         run(() => {
           db.written.push(k);
@@ -64,6 +66,8 @@ vi.mock('../services/idb', () => {
   };
 });
 vi.mock('../chart/offscreenSnapshot', () => ({ offscreenSnapshot: async () => 'data:image/jpeg;base64,BB==' }));
+// The chart draws on a canvas jsdom does not have; the screen around it is what is tested here.
+vi.mock('../chart/ChartView', () => ({ ChartView: () => null }));
 
 /** Web Locks stand-in: locks this page holds, and those another tab holds. */
 const locks = vi.hoisted(() => ({ mine: new Set<string>(), elsewhere: new Set<string>() }));
@@ -130,6 +134,7 @@ beforeEach(() => {
   db.held = null;
   db.commitMs = 0;
   db.queue = Promise.resolve();
+  db.readMs = {};
   localStorage.clear();
   sessionStorage.clear();
   locks.mine.clear();
@@ -648,6 +653,127 @@ describe('unfinished sessions and other tabs', () => {
     expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([...older].reverse());
     expect(p.store.useTrading.getState().session!.id).toBe(other);
   });
+});
+
+describe('the Trade screen as a reload carries its session on', () => {
+  /** Apps still open when a test ends (one that failed did not close its own). */
+  const open = new Set<() => void>();
+  afterEach(() => open.forEach((close) => close()));
+
+  /**
+   * Opens the app in this tab again, its storage slow (a large journal or imported data takes a while to
+   * read), as a reload does. `offered` gets each list of unfinished sessions the screen shows, with whether
+   * `shownWith` was on the screen too at that moment.
+   */
+  async function openApp(shownWith = '') {
+    db.readMs = { kv: 5, journal: 5, challenges: 5, datasets: 300 };
+    vi.resetModules();
+    locks.mine.clear();
+    const store = await import('./tradingStore');
+    const { App } = await import('../App');
+    const offered: { text: string; withIt: boolean }[] = [];
+    const seen = new MutationObserver((changes) => {
+      for (const c of changes)
+        for (const n of c.addedNodes) {
+          const list = n instanceof Element && (n.closest('.unfinished-list') ?? n.querySelector('.unfinished-list'));
+          if (list) offered.push({ text: list.textContent ?? '', withIt: !!shownWith && document.body.textContent!.includes(shownWith) });
+        }
+    });
+    seen.observe(document.body, { childList: true, subtree: true });
+    const app = render(createElement(App));
+    // From here React schedules its own updates, as in the browser: the app's loads finish outside act.
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
+    const screen = () => app.el.querySelector('.chart-empty')?.textContent ?? '';
+    const close = () => {
+      if (!open.delete(close)) return;
+      seen.disconnect();
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      app.unmount();
+    };
+    open.add(close);
+    return { store, offered, screen, close };
+  }
+
+  /** A replay with a position open, its clock at `hhmm`, saved as a reload leaves it; its id. */
+  async function leaveRunning(hhmm = '10:30') {
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    a.store.jumpTo(at(hhmm));
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    await settle();
+    a.store.pause();
+    await settle();
+    return a.store.useTrading.getState().session!.id;
+  }
+
+  it('never offers that session to resume or discard, however long the journal and imported data take to load', async () => {
+    const id = await leaveRunning();
+    const app = await openApp();
+    const first = app.screen();
+    expect(await app.store.unfinishedSessions()).toEqual([]);
+    await vi.waitFor(() => expect(app.store.useTrading.getState().session?.id).toBe(id), { timeout: 5000 });
+    await settle();
+    expect(app.offered).toEqual([]);
+    expect(first).toContain('Picking up where you left off');
+    app.close();
+  }, 20_000);
+
+  it('offers it once it is not carried on: when it cannot be read, or once the other tab running it lets it go', async () => {
+    const id = await leaveRunning();
+    // Part of its undo history is gone: it cannot be carried on, and is offered with the reason.
+    const kv = db.stores.get('kv')!;
+    kv.delete([...kv.keys()].find((k) => k.startsWith(`session-cp:${id}:`))!);
+    let app = await openApp('This saved session could not be read.');
+    await vi.waitFor(() => expect(app.offered.some((o) => o.withIt)).toBe(true), { timeout: 5000 });
+    // Not before then: until it had tried, the reload was carrying it on.
+    expect(app.offered.every((o) => o.withIt)).toBe(true);
+    expect(app.offered[0].text).toContain('SPY · 2024-03-12');
+    expect(app.store.useTrading.getState().session).toBeNull();
+    app.close();
+
+    // Running in another tab (this one was duplicated from it): not offered here until that tab lets it go.
+    const other = await leaveRunning('11:00');
+    locks.elsewhere = new Set([`stock-replay-session:${other}`]);
+    app = await openApp();
+    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    await settle();
+    expect(app.offered.map((o) => o.text).join()).not.toContain('11:00 ET');
+    locks.elsewhere.clear();
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(app.offered.map((o) => o.text).join()).toContain('11:00 ET'), { timeout: 5000 });
+    expect(app.store.useTrading.getState().session).toBeNull();
+    app.close();
+  }, 20_000);
+
+  it('lists it as soon as the reload finds it cannot carry it on, and not before', async () => {
+    const id = await leaveRunning();
+    const kv = db.stores.get('kv')!;
+    kv.delete([...kv.keys()].find((k) => k.startsWith(`session-cp:${id}:`))!);
+    const b = await page();
+    const { UnfinishedSessions } = await import('../components/UnfinishedSessions');
+    const list = render(createElement(UnfinishedSessions));
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+    expect(list.el.querySelectorAll('li')).toHaveLength(0);
+    expect(await b.store.resumeAfterReload()).toBe(false);
+    await vi.waitFor(() => expect(list.el.querySelectorAll('li')).toHaveLength(1));
+    expect((await b.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
+    list.unmount();
+  });
+
+  it('offers a session left by a closed tab at once, with nothing of its own to carry on', async () => {
+    const id = await leaveRunning();
+    rememberNothing();
+    const app = await openApp();
+    expect(app.screen()).not.toContain('Picking up where you left off');
+    await vi.waitFor(() => expect(app.offered).toHaveLength(1), { timeout: 5000 });
+    // Offered on the screen that starts a session, which never said it was picking one up.
+    expect(app.screen()).toContain('Practice trading when the market is closed');
+    expect(app.offered[0].text).toContain('SPY · 2024-03-12');
+    expect(app.store.useTrading.getState().session).toBeNull();
+    expect((await app.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
+    app.close();
+  }, 20_000);
 });
 
 describe('a session as saved when its replay or its challenge attempt ends', () => {

@@ -116,4 +116,29 @@ describe('a damaged or hand-edited save', () => {
     expect(typeof reloaded.useSettings.getState().update).toBe('function');
     expect(reloaded.useSettings.getState().defaultBalance).toBe(25_000);
   });
+
+  it('gives an indicator whose colour is not a hex colour its default colour, and leaves out one the chart could not compute', async () => {
+    const ind = (id: string, type: string, color: string, params: object = {}) => ({ id, type, enabled: true, color, ...params });
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        state: {
+          indicators: [
+            ind('vwap', 'vwap', 'purple'),
+            ind('mine', 'bb', 'rgb(0,0,0)', { period: 20, mult: 2 }),
+            ind('half', 'sma', '#fff', { period: 2.5 }),
+            ind('zero', 'macd', '#fff', { fast: 0, slow: 26, signal: 9 }),
+            ind('ok', 'atr', '#FFF', { period: 14 }),
+          ],
+        },
+        version: 1,
+      }),
+    );
+    const { useSettings } = await import('./settingsStore');
+    expect(useSettings.getState().indicators.map((i) => [i.id, i.color])).toEqual([
+      ['vwap', '#c77dff'],
+      ['mine', '#26a69a'],
+      ['ok', '#ffffff'],
+    ]);
+  });
 });

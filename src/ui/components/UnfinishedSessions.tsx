@@ -69,15 +69,17 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
 export function UnfinishedSessions() {
   const session = useTrading((s) => s.session);
   const loading = useTrading((s) => s.loading);
+  const carryingOn = useTrading((s) => s.carryingOn !== null);
   const [list, setList] = useState<SessionSummary[]>([]);
   const refresh = useCallback(() => {
     unfinishedSessions()
       .then(setList)
       .catch(() => setList([]));
   }, []);
+  // Looked at again once a reload has carried its session on, or found that it cannot (then it is listed).
   useEffect(() => {
-    if (!session && !loading) refresh();
-  }, [session, loading, refresh]);
+    if (!session && !loading && !carryingOn) refresh();
+  }, [session, loading, carryingOn, refresh]);
   // A session another tab runs is offered once that tab lets it go (closed, or crashed), and the list
   // is looked at again on coming back to this tab.
   useEffect(() => (session ? undefined : onSessionFreed(refresh)), [session, list, refresh]);

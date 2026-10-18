@@ -65,3 +65,19 @@ describe('drawings changed in another tab', () => {
     expect(stored('AAPL')).toEqual(['a2']);
   });
 });
+
+describe('drawings already stored', () => {
+  it('are drawn in the default colour when theirs is not a hex colour, and left out when the chart could not draw them', async () => {
+    const red = { ...line('red'), color: 'red' };
+    localStorage.setItem(
+      `${KEY}TSLA`,
+      JSON.stringify([red, line('ok'), { ...line('odd'), type: 'circle' }, { ...line('far'), points: [{ time: 9e12, price: 1 }] }, { ...line('short'), type: 'trend' }, { ...line('id'), id: 7 }, 'junk']),
+    );
+    const drawings = await tab();
+    drawings.getState().setSymbol('TSLA');
+    expect(drawings.getState().drawings).toEqual([{ ...red, color: '#4f8cff' }, line('ok')]);
+    // The next change saves them so.
+    drawings.getState().add(line('new'));
+    expect(JSON.parse(localStorage.getItem(`${KEY}TSLA`)!)).toEqual([{ ...red, color: '#4f8cff' }, line('ok'), line('new')]);
+  });
+});

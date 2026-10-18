@@ -15,6 +15,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   const symbol = useTrading((s) => s.activeSymbol);
   const timeframe = useTrading((s) => s.timeframe);
   const loading = useTrading((s) => s.loading);
+  const carryingOn = useTrading((s) => s.carryingOn !== null);
   const error = useTrading((s) => s.error);
   const { tool, setTool, color, setColor, clear, drawings } = useDrawings();
   const isSim = session?.mode === 'sim';
@@ -69,6 +70,9 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
           <div className="chart-empty">
             {loading ? (
               <EmptyState title="Loading market data…">Preparing the replay. Future bars stay hidden.</EmptyState>
+            ) : carryingOn ? (
+              // A reload carries on the session this tab was running: it is not offered to resume or discard meanwhile.
+              <EmptyState title="Picking up where you left off…">The session this tab was running comes back as it was, paused.</EmptyState>
             ) : (
               <div className="stack" style={{ alignItems: 'center', width: '100%', maxWidth: 520, textAlign: 'center' }}>
                 {error && <div className="alert error">{error}</div>}

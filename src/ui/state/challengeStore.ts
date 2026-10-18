@@ -19,6 +19,21 @@ export interface ChallengeAttempt {
   result: ChallengeResult;
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Whether `v` is an attempt the Challenges page can show (one stored here, or read from a backup file):
+ * its result's status and detail are text, whether it counts is a yes or no, and its progress, if it has
+ * one, is a number.
+ */
+export function validAttempt(v: unknown): v is ChallengeAttempt {
+  if (!isObj(v) || ![v.id, v.challengeId, v.sessionId, v.label].every(isStr) || !isNum(v.startedAt) || !isObj(v.result)) return false;
+  const r = v.result;
+  return isStr(r.status) && isStr(r.detail) && typeof r.official === 'boolean' && (r.progress === undefined || isNum(r.progress));
+}
+
 interface ChallengeStore {
   attempts: ChallengeAttempt[];
   active: ChallengeAttempt | null;
@@ -40,7 +55,8 @@ export const useChallenges = create<ChallengeStore>()((set, get) => ({
   active: null,
   load: async () => {
     try {
-      const attempts = await idb.all<ChallengeAttempt>('challenges');
+      // Only those the page can show: one restored from a hand-edited file before files were checked so is left out.
+      const attempts = (await idb.all<unknown>('challenges')).filter(validAttempt);
       attempts.sort((a, b) => b.startedAt - a.startedAt);
       set({ attempts });
     } catch {
@@ -65,11 +81,13 @@ export const useChallenges = create<ChallengeStore>()((set, get) => ({
     let added = 0;
     for (const a of list) {
       // Whether it is here is decided by storage, not by the list, which a restore that stopped
-      // partway may have left without attempts it had stored.
-      const stored = await idb.get<ChallengeAttempt>('challenges', a.id);
+      // partway may have left without attempts it had stored. One stored that the page cannot show
+      // (load leaves it out) is not here: this one takes its place.
+      const found = await idb.get<unknown>('challenges', a.id);
+      const stored = validAttempt(found) ? found : undefined;
       if (stored && get().attempts.some((x) => x.id === a.id)) continue;
       // Checked and written in one transaction, so an attempt another tab has just saved is never replaced.
-      const attempt = stored ?? (await idb.modify<ChallengeAttempt>('challenges', a.id, (cur) => (cur ? undefined : a)));
+      const attempt = stored ?? (await idb.modify<ChallengeAttempt>('challenges', a.id, (cur) => (validAttempt(cur) ? undefined : a)));
       if (!attempt) continue;
       set({ attempts: [...get().attempts.filter((x) => x.id !== a.id), attempt].sort((x, y) => y.startedAt - x.startedAt) });
       added++;

@@ -99,6 +99,11 @@ export interface TradingSnapshot {
   /** Order-ticket field waiting for a price click on the chart. */
   pickTarget: 'limit' | 'stop' | 'stopLoss' | 'takeProfit' | null;
   pickedPrice: { field: string; price: number; seq: number } | null;
+  /**
+   * After a reload, the session this tab was running, until resumeAfterReload has carried it on or found
+   * that it cannot: meanwhile it is not offered to resume or discard, since the reload carries it on itself.
+   */
+  carryingOn: string | null;
 }
 
 // ------------------------------------------------------------------ chart bus
@@ -193,7 +198,8 @@ const eng: Engines = {
 export const REPLAY_SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 23400];
 export const SIM_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300];
 
-const EMPTY: TradingSnapshot = {
+/** What starting or ending a session resets: not carryingOn, which only resumeAfterReload settles. */
+const EMPTY: Omit<TradingSnapshot, 'carryingOn'> = {
   session: null,
   activeSymbol: 'SPY',
   timeframe: '1m',
@@ -222,7 +228,7 @@ const EMPTY: TradingSnapshot = {
   pickedPrice: null,
 };
 
-export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY }));
+export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY, carryingOn: tabSession() }));
 
 // Other open tabs keep this tab's running blind session's dates hidden too (they share the journal).
 useTrading.subscribe((s, prev) => {
@@ -946,10 +952,11 @@ if (typeof window !== 'undefined') {
   void reconcileSavedBlind(async () => (await keptSessions()).map((s) => ({ id: s.id, start: hiddenStart(s), older: s.challengeUnderWay === undefined }))).catch(() => undefined);
 }
 
-/** Unfinished sessions this browser kept that no tab is running, newest first. */
+/** Unfinished sessions this browser kept that no tab is running, newest first, but not one a reload is carrying on. */
 export async function unfinishedSessions(): Promise<SessionSummary[]> {
-  const running = useTrading.getState().session?.id;
-  return (await listSessions()).filter((s) => s.id !== running);
+  const kept = await listSessions();
+  const { session, carryingOn } = useTrading.getState();
+  return kept.filter((s) => s.id !== session?.id && s.id !== carryingOn);
 }
 
 /**
@@ -1279,16 +1286,21 @@ export async function resumeSession(id: string): Promise<boolean> {
 
 /** After a reload: carries on the session this tab was running, if it was kept and no other tab has it. */
 export async function resumeAfterReload(): Promise<boolean> {
-  const id = tabSession();
-  const s = useTrading.getState();
-  if (!id || s.session || s.loading) return false;
-  const kept = await listSessions().catch(() => []);
-  if (!kept.some((k) => k.id === id)) {
-    // Ended, or running in a tab this one was duplicated from.
-    rememberTabSession(null);
-    return false;
+  try {
+    const id = tabSession();
+    const s = useTrading.getState();
+    if (!id || s.session || s.loading) return false;
+    const kept = await listSessions().catch(() => []);
+    if (!kept.some((k) => k.id === id)) {
+      // Ended, or running in a tab this one was duplicated from.
+      rememberTabSession(null);
+      return false;
+    }
+    return await resumeSession(id);
+  } finally {
+    // Carried on, or it cannot be: from here it is offered like any other.
+    useTrading.setState({ carryingOn: null });
   }
-  return resumeSession(id);
 }
 
 export function play(): void {

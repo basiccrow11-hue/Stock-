@@ -1,5 +1,7 @@
 /** Chart drawing model + per-symbol persistence (localStorage). Points are stored in real time/price. */
 import { create } from 'zustand';
+import { isCalendarTime } from '../../core/time';
+import { isHex } from '../theme/color';
 
 export type DrawingTool = 'select' | 'trend' | 'hline' | 'vline' | 'rect' | 'sr' | 'fib';
 export type DrawingType = Exclude<DrawingTool, 'select'>;
@@ -28,13 +30,31 @@ export const TOOL_LABELS: Record<DrawingTool, string> = {
 
 export const POINTS_NEEDED: Record<DrawingType, number> = { trend: 2, hline: 1, vline: 1, rect: 2, sr: 2, fib: 2 };
 export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+/** The colour new drawings start with. */
+export const DEFAULT_DRAWING_COLOR = '#4f8cff';
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * `v` as a drawing the chart can draw (one saved here, or read from a backup file), or null when it is
+ * not one: a known kind with its number of points, each a time the calendar has and a price. A colour
+ * that is not a hex colour (a hand-edited file's 'red', say) is replaced by the default.
+ */
+export function readDrawing(v: unknown): Drawing | null {
+  if (!isObj(v) || typeof v.id !== 'string' || typeof v.type !== 'string' || !Object.hasOwn(POINTS_NEEDED, v.type) || !Array.isArray(v.points)) return null;
+  if (v.points.length !== POINTS_NEEDED[v.type as DrawingType] || !v.points.every((p) => isObj(p) && isCalendarTime(p.time) && typeof p.price === 'number' && Number.isFinite(p.price))) return null;
+  const d = v as unknown as Drawing;
+  return isHex(d.color) ? d : { ...d, color: DEFAULT_DRAWING_COLOR };
+}
 
 const key = (symbol: string) => `stock-replay-drawings:${symbol}`;
 
 function load(symbol: string): Drawing[] {
   try {
     const list: unknown = JSON.parse(localStorage.getItem(key(symbol)) ?? '[]');
-    return Array.isArray(list) ? (list as Drawing[]) : [];
+    // Only drawings the chart can draw: one restored from a hand-edited file before files were checked
+    // so is left out, or drawn in the default colour.
+    return Array.isArray(list) ? list.map(readDrawing).filter((d) => d !== null) : [];
   } catch {
     return [];
   }
@@ -98,7 +118,7 @@ interface DrawingStore {
 export const useDrawings = create<DrawingStore>()((set, get) => ({
   symbol: '',
   tool: 'select',
-  color: '#4f8cff',
+  color: DEFAULT_DRAWING_COLOR,
   drawings: [],
   selectedId: null,
   setSymbol: (symbol) => {

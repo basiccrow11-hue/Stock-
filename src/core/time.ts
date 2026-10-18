@@ -101,6 +101,18 @@ export function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
+/** The first and last times whose exchange date has a four-digit year, as dates here are written. */
+const FIRST_CALENDAR_TIME = Date.UTC(1000, 0, 2) / 1000;
+const LAST_CALENDAR_TIME = Date.UTC(9999, 11, 31) / 1000;
+
+/**
+ * Whether `t` is a time (unix seconds) the calendar here can date and show: in the years 1000 to 9999.
+ * Outside them a date is not written as YYYY-MM-DD, and far enough out the browser cannot format it.
+ */
+export function isCalendarTime(t: unknown): t is UnixSeconds {
+  return typeof t === 'number' && t >= FIRST_CALENDAR_TIME && t <= LAST_CALENDAR_TIME;
+}
+
 /** Exchange calendar date (YYYY-MM-DD) for a timestamp. */
 export function exchangeDate(t: UnixSeconds): string {
   return dayInfo(Math.floor((t + offsetFor(t)) / 86400)).date;
