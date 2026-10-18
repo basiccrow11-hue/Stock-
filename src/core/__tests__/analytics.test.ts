@@ -4,7 +4,7 @@ import { assessRisk, positionSizeForRisk } from '../risk/risk';
 import { reviewTrade, DEFAULT_TRADING_RULES } from '../learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeContext } from '../challenges/challenges';
 import { SimBroker } from '../broker/SimBroker';
-import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG } from '../broker/config';
+import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import type { Bar, RoundTrip } from '../types';
 import { ReplaySession } from '../replay/ReplaySession';
 import { ReplayEngine } from '../replay/ReplayEngine';
@@ -2156,6 +2156,349 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect(entryPastStop(trip)).toBe(true);
     expect(riskBasis(trip)).toEqual({ entry: 49.8, risk: expect.closeTo(0.1, 9), from: 'planned' });
     expect(text).toContain('Entry filled past your stop: Price gapped through both your entry order at 49.80 and your stop at 49.70, so it filled at 49.60.');
+  });
+});
+
+describe('an order the volume cap filled in parts, as the review tells it', () => {
+  /**
+   * A broker that fills at most a quarter of a bar's volume, and bars given as a long's prices: for a short
+   * every price is mirrored (p), so the same move goes against it. `next` adds the bar a minute after the last.
+   */
+  function capped(long: boolean, config: Partial<ExecutionConfig> = {}) {
+    const p = (x: number) => (long ? x : 200 - x);
+    const broker = new SimBroker({ startingBalance: 1_000_000, config: { ...ZERO_COST_CONFIG, maxParticipation: 0.25, ...config } });
+    const bars: Bar[] = [];
+    let t = et('2025-01-15', '10:00');
+    const at = (time: number, o: number, h: number, l: number, c: number, v: number) => {
+      bars.push(bar(time, p(o), p(long ? h : l), p(long ? l : h), p(c), v));
+      broker.onBar('T', bars[bars.length - 1]);
+      t = time + 60;
+    };
+    const next = (o: number, h: number, l: number, c: number, v: number) => at(t, o, h, l, c, v);
+    const result = (n = 0) => {
+      const st = broker.state;
+      const trip = st.roundTrips[n];
+      const review = reviewTrade({ trip, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 1_000_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES, ended: true });
+      const fills = st.fills.filter((f) => trip.fills.includes(f.id)).map((f) => [f.price, f.quantity, f.at]);
+      return { trip, review, fills, text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+    };
+    const move = (stopPrice: number) => {
+      const stop = broker.workingOrders('T').find((o) => o.type === 'stop')!;
+      expect(broker.modify(stop.id, { stopPrice: p(stopPrice) }).ok).toBe(true);
+    };
+    return { broker, at, next, result, move, p, f: (x: number) => formatTick(p(x)), open: long ? ('buy' as const) : ('short' as const), close: long ? ('sell' as const) : ('cover' as const) };
+  }
+  const rest = 'and the rest over later bars as the volume cap (Data & Settings) allowed';
+
+  it('says a stop moved past the market filled only its first part at once, and how much further, or back, the rest took the average', () => {
+    for (const long of [true, false]) {
+      // Long 1,000 at 100. The bar it is moved on leaves room for 500 shares; the next bar opens at `then`.
+      const run = (stopLoss: number, low: number, moveTo: number, then: number) => {
+        const s = capped(long);
+        s.next(100, 100, 100, 100, 1e6);
+        s.broker.submit({ symbol: 'T', action: s.open, type: 'market', quantity: 1000, stopLoss: s.p(stopLoss), tif: 'gtc' });
+        s.next(100, 100, 100, 100, 1e6);
+        s.next(100, 100, low, low, 2000);
+        s.move(moveTo);
+        s.next(then, then, then, then, 1e6);
+        return { ...s, ...s.result() };
+      };
+      const further = run(98, 98.5, 99, 96.5);
+      const { f } = further;
+      expect(further.fills).toEqual([[100, 1000, 'placed'], [further.p(98.5), 500, 'placed'], [further.p(96.5), 500, 'open']]);
+      expect([further.trip.avgExit, further.review.rMultiple]).toEqual([further.p(97.5), -1.25]);
+      expect(further.text).toContain(
+        `Stop filled past its price: Your stop at ${f(99)} was already past the market when you placed or changed it, so the first 500 of its 1000 shares filled at once at ${f(98.5)}, 0.50 past its price, ${rest}, which took the average 1.00 further, to ${f(97.5)}: -1.25R per share.`,
+      );
+      expect(further.text).not.toContain(`at once at ${f(97.5)}`);
+      // The rest filled closer to the stop than the first part.
+      const back = run(97, 98, 99, 98.3);
+      expect(back.fills.slice(1)).toEqual([[back.p(98), 500, 'placed'], [back.p(98.3), 500, 'open']]);
+      expect(back.text).toContain(`so the first 500 of its 1000 shares filled at once at ${f(98)}, 1.00 past its price, ${rest}, which brought the average 0.15 back, to ${f(98.15)}: -0.62R per share.`);
+      // Moved to the last price itself: the first part filled at the stop's own price.
+      const own = run(97, 99, 99, 97);
+      expect(own.fills.slice(1)).toEqual([[own.p(99), 500, 'placed'], [own.p(97), 500, 'open']]);
+      expect(own.text).toContain(`so the first 500 of its 1000 shares filled at once at ${f(99)}, its own price, ${rest}, which took the average 1.00 further, to ${f(98)}: -0.67R per share.`);
+    }
+  });
+
+  it('says the same of one that filled from the next bar’s open in next-bar-open mode', () => {
+    for (const long of [true, false]) {
+      const s = capped(long, { marketOrderFill: 'next_bar_open' });
+      s.next(100, 100, 100, 100, 1e6);
+      s.broker.submit({ symbol: 'T', action: s.open, type: 'market', quantity: 1000, stopLoss: s.p(98), tif: 'gtc' });
+      s.next(100, 100, 100, 100, 1e6);
+      s.next(100, 100, 98.5, 98.5, 1e6);
+      s.move(99);
+      s.next(97.5, 97.5, 97, 97, 2000); // room for 500 at this open
+      s.next(97, 97, 96.5, 96.8, 1e6); // and the rest at this one
+      const { fills, review, text } = s.result();
+      expect(fills.slice(1)).toEqual([[s.p(97.5), 500, 'open'], [s.p(97), 500, 'open']]);
+      expect(review.rMultiple).toBe(-1.375);
+      expect(text).toContain(
+        `Your stop at ${s.f(99)} was already past the market when you placed or changed it, so the first 500 of its 1000 shares filled at the next bar's open, ${s.f(97.5)}, 1.50 past its price, ${rest}, which took the average 0.25 further, to ${s.f(97.25)}: -1.38R per share.`,
+      );
+    }
+  });
+
+  it('says the same of one moved past the market while the morning’s first minute forms, or after hours', () => {
+    for (const long of [true, false]) {
+      for (const marketOrderFill of ['last_price', 'next_bar_open'] as const) {
+        // 09:30:30: the stock has not traded yet today, and the first two minutes each have room for 500 shares.
+        const after = capped(long, { marketOrderFill });
+        after.at(et('2025-01-15', '15:58'), 50, 50, 50, 50, 5e6);
+        after.broker.submit({ symbol: 'T', action: after.open, type: 'market', quantity: 1000, tif: 'gtc', stopLoss: after.p(49) });
+        after.at(et('2025-01-15', '15:59'), 50, 50, 49.3, 49.3, 5e6);
+        after.broker.syncClock(et('2025-01-16', '09:30') + 30);
+        after.move(49.8);
+        after.at(et('2025-01-16', '09:30'), 49.5, 49.6, 49, 49.1, 2000);
+        after.at(et('2025-01-16', '09:31'), 48.9, 49.2, 48.8, 49, 2000);
+        after.at(et('2025-01-16', '09:32'), 48.9, 49.2, 48.8, 49, 5e6);
+        const a = after.result();
+        const { f, p } = after;
+        if (marketOrderFill === 'last_price') {
+          expect(a.fills.slice(1)).toEqual([[p(49.3), 500, 'bar'], [p(48.9), 500, 'open']]);
+          expect(a.text).toContain(`so the first 500 of its 1000 shares filled at ${f(49.3)} when it could next trade, 0.50 past its price, ${rest}, which took the average 0.20 further, to ${f(49.1)}: -0.90R per share.`);
+        } else {
+          // 09:31's open and 09:32's are the same price.
+          expect(a.fills.slice(1)).toEqual([[p(48.9), 500, 'open'], [p(48.9), 500, 'open']]);
+          expect(a.text).toContain(`so the first 500 of its 1000 shares filled at the next bar's open, ${f(48.9)}, 0.90 past its price, ${rest}, for an average of ${f(48.9)}: -1.10R per share.`);
+        }
+        // Moved after the close: it waits for the regular open, which has room for 500.
+        const regular = capped(long, { marketOrderFill });
+        regular.at(et('2025-01-15', '15:58'), 50, 50, 50, 50, 5e6);
+        regular.broker.submit({ symbol: 'T', action: regular.open, type: 'market', quantity: 1000, tif: 'gtc', stopLoss: regular.p(48) });
+        regular.at(et('2025-01-15', '15:59'), 50, 50.1, 49.9, 50, 5e6);
+        regular.at(et('2025-01-15', '16:00'), 50, 50, 49.3, 49.3, 5e6);
+        regular.move(49.8);
+        for (const hhmm of ['16:01', '19:59']) regular.at(et('2025-01-15', hhmm), 49.3, 49.4, 49.2, 49.3, 5e6);
+        regular.at(et('2025-01-16', '09:29'), 49.3, 49.4, 49.2, 49.3, 5e6);
+        regular.at(et('2025-01-16', '09:30'), 49, 49.1, 48.9, 49, 2000);
+        regular.at(et('2025-01-16', '09:31'), 48.6, 48.7, 48.5, 48.6, 5e6);
+        const r = regular.result();
+        expect(r.fills.slice(1)).toEqual([[p(49), 500, 'open'], [p(48.6), 500, 'open']]);
+        expect(r.text).toContain(`so the first 500 of its 1000 shares filled when the regular session opened, at ${f(49)}, 0.80 past its price, ${rest}, which took the average 0.20 further, to ${f(48.8)}: -0.60R per share.`);
+      }
+    }
+  });
+
+  it('says a stop placed after entry past the average and past the market filled only its first part there', () => {
+    for (const long of [true, false]) {
+      for (const nbo of [false, true]) {
+        const s = capped(long, nbo ? { marketOrderFill: 'next_bar_open' } : {});
+        s.next(100, 100, 100, 100, 1e6);
+        s.broker.submit({ symbol: 'T', action: s.open, type: 'market', quantity: 1000, tif: 'gtc' });
+        // At once, against what is left of this bar's room for 500; or from the next bar's open, with room for 500.
+        s.next(100, 100.6, 100, 100.5, nbo ? 1e6 : 2000);
+        expect(s.broker.submit({ symbol: 'T', action: s.close, type: 'stop', stopPrice: s.p(101), quantity: 1000, tif: 'gtc' }).ok).toBe(true);
+        if (nbo) s.next(100.5, 100.6, 100.4, 100.5, 2000);
+        s.next(99.8, 99.9, 99.7, 99.8, 1e6);
+        const { trip, review, fills, text } = s.result();
+        expect(fills.slice(1)).toEqual([[s.p(100.5), 500, nbo ? 'open' : 'placed'], [s.p(99.8), 500, 'open']]);
+        expect([trip.closed, trip.pnl, review.rMultiple]).toEqual([true, 150, null]);
+        const how = nbo ? `at the next bar's open, ${s.f(100.5)},` : `at once at ${s.f(100.5)}`;
+        expect(text).toContain(
+          `Risk not measurable: Your stop at ${s.f(101)}, placed 1m after you entered, was past your average entry of 100.00 and already past the market: the first 500 of its 1000 shares filled ${how} ${rest}, closing the trade at an average of ${s.f(100.15)}, so the trade's risk cannot be measured in R.`,
+        );
+        expect(text).not.toContain('closed the trade there');
+        expect(text).not.toContain('Stop filled past its price');
+      }
+      // A breakeven stop moved past the market later, which only the finding in dollars says.
+      const even = capped(long);
+      even.next(50, 50, 50, 50, 1e6);
+      even.broker.submit({ symbol: 'T', action: even.open, type: 'market', quantity: 1000, tif: 'gtc' });
+      even.next(50, 50.2, 50, 50.1, 1e6);
+      expect(even.broker.submit({ symbol: 'T', action: even.close, type: 'stop', stopPrice: even.p(50), quantity: 1000, tif: 'gtc' }).ok).toBe(true);
+      even.next(50.1, 50.1, 50.02, 50.02, 2000);
+      even.move(50.05);
+      even.next(49.9, 49.95, 49.85, 49.9, 1e6);
+      const e = even.result();
+      expect(e.fills.slice(1)).toEqual([[even.p(50.02), 500, 'placed'], [even.p(49.9), 500, 'open']]);
+      expect(e.review.rMultiple).toBeNull();
+      expect(e.text).toContain(
+        `Stop filled past its price: Your stop at ${even.f(50.05)} was already past the market when you placed or changed it, so the first 500 of its 1000 shares filled at once at ${even.f(50.02)}, 0.03 past its price, ${rest}, which took the average 0.06 further, to ${even.f(49.96)}.`,
+      );
+    }
+  });
+
+  it('says how the first part of an entry the volume cap filled in parts came past its target, then the rest', () => {
+    for (const long of [true, false]) {
+      // A market order waiting for the next open, whose thin bar has room for 41 shares; the rest fill at the
+      // open after, back short of the target, which fills later.
+      const market = capped(long, { marketOrderFill: 'next_bar_open' });
+      market.next(93.31, 93.31, 93.31, 93.31, 1e6);
+      expect(market.broker.submit({ symbol: 'T', action: market.open, type: 'market', quantity: 486, stopLoss: market.p(92), takeProfit: market.p(94), tif: 'gtc' }).ok).toBe(true);
+      market.next(95, 95, 94.5, 94.6, 164);
+      market.next(93.99, 93.99, 93.9, 93.95, 1e6);
+      market.next(93.95, 94.5, 93.9, 94.4, 1e6);
+      const m = market.result();
+      const { f, p } = market;
+      expect(m.fills).toEqual([[p(95), 41, 'open'], [p(93.99), 445, 'open'], [p(94), 486, 'bar']]);
+      expect(m.text).toContain(
+        `Entry filled past your target: Your market order was placed with price at ${f(93.31)} and the first 41 of its 486 shares filled at the next open, ${f(95)}, already past your target at ${f(94)}, ${rest}, for an average of ${f(94.08)}.`,
+      );
+      // A stop entry that a gap carries past both it and its target.
+      const gap = capped(long);
+      gap.next(99, 99, 99, 99, 1e6);
+      expect(gap.broker.submit({ symbol: 'T', action: gap.open, type: 'stop', stopPrice: p(100), quantity: 1000, takeProfit: p(100.5), stopLoss: p(98), tif: 'gtc' }).ok).toBe(true);
+      gap.next(101, 101, 100.9, 101, 2000);
+      gap.next(100.4, 100.45, 100.3, 100.4, 1e6);
+      gap.next(100.4, 100.8, 100.3, 100.7, 1e6);
+      const g = gap.result();
+      expect(g.fills).toEqual([[p(101), 500, 'open'], [p(100.4), 500, 'open'], [p(100.5), 1000, 'bar']]);
+      expect(g.text).toContain(`Entry filled past your target: Price gapped through both your entry order at ${f(100)} and your target at ${f(100.5)}, so the first 500 of its 1000 shares filled at ${f(101)}, ${rest}, for an average of ${f(100.7)}.`);
+      // A stop entry already through the market, waiting for the next open in next-bar-open mode.
+      const nbo = capped(long, { marketOrderFill: 'next_bar_open' });
+      nbo.next(100, 100, 100, 100, 1e6);
+      expect(nbo.broker.submit({ symbol: 'T', action: nbo.open, type: 'stop', stopPrice: p(99.5), quantity: 1000, takeProfit: p(100.8), stopLoss: p(98), tif: 'gtc' }).ok).toBe(true);
+      nbo.next(101.5, 101.6, 101.4, 101.5, 2000);
+      nbo.next(100.6, 100.7, 100.5, 100.6, 1e6);
+      nbo.next(100.6, 101, 100.5, 100.9, 1e6);
+      const n = nbo.result();
+      expect(n.fills.slice(0, 2)).toEqual([[p(101.5), 500, 'open'], [p(100.6), 500, 'open']]);
+      expect(n.text).toContain(
+        `Entry filled past your target: Your entry order at ${f(99.5)} was expected to fill near ${f(100)}, but price gapped past your target at ${f(100.8)} before it could, so the first 500 of its 1000 shares filled at ${f(101.5)}, ${rest}, for an average of ${f(101.05)}.`,
+      );
+      // A target a cent away: the spread carries the first part past it, and the rest, filled further on,
+      // takes the average past it by more than the spread.
+      const costs = capped(long, { spread: { mode: 'cents', value: 0.04, minimum: 0, extendedHoursMultiplier: 1 } });
+      costs.next(99, 99, 99, 99, 1e6);
+      expect(costs.broker.submit({ symbol: 'T', action: costs.open, type: 'stop', stopPrice: p(100), quantity: 1000, takeProfit: p(100.01), stopLoss: p(98), tif: 'gtc' }).ok).toBe(true);
+      costs.next(99.9, 100.1, 99.9, 100.05, 400);
+      costs.next(100.02, 100.025, 100, 100.02, 1e6);
+      costs.next(100.02, 100.3, 100, 100.25, 1e6);
+      const c = costs.result();
+      expect(c.fills).toEqual([[p(100.02), 100, 'bar'], [p(100.04), 900, 'open'], [p(100.01), 1000, 'bar']]);
+      expect(c.text).toContain(
+        `Entry filled past your target: Your entry order at ${f(100)} filled the first 100 of its 1000 shares at ${f(100.02)}, past your target at ${f(100.01)}: the spread and slippage of that fill alone carried it past a target that close, and the rest filled over later bars as the volume cap (Data & Settings) allowed, for an average of ${f(100.04)}.`,
+      );
+      // A stop entry placed halfway into a minute whose prices are already past both it and its target.
+      const mid = capped(long);
+      mid.next(100, 100, 100, 100, 1e6);
+      mid.next(100, 100, 100, 100, 1e6);
+      mid.broker.syncClock(et('2025-01-15', '10:02') + 30);
+      expect(mid.broker.submit({ symbol: 'T', action: mid.open, type: 'stop', stopPrice: p(100.5), quantity: 1000, takeProfit: p(101), stopLoss: p(99), tif: 'gtc' }).ok).toBe(true);
+      mid.next(102, 103, 102, 102.5, 2000);
+      mid.next(100.8, 100.9, 100.7, 100.8, 1e6);
+      mid.next(100.8, 101.3, 100.7, 101.2, 1e6);
+      const mi = mid.result();
+      expect(mi.fills).toEqual([[p(102.5), 500, 'bar'], [p(100.8), 500, 'open'], [p(101), 1000, 'bar']]);
+      expect(mi.text).toContain(
+        `Entry filled past your target: Your entry order at ${f(100.5)} filled the first 500 of its 1000 shares at ${f(102.5)}, already past your target at ${f(101)}: price was past both by the time the order could fill, and the rest filled over later bars as the volume cap (Data & Settings) allowed, for an average of ${f(101.65)}.`,
+      );
+      // A stop entry that fires after a first trade's stop has used the bar's room fills from the next bar's open.
+      const late = capped(long);
+      late.next(20, 20, 20, 20, 1e6);
+      late.broker.submit({ symbol: 'T', action: late.open, type: 'market', quantity: 2000, stopLoss: p(19.8), tif: 'gtc' });
+      late.next(20, 20, 20, 20, 1e6);
+      expect(late.broker.submit({ symbol: 'T', action: late.open, type: 'stop', stopPrice: p(20.3), quantity: 1000, takeProfit: p(20.4), stopLoss: p(20.1), tif: 'gtc' }).ok).toBe(true);
+      late.next(20, 20.4, 19.75, 20.08, 8000); // the first trade's stop takes this bar's room for 2,000; then 20.30 is crossed
+      late.next(20.5, 20.55, 20.45, 20.5, 2000);
+      late.next(20.38, 20.45, 20.36, 20.42, 1e6);
+      late.next(20.42, 20.5, 20.4, 20.45, 1e6);
+      const l = late.result(1);
+      expect(l.fills).toEqual([[p(20.5), 500, 'open'], [p(20.38), 500, 'open'], [p(20.4), 1000, 'bar']]);
+      expect(l.text).toContain(
+        `Entry filled past your target: Your entry order at ${f(20.3)} fired on a bar whose volume cap (Data & Settings) left no room for it, so the first 500 of its 1000 shares filled from the next bar's open, at ${f(20.5)}, already past your target at ${f(20.4)}, ${rest}, for an average of ${f(20.44)}.`,
+      );
+    }
+  });
+
+  it('says an entry that filled at once past its target filled only its first part there, and never that a market order was through the market', () => {
+    // The ticket's checks keep an order's target beyond where it fills at once, so this is a record whose
+    // target says otherwise (an older or hand-edited one): its target is moved behind the fills here.
+    for (const long of [true, false]) {
+      for (const type of ['market', 'limit'] as const) {
+        for (const room of [2000, 1e6]) {
+          const s = capped(long);
+          s.next(100, 100, 100, 100, room);
+          const order = { symbol: 'T', action: s.open, type, quantity: 1000, takeProfit: s.p(101), tif: 'gtc' as const };
+          expect(s.broker.submit(type === 'limit' ? { ...order, limitPrice: s.p(100.5) } : order).ok).toBe(true);
+          s.next(100.2, 100.2, 100.2, 100.2, 1e6);
+          s.broker.closePosition('T');
+          s.next(100.2, 100.2, 100.2, 100.2, 1e6);
+          const st = s.broker.state;
+          const trip = { ...st.roundTrips[0], initialTarget: s.p(99.9) };
+          const review = reviewTrade({ trip, fills: st.fills, orders: st.orders, revealedBars: [], timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 1_000_000, allTrips: [trip], rules: DEFAULT_TRADING_RULES, ended: true });
+          const text = review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+          // With room for 500 at once, the rest at the next open.
+          const inParts = room === 2000;
+          const after = `at once at ${s.f(100)}, past your target at ${s.f(99.9)}${inParts ? `, ${rest}, for an average of ${s.f(100.1)}` : ''}.`;
+          if (type === 'limit') {
+            expect(text).toContain(`Entry filled past your target: Your entry order at ${s.f(100.5)} was already through the market, so ${inParts ? 'the first 500 of its 1000 shares' : 'it'} filled ${after}`);
+          } else {
+            expect(text).toContain(`Entry filled past your target: Your market order filled ${inParts ? 'the first 500 of its 1000 shares ' : ''}${after}`);
+            expect(text).not.toContain('through the market');
+          }
+        }
+      }
+    }
+  });
+
+  it('names a stop’s first fill and the average of the rest wherever it says where the stop filled', () => {
+    for (const long of [true, false]) {
+      // After the close, a market order whose next open is past its stop: the stop then sells in two parts.
+      const past = capped(long);
+      past.at(et('2025-01-15', '15:59'), 101, 101.2, 100.8, 101, 1e6);
+      past.at(et('2025-01-15', '16:05'), 101, 101, 101, 101, 5000);
+      expect(past.broker.submit({ symbol: 'T', action: past.open, type: 'market', quantity: 1000, stopLoss: past.p(100.5), takeProfit: past.p(102.5) }).ok).toBe(true);
+      past.at(et('2025-01-16', '09:30'), 100, 100.2, 99.8, 100, 4000); // room for the 1,000 shares bought, none for the stop
+      past.at(et('2025-01-16', '09:31'), 99.9, 100, 99.8, 99.9, 2000);
+      past.at(et('2025-01-16', '09:32'), 99.7, 99.8, 99.6, 99.7, 1e6);
+      const ps = past.result();
+      expect(ps.fills).toEqual([[past.p(100), 1000, 'open'], [past.p(99.9), 500, 'open'], [past.p(99.7), 500, 'open']]);
+      expect(ps.text).toContain(
+        `already past your stop at ${past.f(100.5)}. The stop then closed the trade, filling the first 500 of its 1000 shares at ${past.f(99.9)}, ${rest}, for an average of ${past.f(99.8)}: −$200.00 after costs, -0.40R of the 0.50 per share you planned to risk.`,
+      );
+      // A gap through the stop at 98.00 with room for 500, the rest at the next open.
+      const gap = capped(long);
+      gap.next(100, 100, 100, 100, 1e6);
+      gap.broker.submit({ symbol: 'T', action: gap.open, type: 'market', quantity: 1000, stopLoss: gap.p(98), tif: 'gtc' });
+      gap.next(100, 100, 100, 100, 1e6);
+      gap.next(97.5, 97.6, 97.4, 97.5, 2000);
+      gap.next(97, 97.1, 96.9, 97, 1e6);
+      const { f, p } = gap;
+      expect(gap.result().text).toContain(
+        `Stop filled well past its price: Your stop at ${f(98)} filled the first 500 of its 1000 shares at ${f(97.5)}, ${rest}, for an average of ${f(97.25)}, 0.75 past it, so this exit was -1.38R per share instead of the planned -1.00R.`,
+      );
+      // A breakeven stop the same gap goes through: no R, so it is said in dollars.
+      const even = capped(long);
+      even.next(100, 100, 100, 100, 1e6);
+      even.broker.submit({ symbol: 'T', action: even.open, type: 'market', quantity: 1000, tif: 'gtc' });
+      even.next(100, 101, 100, 101, 1e6);
+      expect(even.broker.submit({ symbol: 'T', action: even.close, type: 'stop', stopPrice: p(100), quantity: 1000, tif: 'gtc' }).ok).toBe(true);
+      even.next(99.5, 99.6, 99.4, 99.5, 2000);
+      even.next(99, 99.1, 98.9, 99, 1e6);
+      expect(even.result().text).toContain(
+        `Stop filled past its price: Your stop at ${f(100)} filled the first 500 of its 1000 shares at ${f(99.5)}, ${rest}, for an average of ${f(99.25)}, 0.75 past it, which cost $750.00 on the 1000 shares it closed.`,
+      );
+      // A stop moved into profit that price falls through, the rest at the next open below it, or back above it.
+      const trailed = (then: number) => {
+        const s = capped(long);
+        s.next(100, 100, 100, 100, 1e6);
+        s.broker.submit({ symbol: 'T', action: s.open, type: 'market', quantity: 1000, stopLoss: s.p(98), tif: 'gtc' });
+        s.next(100, 102, 100, 102, 1e6);
+        s.move(101);
+        s.next(101.5, 101.5, 100.5, 100.6, 2000);
+        s.next(then, then, then, then, 1e6);
+        return s.result().text;
+      };
+      expect(trailed(100.5)).toContain(
+        `Your moved stop closed the trade: You had moved your stop from ${f(98)} to ${f(101)}, and it filled the first 500 of its 1000 shares at ${f(101)}, ${rest}, for an average of ${f(100.75)}: +$750.00 on the trade after costs.`,
+      );
+      // The finding before it already says how the parts filled.
+      const cameBack = trailed(101.5);
+      expect(cameBack).toContain(`let only 500 of its 1000 shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${f(101)}.`);
+      expect(cameBack).toContain(`Your moved stop closed the trade: You had moved your stop from ${f(98)} to ${f(101)}, and it filled at an average of ${f(101.25)}: +$1250.00 on the trade after costs.`);
+      // Past it by more than a quarter R, though not by more than the spread allows for: where the stop did its job.
+      const job = capped(long, { spread: { mode: 'cents', value: 1, minimum: 0, extendedHoursMultiplier: 1 } });
+      job.next(100, 100, 100, 100, 1e6);
+      job.broker.submit({ symbol: 'T', action: job.open, type: 'market', quantity: 1000, stopLoss: p(98), tif: 'gtc' });
+      job.next(100, 100, 100, 100, 1e6);
+      job.next(98.5, 98.5, 97.9, 98, 2000);
+      for (let i = 0; i < 26; i++) job.next(97.6, 97.6, 97.6, 97.6, 1e6);
+      expect(job.result().text).toContain(`Your loss was capped at your stop at ${f(98)}, though it filled the first 500 of its 1000 shares at ${f(97.5)}, ${rest}, for an average of ${f(97.3)}.`);
+    }
   });
 });
 
