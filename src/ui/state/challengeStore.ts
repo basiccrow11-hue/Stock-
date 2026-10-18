@@ -26,7 +26,12 @@ interface ChallengeStore {
   start: (a: ChallengeAttempt) => void;
   updateActive: (result: ChallengeResult) => void;
   finishActive: () => Promise<void>;
-  /** Add finished attempts this history does not have yet (a restored backup). Resolves with how many were added. */
+  /**
+   * Add finished attempts this history does not have yet (a restored backup). An attempt already
+   * stored under the same id, in this tab or another, is left as it is. Each shows in the list as
+   * soon as it is stored, and one stored but missing from the list (a restore that stopped partway)
+   * is put back in it. Resolves with how many were added.
+   */
   importAttempts: (list: ChallengeAttempt[]) => Promise<number>;
 }
 
@@ -57,12 +62,18 @@ export const useChallenges = create<ChallengeStore>()((set, get) => ({
     await idb.set('challenges', done.id, done).catch(() => undefined);
   },
   importAttempts: async (list) => {
-    const added: ChallengeAttempt[] = [];
-    for (const a of list) if (await idb.modify<ChallengeAttempt>('challenges', a.id, (cur) => (cur ? undefined : a))) added.push(a);
-    if (added.length) {
-      const ids = new Set(added.map((a) => a.id));
-      set({ attempts: [...get().attempts.filter((a) => !ids.has(a.id)), ...added].sort((a, b) => b.startedAt - a.startedAt) });
+    let added = 0;
+    for (const a of list) {
+      // Whether it is here is decided by storage, not by the list, which a restore that stopped
+      // partway may have left without attempts it had stored.
+      const stored = await idb.get<ChallengeAttempt>('challenges', a.id);
+      if (stored && get().attempts.some((x) => x.id === a.id)) continue;
+      // Checked and written in one transaction, so an attempt another tab has just saved is never replaced.
+      const attempt = stored ?? (await idb.modify<ChallengeAttempt>('challenges', a.id, (cur) => (cur ? undefined : a)));
+      if (!attempt) continue;
+      set({ attempts: [...get().attempts.filter((x) => x.id !== a.id), attempt].sort((x, y) => y.startedAt - x.startedAt) });
+      added++;
     }
-    return added.length;
+    return added;
   },
 }));

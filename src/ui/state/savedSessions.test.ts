@@ -279,6 +279,43 @@ describe('carrying a replay on after a reload', () => {
     expect(b.store.useTrading.getState().error).toBe('This saved session could not be read.');
   });
 
+  it('carries on one the previous version of the app saved, and keeps one a newer version saved without carrying it on', async () => {
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    for (const t of ['10:10', '10:20']) {
+      a.store.jumpTo(at(t));
+      expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1 }).ok).toBe(true);
+    }
+    a.store.jumpTo(at('10:30'));
+    const b = await reload(a);
+    const kv = db.stores.get('kv')!;
+    const record = kv.get(`session:${id}`) as { version: number; replay: { state: { checkpoints: string[] } } };
+    // Its checkpoints' logs are stored apart, which the previous version (it reads version 1) could not rewind with.
+    expect(record.version).toBe(2);
+
+    // As the previous version saved it: version 1, each checkpoint with its whole log.
+    const whole = (await b.saved.readSession(id))!.replay!.state.checkpoints;
+    record.replay.state.checkpoints.forEach((key, i) => kv.set(key, { key, cp: whole[i] }));
+    kv.set(`session:${id}`, { ...record, version: 1 });
+    expect(await b.store.resumeAfterReload()).toBe(true);
+    expect(b.store.useTrading.getState().positions[0].quantity).toBe(2);
+    b.store.jumpTo(at('10:15'));
+    await settle();
+    expect(b.store.useTrading.getState().positions[0].quantity).toBe(1);
+    b.store.restart();
+    await settle();
+    expect(b.store.useTrading.getState().positions).toHaveLength(0);
+
+    // One a newer version saved is not read here, and stays to carry on there.
+    const c = await reload(b);
+    kv.set(`session:${id}`, { ...(kv.get(`session:${id}`) as object), version: 3 });
+    expect(await c.store.resumeAfterReload()).toBe(false);
+    expect(c.store.useTrading.getState().error).toBe('This saved session could not be read.');
+    expect((await c.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
+    expect(kv.has(`session:${id}`)).toBe(true);
+  });
+
   it('will not carry on over imported data that changed, and says so', async () => {
     const a = await page();
     const registry = await import('./dataRegistry');

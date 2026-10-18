@@ -25,7 +25,15 @@ import type { ExecutionConfig } from '../../core/broker/config';
 import type { TradingRules } from '../../core/learning/review';
 import { newId } from '../../core/util/ids';
 
-export const SAVED_SESSION_VERSION = 1;
+/**
+ * The version of the sessions this app saves. Version 2 stores the checkpoints' logs apart from them
+ * (StoredCheckpoint): an app that reads only version 1 would carry such a session on but could not
+ * rewind it, and refuses it instead. Sessions saved as version 1, each checkpoint with its whole log,
+ * are still read.
+ */
+export const SAVED_SESSION_VERSION = 2;
+/** Versions of saved sessions this app reads. */
+const READABLE_VERSIONS: readonly number[] = [1, SAVED_SESSION_VERSION];
 /** Unfinished sessions kept, the running one among them: older ones are let go when a session starts. */
 export const MAX_SAVED_SESSIONS = 5;
 
@@ -53,7 +61,8 @@ export interface SessionSummary {
 }
 
 export interface SavedSession {
-  version: typeof SAVED_SESSION_VERSION;
+  /** As saved: this app saves SAVED_SESSION_VERSION, and reads version 1 too. */
+  version: 1 | typeof SAVED_SESSION_VERSION;
   summary: SessionSummary;
   view: SessionView;
   warnings: string[];
@@ -163,7 +172,7 @@ export async function writeSession(s: SavedSession): Promise<void> {
 /** The session saved under `id`, or null when there is none this version of the app can read whole. */
 export async function readSession(id: string): Promise<SavedSession | null> {
   const s = await idb.get<StoredSession>('kv', RECORD + id);
-  if (!s || s.version !== SAVED_SESSION_VERSION || s.summary?.id !== id) return null;
+  if (!s || !READABLE_VERSIONS.includes(s.version) || s.summary?.id !== id) return null;
   if (!s.replay) return { ...s, replay: undefined };
   const keys = s.replay.state.checkpoints;
   const found = new Map((await idb.withPrefix<StoredCheckpoint>('kv', `${CHECKPOINT}${id}:`)).map((c) => [c.key, c]));

@@ -197,6 +197,35 @@ describe('backing up and restoring this browser’s data', () => {
     expect(db.stores.get('snapshots')!.get('k-j1')).toBe('data:image/png;base64,AA');
   });
 
+  it('finishes a restore cut off inside the challenge history when the same file is restored again', async () => {
+    const a = await app();
+    for (const [id, startedAt] of [['c1', 1], ['c2', 2], ['c3', 3]] as const) {
+      a.useChallenges.getState().start({ id, challengeId: 'risk1', sessionId: 's1', startedAt, label: 'Risk 1%', result: { status: 'passed', detail: 'ok', progress: 1, official: true } as never });
+      await a.useChallenges.getState().finishActive();
+    }
+    const text = JSON.stringify((await a.createBackup({ snapshots: false, datasets: false, holdBack: () => false })).backup);
+
+    clearSiteData();
+    const b = await app();
+    db.failing = (store, key) => store === 'challenges' && key === 'c2';
+    await expect(b.restoreBackup(b.parseBackup(text).backup, { settings: false })).rejects.toThrow('quota');
+    // What was written shows at once.
+    const shown = () => b.useChallenges.getState().attempts.map((x) => x.id);
+    expect(shown()).toEqual([...db.stores.get('challenges')!.keys()]);
+    expect(shown()).toHaveLength(1);
+    db.failing = null;
+    expect(await b.restoreBackup(b.parseBackup(text).backup, { settings: false })).toMatchObject({ challengesAdded: 2 });
+    expect(shown()).toEqual(['c3', 'c2', 'c1']);
+    expect(await b.restoreBackup(b.parseBackup(text).backup, { settings: false })).toMatchObject({ challengesAdded: 0 });
+
+    // An attempt stored but missing from this tab's list (left so by an earlier version) is put back in it, and counted.
+    clearSiteData();
+    const c = await app();
+    db.stores.set('challenges', new Map([['c1', { ...b.useChallenges.getState().attempts[2], label: 'stored here' }]]));
+    expect(await c.restoreBackup(c.parseBackup(text).backup, { settings: false })).toMatchObject({ challengesAdded: 3 });
+    expect(c.useChallenges.getState().attempts.map((x) => [x.id, x.label])).toEqual([['c3', 'Risk 1%'], ['c2', 'Risk 1%'], ['c1', 'stored here']]);
+  });
+
   it('never keeps restored data only in memory: a failed save is finished by restoring again, and data stored but not shown is put back', async () => {
     const a = await app();
     await a.registry.saveCsvDataset(dataset);

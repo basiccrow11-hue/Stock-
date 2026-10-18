@@ -29,14 +29,25 @@ function open(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+/**
+ * One request in a transaction of its own. A read resolves with the request's result; a write only
+ * once the transaction has committed, since storage can still refuse it then (Chromium checks for a
+ * full disk as it commits, after the request has succeeded).
+ */
 function tx<T>(store: StoreName, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return open().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
         const t = db.transaction(store, mode);
         const req = fn(t.objectStore(store));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+        if (mode === 'readonly') {
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+          return;
+        }
+        t.oncomplete = () => resolve(req.result);
+        t.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+        t.onabort = () => reject(t.error ?? new Error('IndexedDB transaction aborted'));
       }),
   );
 }
@@ -45,9 +56,11 @@ export const idb = {
   get<T>(store: StoreName, key: string): Promise<T | undefined> {
     return tx<T>(store, 'readonly', (s) => s.get(key) as IDBRequest<T>);
   },
+  /** Resolves once the value is stored (the transaction has committed). */
   set<T>(store: StoreName, key: string, value: T): Promise<IDBValidKey> {
     return tx(store, 'readwrite', (s) => s.put(value, key));
   },
+  /** Resolves once the value is gone from storage (the transaction has committed). */
   delete(store: StoreName, key: string): Promise<undefined> {
     return tx(store, 'readwrite', (s) => s.delete(key) as IDBRequest<undefined>);
   },
