@@ -148,7 +148,7 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
     chart.panes()[0].setStretchFactor(1);
 
     // An earlier trade's fills and earlier news, from before the first candle, are left out, as on screen.
-    createSeriesMarkers(series, chartMarkers(scene.fills, scene.news, candleStart, candles[0].time, ct, pal));
+    createSeriesMarkers(series, chartMarkers(scene.fills, scene.news, candleStart, candles[0].time, Infinity, ct, pal));
 
     // Set once every series has its data, so nothing moves it afterwards; the screen's room after the last candle.
     chart.timeScale().setVisibleLogicalRange({ from: 0, to: candles.length - 1 + RIGHT_OFFSET });

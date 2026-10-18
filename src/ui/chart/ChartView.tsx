@@ -8,7 +8,10 @@
  *
  * A long session has hundreds of thousands of candles: the chart is handed the newest few thousand,
  * and older ones as the user scrolls back to them (the window). While play adds candles and the
- * newest are on screen, the oldest are let go again, so redraws and play stay quick.
+ * newest are on screen, the oldest are let go again, so redraws and play stay quick. Scrolled back
+ * far from the newest, the candles play adds are held back from the chart until the view comes back
+ * near them: the chart redoes its whole time scale for each new candle, so handing them over as they
+ * came slowed play to a crawl the longer it ran.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
@@ -85,6 +88,17 @@ const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height:
 const WINDOW = 2000;
 /** Scrolling to within this many candles of the oldest one handed over brings older ones. */
 const WINDOW_MARGIN = 300;
+/**
+ * Candles past the right edge of the view beyond which play's new candles are held back from the chart
+ * (heldRef); scrolling to within this many of the newest one handed over brings the rest.
+ */
+const HOLD_MARGIN = 500;
+/**
+ * The held-back candles are handed over once the view has rested this long (milliseconds) with no
+ * button or finger on the chart: a drag or a fling keeps its place from where it began, counted from
+ * the newest candle, so new candles arriving under it would make the view leap.
+ */
+const CATCH_UP_DELAY = 150;
 /** Height of a legend row in pixels: past LEGEND_SHARE of the price pane, the legend flows compactly. */
 const LEGEND_ROW = 17;
 const LEGEND_SHARE = 0.4;
@@ -122,6 +136,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const candlesRef = useRef<Bar[]>([]);
   /** Index in candlesRef of the oldest candle handed to the chart: logical index 0 on its time scale. */
   const windowStartRef = useRef(0);
+  /**
+   * While play's new candles are held back (scrolled back far from the newest): index in candlesRef of
+   * the first candle the chart does not hold as it is now (it may hold an older state of that one, a
+   * forming candle since changed). Null while the chart holds every candle from the window's start.
+   */
+  const heldRef = useRef<number | null>(null);
   /** The chart the window was sized on (symbol, timeframe, session): redrawing that chart keeps the size. */
   const windowKeyRef = useRef('');
   /** What the replay has from before its loaded bars, for the legend's note. */
@@ -133,9 +153,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const [geometryVersion, setGeometryVersion] = useState(0);
   /** Bumped when the main series is replaced (chart style change) so dependants re-attach. */
   const [seriesVersion, setSeriesVersion] = useState(0);
-  /** Bumped when the oldest candle handed to the chart changes, so markers are re-sent for the candles it holds. */
+  /** Bumped when the oldest or newest candle handed to the chart changes, so markers are re-sent for the candles it holds. */
   const [windowVersion, setWindowVersion] = useState(0);
-  const windowOldestRef = useRef<number | null>(null);
+  /** The window windowVersion was last bumped for (syncWindowVersion). */
+  const windowKeyShownRef = useRef('');
+  /** Whether the newest candle is off the right of the view: a button then scrolls back to it. */
+  const [offNewest, setOffNewest] = useState(false);
+  const offNewestRef = useRef(false);
   const theme = useTheme();
   const pal = theme.chart;
   const palRef = useRef(pal);
@@ -149,10 +173,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   timeframeRef.current = timeframe;
   /** Index in candlesRef of the candle under the crosshair, or null: the legend then shows the newest. */
   const hoverRef = useRef<number | null>(null);
-  /** Where the pointer is on the chart (in that pane's and in the window's coordinates), or null when it is off it: see rebuildTail. */
+  /** Where the pointer is on the chart (in that pane's and in the window's coordinates), or null when it is off it: see withoutCrosshair. */
   const pointerRef = useRef<Pointer | null>(null);
   /** Set when the chart library takes the mouse move restoreCrosshair hands it. */
   const landedRef = useRef(false);
+  /** Set while withoutCrosshair runs a change, so one nested in it leaves the crosshair to it. */
+  const crosshairHiddenRef = useRef(false);
   /** Shows the candle at a crosshair position in the legend (the newest when there is none). */
   const showHoverRef = useRef<(param: CrosshairParam) => void>(() => undefined);
   /** Each pane's top, in pixels from the chart's top (the lower panes' titles sit there), and the price pane's height. */
@@ -251,21 +277,49 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const bumpSoon = () => {
       if (!frame) frame = requestAnimationFrame(() => ((frame = 0), bump()));
     };
-    const onMove = (e: PointerEvent) => e.buttons !== 0 && bumpSoon();
+    // Whether a button or finger is down on the chart (a drag, a pinch), for catchUpSoon.
+    let pressed = false;
+    let catchUpTimer = 0;
+    const catchUpSoon = () => {
+      clearTimeout(catchUpTimer);
+      catchUpTimer = window.setTimeout(() => {
+        catchUpTimer = 0;
+        const range = chart.timeScale().getVisibleLogicalRange();
+        if (!pressed && range && range.to >= chartCount() - 1 - HOLD_MARGIN) catchUp();
+      }, CATCH_UP_DELAY);
+    };
+    const onDown = () => (pressed = true);
+    const onUp = () => {
+      pressed = false;
+      if (heldRef.current !== null) catchUpSoon();
+    };
+    const onMove = (e: PointerEvent) => {
+      if (e.buttons !== 0) bumpSoon();
+      // A release the page never heard (outside the window) ends the press too.
+      else if (pressed) onUp();
+    };
+    el.addEventListener('pointerdown', onDown);
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', bumpSoon);
     el.addEventListener('dblclick', bumpSoon);
     el.addEventListener('wheel', bumpSoon, { passive: true });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('blur', onUp);
     let extendFrame = 0;
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       bump();
       syncPercentBase();
       syncLastDirection();
+      syncOffNewest();
       // Scrolled back near the oldest candle handed over: hand over older ones. Not from inside this
       // callback, as setData moves the range again.
       if (range && range.from < WINDOW_MARGIN && windowStartRef.current > 0 && !extendFrame) {
         extendFrame = requestAnimationFrame(() => ((extendFrame = 0), extendWindow()));
       }
+      // Scrolled toward the newest candle handed over while newer ones are held back: hand them over
+      // once the view rests.
+      if (range && heldRef.current !== null && range.to >= chartCount() - 1 - HOLD_MARGIN) catchUpSoon();
     });
     // The container, and the price pane itself: dragging a pane separator resizes the price pane
     // (and rescales its prices) without any other event, and drawings must follow.
@@ -294,10 +348,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       registerSnapshotProvider(null);
       cancelAnimationFrame(frame);
       cancelAnimationFrame(extendFrame);
+      clearTimeout(catchUpTimer);
+      el.removeEventListener('pointerdown', onDown);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', bumpSoon);
       el.removeEventListener('dblclick', bumpSoon);
       el.removeEventListener('wheel', bumpSoon);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('blur', onUp);
       stacked.removeEventListener('change', syncTouch);
       ro.disconnect();
       paneObserver.disconnect();
@@ -603,7 +662,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   function lastUp(): boolean {
     const c = candlesRef.current;
     const start = windowStartRef.current;
-    const i = lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, c.length - start);
+    const i = lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, chartCount());
     const b = i < 0 ? undefined : c[start + i];
     return !b || b.close >= b.open;
   }
@@ -618,9 +677,47 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   // ---------------------------------------------------------------- data
-  /** The candles handed to the chart: those from the window's start on. */
+  /** The candles handed to the chart: those from the window's start on, up to any held back. */
   function shownCandles(): Bar[] {
-    return candlesRef.current.slice(windowStartRef.current);
+    return candlesRef.current.slice(windowStartRef.current, heldRef.current ?? undefined);
+  }
+
+  /** How many candles the chart holds (its logical indexes run from 0 to one less). */
+  function chartCount(): number {
+    return (heldRef.current ?? candlesRef.current.length) - windowStartRef.current;
+  }
+
+  /**
+   * Hands the chart the candles held back from it, keeping the view on the candles it shows; or, when
+   * the newest one it had is on screen (the user went to the end), moving on to the newest, as the chart
+   * does when play adds a candle while the newest is on screen.
+   */
+  function catchUp(): void {
+    if (heldRef.current === null) return;
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const atEnd = !!range && Math.ceil(range.to) >= chartCount() - 1;
+    heldRef.current = null;
+    setWindowData();
+    if (range && !atEnd) chartRef.current?.timeScale().setVisibleLogicalRange(range);
+    syncWindowVersion();
+    setGeometryVersion((v) => v + 1);
+  }
+
+  /** Shows the button back to the newest candle while that candle is off the right of the view. */
+  function syncOffNewest(): void {
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const newest = candlesRef.current.length - 1 - windowStartRef.current;
+    const off = !!range && newest >= 0 && Math.ceil(range.to) < newest;
+    if (off === offNewestRef.current) return;
+    offNewestRef.current = off;
+    setOffNewest(off);
+  }
+
+  /** Scrolls to the newest candle, with the usual room after it, keeping the zoom. */
+  function toNewest(): void {
+    catchUp();
+    const ts = chartRef.current?.timeScale();
+    ts?.scrollToPosition(ts.options().rightOffset, false);
   }
 
   /** Bring every indicator's values up to date after the candles from index `from` on changed. */
@@ -642,7 +739,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /** Hand an indicator's series their values on the window's candles. */
   function setIndicatorWindow(ind: IndicatorSeries): void {
     if (!ind.stream) return;
-    const n = candlesRef.current.length;
+    const n = heldRef.current ?? candlesRef.current.length;
     ind.series.forEach((s, k) => {
       const points = [];
       for (let i = windowStartRef.current; i < n; i++) points.push(indicatorPoint(ind, k, i));
@@ -655,9 +752,32 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const series = candleRef.current;
     if (!series) return;
     const shown = shownCandles();
-    series.setData(shown.map(candlePoint) as never);
-    volumeRef.current?.setData(shown.map(volumePoint));
-    for (const ind of indicatorsRef.current) setIndicatorWindow(ind);
+    withoutCrosshair(() => {
+      series.setData(shown.map(candlePoint) as never);
+      volumeRef.current?.setData(shown.map(volumePoint));
+      for (const ind of indicatorsRef.current) setIndicatorWindow(ind);
+    });
+  }
+
+  /**
+   * Runs `change`, which hands the series new candles, with the crosshair hidden, and puts it back under
+   * the pointer once (restoreCrosshair). While the crosshair shows, every change to a series makes
+   * lightweight-charts redo it, with a hit test over every point of every series: at fast play, per
+   * candle and series, that froze the page. Worse, the library tells of the view moving while a series'
+   * new candles are only half taken in, and a crosshair redone then (by an option set in the listener)
+   * hit-tests a series not yet caught up: the volume series throws, and the view is left off its candles.
+   */
+  function withoutCrosshair(change: () => void): void {
+    if (crosshairHiddenRef.current) return change();
+    const pointer = pointerRef.current;
+    if (pointer) chartRef.current?.clearCrosshairPosition();
+    crosshairHiddenRef.current = true;
+    try {
+      change();
+    } finally {
+      crosshairHiddenRef.current = false;
+    }
+    if (pointer && pointerRef.current === pointer) restoreCrosshair(pointer);
   }
 
   /** Hands the chart older candles, as many again as it has, once the user scrolls near the oldest. */
@@ -665,7 +785,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const start = windowStartRef.current;
     const range = chartRef.current?.timeScale().getVisibleLogicalRange();
     if (!range || start === 0 || range.from >= WINDOW_MARGIN) return;
-    windowStartRef.current = Math.max(0, start - Math.max(WINDOW, candlesRef.current.length - start));
+    windowStartRef.current = Math.max(0, start - Math.max(WINDOW, chartCount()));
     // The chart keeps its place counted from the newest candle, so the view does not move.
     setWindowData();
     syncWindowVersion();
@@ -676,7 +796,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
    * Lets go of the oldest candles handed to the chart while play adds new ones, so the series does not
    * grow without limit: once it holds WINDOW more than it needs (WINDOW, or from a margin before the
    * first candle on screen), which spreads the cost to once per WINDOW new candles. Only while the
-   * newest candle is on screen: scrolled back, the window grows until the user comes back.
+   * newest candle is on screen: scrolled back, the window keeps every candle until the user comes back
+   * (new ones are soon held back from it, see rebuildTail).
    */
   function slideWindow(): void {
     const candles = candlesRef.current;
@@ -693,10 +814,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     setGeometryVersion((v) => v + 1);
   }
 
+  /** Bumps windowVersion when the oldest candle handed to the chart, or the end of those held back, changes. */
   function syncWindowVersion(): void {
-    const oldest = candlesRef.current[windowStartRef.current]?.time ?? null;
-    if (oldest === windowOldestRef.current) return;
-    windowOldestRef.current = oldest;
+    const key = `${candlesRef.current[windowStartRef.current]?.time ?? ''}|${heldRef.current ?? ''}`;
+    if (key === windowKeyShownRef.current) return;
+    windowKeyShownRef.current = key;
     setWindowVersion((v) => v + 1);
   }
 
@@ -744,25 +866,30 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // Redrawing the same chart (new bars after a jump, history arriving) keeps the view where it is,
     // counted from the newest candle: the window keeps as many candles as reach back to the oldest on screen.
     const key = `${symbol}|${timeframe}|${useTrading.getState().session?.id ?? ''}`;
+    const same = key === windowKeyRef.current;
+    // With candles held back the chart counts from an older newest one: hand them over first.
+    if (same) catchUp();
     const range = chartRef.current?.timeScale().getVisibleLogicalRange();
-    const onScreen = range ? candlesRef.current.length - windowStartRef.current - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN : 0;
-    const shown = key === windowKeyRef.current ? Math.max(WINDOW, onScreen) : WINDOW;
+    const onScreen = range ? chartCount() - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN : 0;
+    const shown = same ? Math.max(WINDOW, onScreen) : WINDOW;
     windowKeyRef.current = key;
     candlesRef.current = merged.candles;
     historyCountRef.current = merged.fromHistory;
     windowStartRef.current = Math.max(0, candlesRef.current.length - shown);
+    heldRef.current = null;
     hoverRef.current = null;
     computeIndicators(0);
     setWindowData();
     syncLastDirection();
     syncPercentBase();
+    syncOffNewest();
     setGeometryVersion((v) => v + 1);
     syncWindowVersion();
     emitLegend();
   }
 
   /**
-   * Puts the crosshair back under the pointer after rebuildTail hid it. The library does it itself, from
+   * Puts the crosshair back under the pointer after withoutCrosshair hid it. The library does it itself, from
    * a mouse move where the pointer rests, which it handles like the user's own: the crosshair lands
    * exactly where it would for that pointer (whitespace and magnet included), the legend follows its
    * event, and its own later redraws start from the pointer. It ignores such a move while a mouse button
@@ -785,7 +912,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const k = logical === null ? -1 : Math.round(logical);
     const price = series?.coordinateToPrice(p.y) ?? null;
     const point = { x: p.x, y: p.y } as CrosshairParam['point'];
-    if (!chart || !series || k < 0 || start + k >= candles.length || price === null) {
+    if (!chart || !series || k < 0 || k >= chartCount() || price === null) {
       chart?.clearCrosshairPosition();
       showHoverRef.current({ point, paneIndex: p.pane });
       return;
@@ -795,16 +922,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     showHoverRef.current({ time, logical: k as Logical, point, paneIndex: p.pane });
   }
 
-  /** Re-aggregate from the bucket containing base index `from` and push updates. */
+  /**
+   * Re-aggregate from the bucket containing base index `from` and push updates. Each new candle handed
+   * to a series makes lightweight-charts redo its whole time scale, so while the view is far back from
+   * the newest candle (HOLD_MARGIN) the chart is left as it is and new candles are held back (heldRef)
+   * until the user scrolls toward them: otherwise every candle costs more than the last, as the series
+   * grows, and fast play slows to a crawl.
+   */
   function rebuildTail(from: number): void {
     const base = baseRef.current;
     const series = candleRef.current;
     if (!series || !base.length) return;
-    // While the pointer is on the chart, every change to a series makes lightweight-charts redo the
-    // crosshair, with a hit test over every point of every series: at fast play, per candle and series,
-    // that froze the page. The crosshair is hidden while the candles go over and put back once.
-    const pointer = pointerRef.current;
-    if (pointer) chartRef.current?.clearCrosshairPosition();
     const candleOf = (t: number) => candleFor(t, timeframe, baseTfRef.current);
     const key = candleOf(base[Math.min(from, base.length - 1)].time).key;
     let start = Math.min(from, base.length - 1);
@@ -817,23 +945,35 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const firstChanged = candles.length;
     for (const c of aggregateBars(base.slice(start), timeframe, baseTfRef.current)) candles.push(c);
     computeIndicators(firstChanged);
+    if (heldRef.current === null) {
+      const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+      if (range && range.to < before - windowStartRef.current - 1 - HOLD_MARGIN) heldRef.current = before;
+    }
+    if (heldRef.current !== null) {
+      syncWindowVersion();
+      syncOffNewest();
+      emitLegend();
+      return;
+    }
     const first = Math.max(firstChanged, windowStartRef.current);
-    for (let i = first; i < candles.length; i++) {
-      series.update(candlePoint(candles[i]) as never);
-      volumeRef.current?.update(volumePoint(candles[i]));
-    }
-    for (const ind of indicatorsRef.current) {
-      if (!ind.stream) continue;
-      ind.series.forEach((s, k) => {
-        // A candle starting a new session changes how the one before it is drawn: update that in place.
-        if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
-        for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
-      });
-    }
-    slideWindow();
-    syncLastDirection();
-    syncPercentBase();
-    if (pointer && pointerRef.current === pointer) restoreCrosshair(pointer);
+    withoutCrosshair(() => {
+      for (let i = first; i < candles.length; i++) {
+        series.update(candlePoint(candles[i]) as never);
+        volumeRef.current?.update(volumePoint(candles[i]));
+      }
+      for (const ind of indicatorsRef.current) {
+        if (!ind.stream) continue;
+        ind.series.forEach((s, k) => {
+          // A candle starting a new session changes how the one before it is drawn: update that in place.
+          if (first >= before && first > windowStartRef.current && endsSession(ind.cfg, candles, first - 1, timeframeRef.current)) s.update(indicatorPoint(ind, k, first - 1) as never, true);
+          for (let i = first; i < candles.length; i++) s.update(indicatorPoint(ind, k, i) as never);
+        });
+      }
+      slideWindow();
+      syncLastDirection();
+      syncPercentBase();
+    });
+    syncOffNewest();
     emitLegend();
   }
 
@@ -866,10 +1006,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   useEffect(() => {
     const m = markersRef.current;
     if (!m) return;
-    // Those before the window are left out (see chartMarkers).
-    const oldest = candlesRef.current[windowStartRef.current]?.time ?? Infinity;
+    // Those outside the candles handed to the chart are left out (see chartMarkers).
+    const shown = shownCandles();
+    const oldest = shown[0]?.time ?? Infinity;
+    const newest = shown[shown.length - 1]?.time ?? -Infinity;
     const own = fills.filter((f) => f.symbol === symbol);
-    m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), (t) => candleStartFor(symbol, t, timeframe), oldest, ct, pal));
+    m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), (t) => candleStartFor(symbol, t, timeframe), oldest, newest, ct, pal));
   }, [fills, symbol, timeframe, simEventCount, seriesVersion, windowVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
@@ -929,7 +1071,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     <div className={`chart-wrap${pickTarget ? ' picking' : ''}`}>
       <div ref={containerRef} className="chart-canvas" />
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
-      {geometry && <DeleteDrawingButton left={geometry.paneWidth() - 8} top={geometry.paneHeight() - 8} />}
+      {geometry && (
+        <div className="chart-corner" style={{ left: geometry.paneWidth() - 8, top: geometry.paneHeight() - 8 }}>
+          {offNewest && (
+            <button className="btn sm chart-newest" onClick={toNewest} title="Scroll to the newest candle" aria-label="Scroll to the newest candle">
+              »
+            </button>
+          )}
+          <DeleteDrawingButton />
+        </div>
+      )}
       <ChartLegend source={legendSource} />
       {pickTarget && <div className="pick-hint">Click the chart to set the {pickTarget === 'stopLoss' ? 'stop loss' : pickTarget === 'takeProfit' ? 'take profit' : `${pickTarget} price`} · Esc to cancel</div>}
     </div>
@@ -942,14 +1093,13 @@ function axisLabel(color: string): { axisLabelColor: string; axisLabelTextColor:
   return { axisLabelColor: fill, axisLabelTextColor: chartLabelText(fill) };
 }
 
-/** Chart + drawings as a JPEG data URL (for journal entries). */
 /**
  * Deletes the selected drawing. It sits in the price pane's bottom corner (clear of the legend)
  * rather than in the toolbar, where it would re-wrap the toolbar and move the chart under the
  * pointer on every select. It appears the moment a drawing is finished or picked, so the click that
  * ends that same tap can land on it: only a press that starts on it, or the keyboard, deletes.
  */
-function DeleteDrawingButton({ left, top }: { left: number; top: number }) {
+function DeleteDrawingButton() {
   const selectedId = useDrawings((s) => s.selectedId);
   const remove = useDrawings((s) => s.remove);
   const pressed = useRef(false);
@@ -961,7 +1111,6 @@ function DeleteDrawingButton({ left, top }: { left: number; top: number }) {
   return (
     <button
       className="btn sm danger drawing-delete"
-      style={{ left, top }}
       onPointerDown={() => (pressed.current = true)}
       onPointerCancel={release}
       onClick={(e) => {
@@ -976,6 +1125,7 @@ function DeleteDrawingButton({ left, top }: { left: number; top: number }) {
   );
 }
 
+/** Chart + drawings as a JPEG data URL (for journal entries). */
 async function snapshot(chart: IChartApi, container: HTMLElement): Promise<string | null> {
   // A chart that is not laid out (e.g. a layout that removes it) collapses to a sliver: no picture
   // rather than a smear saved for good.

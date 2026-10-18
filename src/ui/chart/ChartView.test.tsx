@@ -33,6 +33,13 @@ const lw = vi.hoisted(() => {
       this.rightOffset = r.to - (this.points.length - 1);
       this.fire();
     }
+    scrollToPosition(rightOffset: number) {
+      this.rightOffset = rightOffset;
+      this.fire();
+    }
+    options() {
+      return { rightOffset: 8 };
+    }
     /** The chart's points changed to `next`. */
     change(next: number[]) {
       const r = this.getVisibleLogicalRange();
@@ -329,22 +336,84 @@ describe('the chart during a long replay', () => {
     expect(most).toBeLessThan(4_500);
     expect(lw.markers).toEqual([]);
 
-    // Scrolled back off the newest candle, well inside the window: the window grows, and the view
-    // stays on its candles.
+    // Scrolled back off the newest candle, well inside the window: the view stays on its candles, and
+    // once it is more than 500 candles back the chart is left as it is (every new candle would cost
+    // more than the last). A fill on a candle held back gets no marker yet.
     for (let i = 0; i < 30 && main.points.length < 3_000; i++) second();
     expect(main.points.length).toBeGreaterThanOrEqual(3_000);
     act(() => ts.setVisibleLogicalRange({ from: main.points.length - 400, to: main.points.length - 300 }));
     const atEdges = () => [main.points[Math.ceil(ts.getVisibleLogicalRange()!.from)].time, main.points[Math.floor(ts.getVisibleLogicalRange()!.to)].time];
     const edges = atEdges();
     const oldest = main.points[0].time;
-    for (let i = 0; i < 15; i++) second();
+    const sizes: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      if (i === 5) expect(store.submitOrder({ symbol: 'AAPL', action: 'sell', type: 'market', quantity: 10 }).ok).toBe(true);
+      second();
+      sizes.push(main.points.length);
+    }
     expect(main.points[0].time).toBe(oldest);
-    expect(main.points.length).toBeGreaterThan(5_000);
     expect(atEdges()).toEqual(edges);
+    expect(new Set(sizes.slice(2)).size).toBe(1);
+    // Every series holds the same candles, the oldest of them in order; far more have played since.
+    let all = chartTimes();
+    const start = all.indexOf(oldest);
+    expect(main.points.map((p) => p.time)).toEqual(all.slice(start, start + main.points.length));
+    for (const s of chart.series) expect(s.points.length).toBe(main.points.length);
+    expect(all.length - start - main.points.length).toBeGreaterThan(2_000);
+    await act(async () => {});
+    const sold = store.useTrading.getState().fills.at(-1)!;
+    expect(sold.side).toBe('sell');
+    expect(lw.markers).toEqual([]);
 
-    // Back on the newest candle, zoomed out to 3,000 candles: play lets go of the older ones again but
-    // keeps every candle on screen, and a margin before them.
+    // Scrolled to within 500 candles of the newest it holds, the chart takes the rest once the view
+    // rests with no button down on it, and the view stays on its candles.
+    const held = main.points.length;
+    act(() => ts.setVisibleLogicalRange({ from: held - 300, to: held - 200 }));
+    const shownEdges = atEdges();
+    act(() => void chart.canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+    await act(() => new Promise((r) => setTimeout(r, 300)));
+    expect(main.points.length).toBe(held);
+    act(() => void window.dispatchEvent(new MouseEvent('pointerup')));
+    await act(() => new Promise((r) => setTimeout(r, 300)));
+    all = chartTimes();
+    expect(main.points.map((p) => p.time)).toEqual(all.slice(start));
+    for (const s of chart.series) expect(s.points.length).toBe(main.points.length);
+    expect(atEdges()).toEqual(shownEdges);
+    expect(lw.markers.map((m) => m.time)).toEqual([toChartTime(store.candleStartFor('AAPL', sold.time, '1m'))]);
+
+    // Still far back from the newest, play holds candles back again, and a button offers the way back.
+    const newestButton = () => host.querySelector<HTMLButtonElement>('.chart-newest');
+    const holds = (n: number) => {
+      const sizes: number[] = [];
+      for (let i = 0; i < n; i++) (second(), sizes.push(main.points.length));
+      return new Set(sizes).size === 1 && chartTimes().length - start > main.points.length;
+    };
+    expect(holds(3)).toBe(true);
+    expect(newestButton()).not.toBeNull();
+    // Gone to the end of what the chart holds (as a double-click on the time axis does), the chart
+    // moves on to the newest candle, and follows it.
+    act(() => ts.setVisibleLogicalRange({ from: main.points.length + 7 - 100, to: main.points.length + 7 }));
+    await act(() => new Promise((r) => setTimeout(r, 300)));
+    expect(main.points.map((p) => p.time)).toEqual(chartTimes().slice(start));
+    expect({ span: ts.span, rightOffset: ts.rightOffset }).toEqual({ span: 100, rightOffset: 8 });
+    expect(newestButton()).toBeNull();
+    second();
+    expect(main.points.at(-1)!.time).toBe(chartTimes().at(-1));
+    // Far back again, the button scrolls to the newest candle, keeping the zoom.
+    act(() => ts.setVisibleLogicalRange({ from: main.points.length - 1000, to: main.points.length - 900 }));
+    expect(holds(3)).toBe(true);
+    act(() => newestButton()!.click());
+    all = chartTimes();
+    expect(main.points.map((p) => p.time)).toEqual(all.slice(all.length - main.points.length));
+    expect({ span: ts.span, rightOffset: ts.rightOffset }).toEqual({ span: 100, rightOffset: 8 });
+    expect(newestButton()).toBeNull();
+
+    // Back on the newest candle, zoomed out to 3,000 candles (past the oldest the chart holds, which
+    // brings older ones on the next frame, here in the next second of play): play lets go of the older ones again but keeps every candle
+    // on screen, and a margin before them.
     act(() => ts.setVisibleLogicalRange({ from: main.points.length + 7 - 3000, to: main.points.length + 7 }));
+    second();
+    expect(ts.getVisibleLogicalRange()!.from).toBeGreaterThanOrEqual(300);
     for (let i = 0; i < 10; i++) {
       const indexBefore = firstIndex();
       second();
@@ -367,7 +436,7 @@ describe('the chart during fast play with the pointer on it', () => {
   it('hides the crosshair while candles go over, puts it back under the pointer, and draws what a fresh chart draws', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings, DEFAULT_INDICATORS } = await import('../state/settingsStore');
-    const { ChartView } = await import('./ChartView');
+    const { ChartView, toChartTime } = await import('./ChartView');
     const { exchangeDate } = await import('../../core/time');
     // VWAP's line breaks between sessions, and MACD colours each histogram bar: both on.
     useSettings.getState().update({ learningMode: false, autoSnapshot: false, indicators: DEFAULT_INDICATORS.map((i) => (i.type === 'macd' ? { ...i, enabled: true } : i)) });
@@ -501,6 +570,30 @@ describe('the chart during fast play with the pointer on it', () => {
     expect(legend()).toContain(`C ${fmtPrice(newest.close)}`);
     chart.pressed = false;
     pointer(true);
+
+    // Scrolled far back with the pointer resting on the chart, play leaves the chart as it is. Scrolled
+    // to within 500 candles of the newest it holds, the chart takes the rest with the crosshair hidden,
+    // then puts it back under the pointer; the button goes back to the newest candle.
+    const back = main.points.length;
+    act(() => chart.ts.setVisibleLogicalRange({ from: back - 700, to: back - 600 }));
+    pointer(true);
+    calls.update = 0;
+    act(() => store.play());
+    second();
+    second();
+    act(() => store.pause());
+    expect(calls.update).toBe(0);
+    expect(main.points.length).toBe(back);
+    act(() => chart.ts.setVisibleLogicalRange({ from: back - 300, to: back - 200 }));
+    pointer(true);
+    expect(chart.cross).not.toBeNull();
+    await act(() => new Promise((r) => setTimeout(r, 300)));
+    expect(main.points.length).toBeGreaterThan(back + 300);
+    expect(chart.crosshairRedone).toBe(0);
+    expect(chart.cross?.time).toBe(underPointer().time);
+    act(() => a.host.querySelector<HTMLButtonElement>('.chart-newest')!.click());
+    expect(main.points.at(-1)!.time).toBe(toChartTime(store.getBaseBars('MSFT').at(-1)!.time));
+    expect(chart.ts.rightOffset).toBe(8);
 
     /** Every series holds what a chart drawn afresh holds, on the candles that one holds. */
     const matchesFresh = async () => {

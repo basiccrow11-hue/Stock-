@@ -28,8 +28,9 @@ export function ChallengesPage({ onStart }: { onStart: (challengeId: string, mod
             const mine = attempts.filter((a) => a.challengeId === c.id);
             const passed = mine.filter((a) => a.result.status === 'passed' && a.result.official).length;
             return (
-              <div key={c.id} className="card stack">
-                <h3>{c.title}</h3>
+              // A group named by its title, so its Start buttons say which challenge they are for.
+              <div key={c.id} className="card stack" role="group" aria-labelledby={`challenge-${c.id}`}>
+                <h3 id={`challenge-${c.id}`}>{c.title}</h3>
                 <p className="small muted" style={{ flex: 1 }}>
                   {c.description}
                 </p>

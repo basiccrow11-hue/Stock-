@@ -208,20 +208,21 @@ export function newsMarker(ev: SimEvent, time: Time, p: ChartPalette): SeriesMar
 }
 
 /**
- * The fill and simulated news markers of a chart whose first candle starts at `oldest`, oldest first,
- * each on the candle holding its time (`candleStart`; `ct` gives its chart time). lightweight-charts
- * puts a marker on the nearest candle it has, so those from before `oldest` are left out rather than
- * piled onto the first candle.
+ * The fill and simulated news markers of a chart whose candles start at `oldest` and `newest`, oldest
+ * first, each on the candle holding its time (`candleStart`; `ct` gives its chart time).
+ * lightweight-charts puts a marker on the nearest candle it has, so those outside the two are left out
+ * rather than piled onto the first or last candle.
  */
-export function chartMarkers(fills: readonly Fill[], news: readonly SimEvent[], candleStart: (t: number) => number, oldest: number, ct: (t: number) => Time, p: ChartPalette): SeriesMarker<Time>[] {
+export function chartMarkers(fills: readonly Fill[], news: readonly SimEvent[], candleStart: (t: number) => number, oldest: number, newest: number, ct: (t: number) => Time, p: ChartPalette): SeriesMarker<Time>[] {
   const markers: SeriesMarker<Time>[] = [];
+  const held = (time: number) => time >= oldest && time <= newest;
   for (const f of fills) {
     const time = candleStart(f.time);
-    if (time >= oldest) markers.push(fillMarker(f, ct(time), p));
+    if (held(time)) markers.push(fillMarker(f, ct(time), p));
   }
   for (const ev of news) {
     const time = candleStart(ev.time);
-    if (time >= oldest) markers.push(newsMarker(ev, ct(time), p));
+    if (held(time)) markers.push(newsMarker(ev, ct(time), p));
   }
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }

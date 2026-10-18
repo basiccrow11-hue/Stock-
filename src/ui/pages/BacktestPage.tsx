@@ -133,12 +133,13 @@ function SeriesEditor({ value, onChange, side }: { value: SeriesRef; onChange: (
   );
 }
 
-function RuleEditor({ rule, onChange, onRemove }: { rule: Rule; onChange: (r: Rule) => void; onRemove: () => void }) {
+function RuleEditor({ rule, n, onChange, onRemove }: { rule: Rule; n: number; onChange: (r: Rule) => void; onRemove: () => void }) {
   const setCond = (i: number, c: Condition) => onChange({ ...rule, conditions: rule.conditions.map((x, j) => (j === i ? c : x)) });
   // A removed condition takes its ✕ with it: focus goes to this rule's "+ Condition".
   const ruleRef = useFocusRescue<HTMLDivElement>((r) => r.querySelector<HTMLElement>('[data-home]'));
   return (
-    <div className="rule card" ref={ruleRef} style={{ padding: 10, background: 'var(--panel-2)' }}>
+    // Named "Rule n", so its Remove rule and + Condition buttons say which rule they are for.
+    <div className="rule card" ref={ruleRef} role="group" aria-label={`Rule ${n}`} style={{ padding: 10, background: 'var(--panel-2)' }}>
       <div className="row wrap">
         <b>IF</b>
         <select aria-label="Condition logic" value={rule.logic} onChange={(e) => onChange({ ...rule, logic: e.target.value as 'all' | 'any' })}>
@@ -549,10 +550,11 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
             <span>Name</span>
             <input type="text" value={strategy.name} onChange={(e) => setStrategy({ ...strategy, name: e.target.value })} />
           </label>
-          {strategy.rules.map((r) => (
+          {strategy.rules.map((r, i) => (
             <RuleEditor
               key={r.id}
               rule={r}
+              n={i + 1}
               onChange={(nr) => setStrategy({ ...strategy, rules: strategy.rules.map((x) => (x.id === r.id ? nr : x)) })}
               onRemove={() => setStrategy({ ...strategy, rules: strategy.rules.filter((x) => x.id !== r.id) })}
             />
