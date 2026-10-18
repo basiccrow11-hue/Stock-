@@ -403,7 +403,7 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
       // many trading days as the longest of them needs on this timeframe (never fewer than the replay's
       // own lookback, up to 60), from no earlier than the data starts. The results say when that was
       // not enough.
-      const days = Math.min(MAX_WARMUP_DAYS, Math.max(Math.min(DEFAULT_LOOKBACK[timeframe], 60), warmupTradingDays(strategy, timeframe)));
+      const days = Math.min(MAX_WARMUP_DAYS, Math.max(Math.min(DEFAULT_LOOKBACK[timeframe], 60), warmupTradingDays(strategy, timeframe, baseTimeframe)));
       let warm = tradeStart;
       for (let i = 0; i < days; i++) warm = prevTradingDay(warm);
       const range = await provider.availableRange(sym);

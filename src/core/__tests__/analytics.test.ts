@@ -1371,6 +1371,30 @@ describe('stops placed after entry, and the risk over a trade’s life', () => {
     expect(grow.status).toBe('in_progress');
   });
 
+  it('does not call a plain bracket trade’s risk "at its largest" when the cents it is kept in round it up', () => {
+    const cases: Array<[number, number, number, 'buy' | 'short']> = [[128, 273.75, 275.32, 'short'], [100, 50.13, 49.77, 'buy'], [37, 123.47, 121.93, 'buy'], [250, 17.33, 17.11, 'buy'], [61, 233.21, 236.07, 'short'], [300, 10.07, 9.89, 'buy'], [77, 99.99, 98.43, 'buy']];
+    for (const config of [ZERO_COST_CONFIG, DEFAULT_EXECUTION_CONFIG]) {
+      for (const [quantity, px, stopLoss, action] of cases) {
+        const b = new SimBroker({ startingBalance: 100_000, config });
+        const bars: Bar[] = [];
+        const feed = (hhmm: string, o: number, h: number, l: number, c: number) => {
+          bars.push(bar(et('2025-03-10', hhmm), o, h, l, c));
+          b.onBar('T', bars[bars.length - 1]);
+        };
+        feed('10:00', px, px, px, px);
+        expect(b.submit({ symbol: 'T', action, type: 'market', quantity, tif: 'day', stopLoss }).ok).toBe(true);
+        feed('10:01', px, px + 0.05, px - 0.05, px);
+        b.closePosition('T');
+        feed('10:02', px, px + 0.05, px - 0.05, px);
+        const st = b.state;
+        const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES, ended: true });
+        const risk = review.rules.find((r) => r.rule.startsWith('Risk'))!;
+        expect(risk.detail, `${action} ${quantity} @ ${px}`).toMatch(/^\d+\.\d\d%$/);
+        expect(review.findings.map((f) => f.title).join('\n')).toContain(`Risked ${risk.detail} of the account`);
+      }
+    }
+  });
+
   it('counts what was lost before a late stop toward the risk, when that was more than the stop risked', () => {
     const { review, grow, text, rule } = play((b, step) => {
       step(100, 100, 98.5, 98.6); // $150 against with no stop (0.15%), then a stop 10 cents under
@@ -1844,6 +1868,34 @@ describe('a first stop or target placed after entry, at or past the average entr
     expect([t.closed, t.avgExit, review.rMultiple]).toEqual([true, 49, expect.closeTo(-0.5, 9)]);
     expect(text).toContain('Stop filled past its price: Your stop at 49.80 was already past the market when you placed or changed it, so it filled when the regular session opened, at 49.00, 0.80 past its price: -0.50R per share.');
     expect(text).not.toMatch(/well past|your moved stop allowed|next bar's open/);
+  });
+
+  it('says a stop moved past the market while the morning’s first minute forms filled when it could next trade, or at the next bar’s open', () => {
+    for (const mode of ['last_price', 'next_bar_open'] as const) {
+      const broker = new SimBroker({ startingBalance: 10_000, config: { ...ZERO_COST_CONFIG, marketOrderFill: mode } });
+      const bars: Bar[] = [];
+      const at = (date: string, hhmm: string, o: number, h: number, l: number, c: number) => {
+        bars.push(bar(et(date, hhmm), o, h, l, c, 5_000_000));
+        broker.onBar('X', bars[bars.length - 1]);
+      };
+      at('2025-01-15', '15:58', 50, 50, 50, 50);
+      broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'gtc', stopLoss: 49 });
+      at('2025-01-15', '15:59', 50, 50, 49.3, 49.3);
+      // 09:30:30 the next morning: the stock has not traded yet today, so the stop cannot fill at once.
+      broker.syncClock(et('2025-01-16', '09:30') + 30);
+      const stop = broker.workingOrders('X').find((o) => o.type === 'stop')!;
+      expect(broker.modify(stop.id, { stopPrice: 49.8 }).ok).toBe(true);
+      at('2025-01-16', '09:30', 49.5, 49.6, 49, 49.1);
+      at('2025-01-16', '09:31', 49.1, 49.2, 49, 49);
+      const st = broker.state;
+      const t = st.roundTrips[0];
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 10_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES, ended: true });
+      const text = review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n');
+      // On the first minute's prices after 09:30:30 (49.30 there), or at 09:31's open.
+      const how = mode === 'last_price' ? 'filled at 49.30 when it could next trade, 0.50 past its price: -0.70R' : "filled at the next bar's open, 49.10, 0.70 past its price: -0.90R";
+      expect(text).toContain(`Stop filled past its price: Your stop at 49.80 was already past the market when you placed or changed it, so it ${how} per share.`);
+      expect(text).not.toMatch(/well past|your moved stop allowed/);
+    }
   });
 
   it('says a stop placed after entry at or past the average, but already past the market, closed the trade at once', () => {

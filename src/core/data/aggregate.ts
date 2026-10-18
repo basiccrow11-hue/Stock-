@@ -35,6 +35,11 @@ export function ownCandles(timeframe: Timeframe, baseTimeframe: Timeframe): bool
   return timeframe !== '1D' && TIMEFRAMES.indexOf(timeframe) <= TIMEFRAMES.indexOf(baseTimeframe);
 }
 
+/** What a `timeframe` chart of `baseTimeframe` data shows a candle of: the data's own bar when it is as coarse or coarser. */
+export function candleTimeframe(timeframe: Timeframe, baseTimeframe: Timeframe): Timeframe {
+  return ownCandles(timeframe, baseTimeframe) ? baseTimeframe : timeframe;
+}
+
 /** The candle that the base bar starting at `time` belongs to on a `timeframe` chart of `baseTimeframe` data. */
 export function candleFor(time: UnixSeconds, timeframe: Timeframe, baseTimeframe: Timeframe): BucketKey {
   return ownCandles(timeframe, baseTimeframe) ? { key: String(time), start: time } : bucketFor(time, timeframe);

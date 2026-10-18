@@ -1100,9 +1100,13 @@ export class SimBroker {
    * The session is ending because another one starts: every working order is cancelled, and every open
    * position closed at the last price as a market order would close it there (spread, slippage and
    * commission as usual, all at once rather than under the volume cap), so each trade is complete and
-   * can be journaled. Returns the closing orders.
+   * can be journaled. `now` is the replay's or simulated market's time as it ends, which can be past the
+   * last bar (a daily bar's session, or a new day before its first bar): the exits happen then, at the
+   * spread of the session the last price is from. Returns the closing orders.
    */
-  closeOut(): Order[] {
+  closeOut(now = this.s.clock): Order[] {
+    const ext = new Map(Object.keys(this.s.positions).map((symbol) => [symbol, this.symbolSession(symbol) !== 'regular']));
+    this.syncClock(now);
     const time = this.s.clock;
     for (const o of this.workingOrders()) this.cancel(o.id, 'Session ended');
     const closing: Order[] = [];
@@ -1127,8 +1131,7 @@ export class SimBroker {
       };
       this.s.orders.push(o);
       this.log('accepted', `${describe(o)} placed: the session ended`, o.id);
-      const ext = this.symbolSession(pos.symbol) !== 'regular';
-      this.execute(o, last, time, Infinity, this.impactVolume(pos.symbol), ext, new Set(), 'placed', time);
+      this.execute(o, last, time, Infinity, this.impactVolume(pos.symbol), ext.get(pos.symbol)!, new Set(), 'placed', time);
       closing.push(o);
     }
     this.recordEquity(time);
@@ -1408,9 +1411,11 @@ export class SimBroker {
       if (o.symbol !== symbol || !isOpen(o)) continue;
       const from = o.activeFrom ?? o.createdAt;
       if (from <= bar.time) continue;
-      // The conservative fill mode fills a market order at the open of a bar that starts after it. That
-      // bar may open the next session (a daily bar, an order in the day's last bar), so a DAY order lives until then.
-      const nextOpen = o.type === 'market' && this.cfg.marketOrderFill === 'next_bar_open';
+      // The conservative fill mode fills a market order at the open of a bar that starts after it, and so
+      // an order already through the market when placed (a stop past it is a market order at once). That
+      // bar may open the next session (a daily bar, an order in the day's last bar), so a DAY order lives
+      // until then. The last price is still the one it was placed at: this is the symbol's next bar.
+      const nextOpen = this.cfg.marketOrderFill === 'next_bar_open' && (o.type === 'market' || this.expectedEntry(o, from).through);
       const f = nextOpen ? 1 : Math.min(1, (from - bar.time) / barSeconds);
       if (nextOpen && o.tif === 'day' && o.sessionDate) {
         const next = this.orderSessionDate(bar.time + barSeconds);
@@ -1464,7 +1469,10 @@ export class SimBroker {
         reach(pos);
         // At the very start of the bar, for an order placed before it began: the bar's open set the price.
         const atOpen = seg === 0 && pos === path[0] && !startsAt.has(trig.order.id);
-        const used = this.execute(trig.order, pos, t, capacity, this.impactVolume(symbol, bar.volume, barSeconds), ext, done, atOpen ? 'open' : 'bar', bar.time + barSeconds);
+        // Reached as price moved to it, not already met where this part of the path began (the open, or
+        // where the order started trading): only then has price traded through a limit to its level.
+        const reached = this.triggerLevel(trig.order, path[seg], path[seg], ext) === null;
+        const used = this.execute(trig.order, pos, t, capacity, this.impactVolume(symbol, bar.volume, barSeconds), ext, done, atOpen ? 'open' : 'bar', bar.time + barSeconds, reached);
         capacity -= used;
         traded += used;
         // A trade opened (or reversed into) here starts at this level.
@@ -1474,9 +1482,10 @@ export class SimBroker {
       reach(end);
     }
     // A stop placed through the market fills at its first chance: one this bar could trade in (a stop
-    // trades in the regular session only) but left unfilled is now an ordinary stop.
+    // trades in the regular session only, and one waiting for the next bar's open sat it out) but left
+    // unfilled is now an ordinary stop.
     for (const o of this.liveOrders()) {
-      if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0 && this.eligible(o, session)) delete o.placedThrough;
+      if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0 && this.eligible(o, session) && (startsAt.get(o.id) ?? 0) < 1) delete o.placedThrough;
     }
 
     this.s.lastPrice[symbol] = bar.close;
@@ -1643,9 +1652,10 @@ export class SimBroker {
   /**
    * Execute an order that fired at path price `x`. Returns shares filled (0 if it only triggered
    * or could not fill). Adds the order to `skip` when it should not be reconsidered this bar.
-   * `knownAt` is when the fill becomes known (Fill.knownAt).
+   * `knownAt` is when the fill becomes known (Fill.knownAt). `reached` says the path moved to `x` to
+   * reach the order, rather than the market already being there (at the open, or as it was placed).
    */
-  private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>, at: Fill['at'], knownAt: UnixSeconds): number {
+  private execute(o: Order, x: number, time: UnixSeconds, capacity: number, barVolume: number, ext: boolean, skip: Set<string>, at: Fill['at'], knownAt: UnixSeconds, reached = false): number {
     const side = actionSide(o.action);
     const pos = this.position(o.symbol);
     // Strict's daily limit counts every moment one of the orders is reached.
@@ -1708,13 +1718,11 @@ export class SimBroker {
       price = fill.price;
       slippage = Math.abs(price - fill.quote) * qty;
     } else {
-      // Limit (or triggered stop-limit): never worse than the limit; better if the market gapped through.
-      // Reached on the path in trade-through mode (price traded a tick past it), it fills at its price.
+      // Limit (or triggered stop-limit): never worse than the limit; better if the market was already
+      // through it (a gap, or placed through the market). Reached on the path in trade-through mode
+      // (price traded a tick past it), it fills at its price.
       const L = o.limitPrice!;
-      const through = this.limitThrough(L);
-      const hsL = halfSpread(this.cfg, L, ext);
-      const crossed = through > 0 && Math.abs(x - (side === 'buy' ? L - hsL - through : L + hsL + through)) <= EPS;
-      price = crossed ? L : side === 'buy' ? Math.min(L, ceilTick(x + hs)) : Math.max(L, floorTick(x - hs));
+      price = reached && this.limitThrough(L) > 0 ? L : side === 'buy' ? Math.min(L, ceilTick(x + hs)) : Math.max(L, floorTick(x - hs));
     }
     const spreadCost = hs * qty;
 

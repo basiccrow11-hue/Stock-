@@ -409,19 +409,30 @@ export function reviewTrade(input: ReviewInput): TradeReview {
   /**
    * How the closing order filled when it was a stop already past the market when placed or changed:
    * at once at the last price ('once'); at the open of the next bar ('next': in next-bar-open mode, or
-   * with no room left under the last bar's volume cap); or, placed outside the regular session, at its
-   * open after the extended-hours bars in between, where a stop cannot trade ('regular').
+   * with no room left under the last bar's volume cap); placed while a bar was forming that it could
+   * not fill at once in (no room left under the last bar's volume cap, or the stock had not traded yet
+   * that session), on that bar's prices after it was placed ('after'); or, placed outside the regular
+   * session, at its open after the extended-hours bars in between, where a stop cannot trade ('regular').
    */
-  const placedPast = (): 'once' | 'next' | 'regular' | undefined => {
+  const placedPast = (): 'once' | 'next' | 'after' | 'regular' | undefined => {
     const first = main && input.fills.find((f) => f.orderId === main.order.id && trip.fills.includes(f.id));
     if (first?.at === 'placed') return 'once';
-    if (first?.at !== 'open' || !main!.order.placedThrough) return undefined;
+    if (!first || !main!.order.placedThrough) return undefined;
+    // It is still marked only if it filled in the first bar it could trade in.
+    if (first?.at === 'bar') return 'after';
+    if (first?.at !== 'open') return undefined;
     const a = barAt((main!.order.activeFrom ?? main!.order.createdAt) - 1);
     const b = barAt(first.time);
     return a >= 0 && b - a > 1 ? 'regular' : 'next';
   };
-  const filledThrough = (how: 'once' | 'next' | 'regular', px: number) =>
-    how === 'once' ? `filled at once at ${formatTick(px)}` : how === 'next' ? `filled at the next bar's open, ${formatTick(px)}` : `filled when the regular session opened, at ${formatTick(px)}`;
+  const filledThrough = (how: 'once' | 'next' | 'after' | 'regular', px: number) =>
+    how === 'once'
+      ? `filled at once at ${formatTick(px)}`
+      : how === 'next'
+        ? `filled at the next bar's open, ${formatTick(px)}`
+        : how === 'after'
+          ? `filled at ${formatTick(px)} when it could next trade`
+          : `filled when the regular session opened, at ${formatTick(px)}`;
   // A limit exit at or beyond the original target reached it.
   const reachedTarget = (p: ExitPart) => trip.initialTarget !== undefined && p.order.type === 'limit' && (p.price - trip.initialTarget) * dir >= -1e-9;
   findings.push({
@@ -839,7 +850,8 @@ export function checkRules(input: ReviewInput, riskPctOfEquity: number | null, r
   const life = riskOverLife(trip, plannedRisk !== null ? plannedRisk * trip.maxQuantity : null);
   const equityAtEntry = equityBeforeEntry(trip, input.fills, input.equityCurve, input.startingBalance);
   const lifePct = life.dollars !== null && equityAtEntry > 0 ? (life.dollars / equityAtEntry) * 100 : null;
-  const pct = lifePct !== null && (riskPctOfEquity === null || lifePct > riskPctOfEquity) ? lifePct : riskPctOfEquity;
+  // More at stake at some point than planned, by more than the half cent the trade's risk is rounded to (or a measure where the plan had none).
+  const pct = lifePct !== null && (riskPctOfEquity === null || lifePct > riskPctOfEquity + (0.005 / equityAtEntry) * 100) ? lifePct : riskPctOfEquity;
   out.push({
     rule: `Risk ≤ ${rules.maxRiskPctPerTrade}% per trade`,
     passed: addedPastStop || life.unprotected ? false : pct === null ? (hasStop ? null : false) : pct <= rules.maxRiskPctPerTrade + 1e-9,

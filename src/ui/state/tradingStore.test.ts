@@ -76,6 +76,23 @@ describe('jumping forward in a replay', () => {
   });
 });
 
+describe('ending a session', () => {
+  it('closes what is open when the session ends, not when its last bar did', async () => {
+    const store = await import('./tradingStore');
+    const { useJournal } = await import('./journalStore');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const id = store.useTrading.getState().session!.id;
+    store.stepForward();
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    // Paused 40 seconds into a minute, then ended.
+    const end = exchangeTimeToUnix('2024-03-12', 11 * 60) + 40;
+    store.jumpTo(end);
+    await store.endSession();
+    const entry = useJournal.getState().entries.find((e) => e.sessionId === id)!;
+    expect([entry.trip.closed, entry.trip.exitTime, entry.review?.exitReason]).toEqual([true, end, 'session_end']);
+  });
+});
+
 describe('quotes', () => {
   it('measures the day change from the previous regular-session close, not its after-hours print', async () => {
     const store = await import('./tradingStore');

@@ -91,7 +91,13 @@ function groupBy(entries: JournalEntry[], keyOf: (e: JournalEntry) => string): G
     .sort((a, b) => b.n - a.n);
 }
 
-function Breakdown({ title, groups }: { title: string; groups: Group[] }) {
+/** Rows a breakdown by count (symbols, tags) shows before "Show all": the most traded. */
+const BREAKDOWN_ROWS = 12;
+
+/** A breakdown table. One in its own order (entry hours) shows every row; one by count, the most traded until asked for all. */
+function Breakdown({ title, groups, ordered = false }: { title: string; groups: Group[]; ordered?: boolean }) {
+  const [all, setAll] = useState(false);
+  const cut = !ordered && !all && groups.length > BREAKDOWN_ROWS;
   return (
     <div className="card">
       <h3 style={{ marginBottom: 8 }}>{title}</h3>
@@ -108,7 +114,7 @@ function Breakdown({ title, groups }: { title: string; groups: Group[] }) {
             </tr>
           </thead>
           <tbody>
-            {groups.slice(0, 12).map((g) => (
+            {(cut ? groups.slice(0, BREAKDOWN_ROWS) : groups).map((g) => (
               <tr key={g.key}>
                 <td>{g.key}</td>
                 <td className="num">{g.n}</td>
@@ -120,6 +126,14 @@ function Breakdown({ title, groups }: { title: string; groups: Group[] }) {
           </tbody>
         </table>
       </div>
+      {!ordered && groups.length > BREAKDOWN_ROWS && (
+        <div className="row" style={{ gap: 8, marginTop: 8 }}>
+          <span className="small muted">{cut ? `The ${BREAKDOWN_ROWS} with the most trades, of ${groups.length}.` : `All ${groups.length}.`}</span>
+          <button className="btn sm" onClick={() => setAll(!all)}>
+            {all ? `Show the top ${BREAKDOWN_ROWS}` : `Show all ${groups.length}`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -343,6 +357,7 @@ export function AnalyticsPage() {
               <Breakdown title="By direction" groups={groupBy(filtered, (e) => (e.direction === 'long' ? 'Long' : 'Short'))} />
               <Breakdown
                 title="By entry time (ET)"
+                ordered
                 groups={groupBy(filtered, (e) => {
                   const h = Math.floor(exchangeMinuteOfDay(e.entryTime) / 60);
                   return `${String(h).padStart(2, '0')}:00–${String(h + 1).padStart(2, '0')}:00`;

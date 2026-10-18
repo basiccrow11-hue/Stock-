@@ -972,7 +972,7 @@ async function endCurrent(): Promise<void> {
   const b = broker();
   const id = useTrading.getState().session?.id;
   if (b && id && b.openPositions().length > 0) {
-    b.closeOut();
+    b.closeOut(eng.replay ? eng.replay.now : eng.stream?.clock);
     publish(true);
   }
   await processClosedTrips(true);

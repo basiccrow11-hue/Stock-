@@ -158,6 +158,57 @@ describe('ReplaySession: rewind, jump, and fills', () => {
     expect(s.broker.account().equity).toBe(acctBefore.equity);
   });
 
+  it('undoes what was done while paused inside a minute when stepping or jumping back to an earlier moment of it', () => {
+    const minutes = [bar(et(D, '09:59'), 100, 100, 100, 100), bar(et(D, '10:00'), 100, 100.1, 99, 100.05)];
+    for (let m = 1; m < 30; m++) minutes.push(bar(et(D, `10:${String(m).padStart(2, '0')}`), 100, 100.1, 99.9, 100));
+    const session = () => new ReplaySession(engineWith(minutes, et(D, '10:00'), et(D, '10:29')), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
+
+    // Bought at 10:01:27, played on to 10:02:07: Step back to 10:01 undoes the buy, and says so first.
+    const a = session();
+    a.advance(87);
+    a.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });
+    a.advance(40);
+    expect(a.stepBackTarget()).toBe(et(D, '10:01'));
+    expect(a.undoneBy(et(D, '10:01'))).toEqual({ open: 1, closed: 0, hides: true });
+    a.stepBack();
+    expect([a.now, a.broker.position('TEST').quantity, a.broker.state.fills.length]).toEqual([et(D, '10:01'), 0, 0]);
+    expect(a.broker.state.clock).toBeLessThanOrEqual(a.now);
+
+    // A trade opened at 10:01:10 and closed at 10:01:30 goes too, while one jumped back to keeps what was done by then.
+    const b = session();
+    b.advance(70);
+    b.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100 });
+    b.advance(20);
+    b.closePosition('TEST');
+    b.advance(40);
+    expect(b.undoneBy(et(D, '10:01'))).toEqual({ open: 0, closed: 1, hides: true });
+    expect(b.undoneBy(et(D, '10:01') + 20)).toEqual({ open: 0, closed: 1, hides: true });
+    b.jumpTo(et(D, '10:01') + 20);
+    expect(b.broker.state.roundTrips.map((t) => t.closed)).toEqual([false]);
+    expect(b.broker.position('TEST').quantity).toBe(100);
+    b.jumpTo(et(D, '10:01') + 10);
+    expect(b.broker.position('TEST').quantity).toBe(100);
+    b.jumpTo(et(D, '10:01') + 9);
+    expect(b.broker.state.roundTrips).toHaveLength(0);
+
+    // Back at 10:00 after a trade at 10:00:45, a limit placed then trades on the whole 10:00 bar, as in a fresh session.
+    const fills = (s: ReplaySession) => s.broker.state.fills.filter((f) => f.side === 'buy' && f.quantity === 50).map((f) => [f.price, f.time]);
+    const fresh = session();
+    fresh.submit({ symbol: 'TEST', action: 'buy', type: 'limit', limitPrice: 99.2, quantity: 50 });
+    fresh.advance(60);
+    const c = session();
+    c.advance(45);
+    c.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 1 });
+    c.closePosition('TEST');
+    c.advance(30);
+    c.stepBack();
+    expect(c.broker.state.roundTrips).toHaveLength(0);
+    c.submit({ symbol: 'TEST', action: 'buy', type: 'limit', limitPrice: 99.2, quantity: 50 });
+    c.advance(60);
+    expect(fills(c)).toEqual(fills(fresh));
+    expect(fills(fresh)).toHaveLength(1);
+  });
+
   it('logs a rewind without the calendar date, which blind mode hides', () => {
     const s = new ReplaySession(engineWith(bars), setupFor(), ZERO_COST_CONFIG, 's', 'DEMO');
     for (let i = 0; i < 5; i++) s.step();
@@ -604,6 +655,52 @@ describe('Next-bar-open fills on daily bars', () => {
     while (s.now < et('2025-02-06', '16:00')) s.advance(3600);
     expect(s.broker.state.orders.find((o) => o.id === r.order!.id)!.status).toBe('filled');
     expect(s.broker.state.fills.map((f) => [f.price, f.time])).toEqual([[103, et('2025-02-06', '09:30')]]);
+  });
+
+  it('fills a stop or limit placed through the market while a minute forms at the next bar’s open, as a market order', () => {
+    const minutes: Bar[] = [];
+    const add = (hm: string, o: number, h: number, l: number, c: number) => minutes.push(bar(et(D, hm), o, h, l, c, 1e6));
+    add('09:58', 100, 100, 100, 100);
+    add('09:59', 100, 100, 100, 100);
+    add('10:00', 100, 100.3, 99.9, 100.2);
+    add('10:01', 100.2, 100.25, 99.6, 99.7);
+    add('10:02', 99.7, 99.75, 99.0, 99.1); // forming while paused
+    add('10:03', 99.1, 99.2, 98.9, 99.0);
+    for (let m = 4; m < 20; m++) add(`10:${String(m).padStart(2, '0')}`, 99, 99.1, 98.9, 99);
+    for (const kind of ['stop', 'limit'] as const) {
+      const e = new ReplayEngine({ symbol: 'TEST', start: et(D, '10:00'), end: et(D, '10:20'), baseTimeframe: '1m' }, minutes);
+      const s = new ReplaySession(e, { symbol: 'TEST', date: D, startTime: '10:00', endTime: '10:20', startingBalance: 100_000, lookbackDays: 1 }, { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' }, 'n', 'HISTORICAL');
+      s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100, tif: 'day', ...(kind === 'stop' ? { stopLoss: 99.5 } : {}) });
+      s.advance(120); // 10:02, last price 99.70
+      s.advance(30); // paused half way through the 10:02 minute
+      if (kind === 'stop') {
+        const stop = s.broker.workingOrders('TEST').find((o) => o.type === 'stop')!;
+        expect(s.modify(stop.id, { stopPrice: 99.9 }).ok).toBe(true);
+      } else {
+        expect(s.submit({ symbol: 'TEST', action: 'sell', type: 'limit', limitPrice: 99.3, quantity: 100, tif: 'day' }).ok).toBe(true);
+      }
+      s.advance(120);
+      // Not on the 10:02 bar's prices after 10:02:30 (99.37 on its way down), but at 10:03's open.
+      expect(s.broker.state.fills.filter((f) => f.action === 'sell').map((f) => [f.price, f.at, f.time])).toEqual(kind === 'stop' ? [[99.1, 'open', et(D, '10:03')]] : []);
+      // The limit, which 10:03 opened short of, keeps working.
+      if (kind === 'limit') expect(s.broker.workingOrders('TEST').map((o) => o.type)).toEqual(['limit']);
+    }
+  });
+
+  it('carries a DAY stop placed through the market in the day’s last minute to the next session’s open', () => {
+    const next = nextTradingDay(D);
+    const flat = (date: string, n: number) => minuteBars(date, '09:30', Array.from({ length: n }, () => [100, 100, 100, 100] as [number, number, number, number]));
+    const minutes = [...flat(D, 390), ...minuteBars(next, '09:30', [[99, 99.2, 98.8, 99], [99, 99.1, 98.9, 99]])];
+    const e = new ReplayEngine({ symbol: 'TEST', start: et(D, '15:58'), end: et(next, '09:40'), baseTimeframe: '1m' }, minutes);
+    const s = new ReplaySession(e, { symbol: 'TEST', date: D, endDate: next, startTime: '15:58', endTime: '09:40', startingBalance: 100_000, lookbackDays: 1 }, { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' }, 'n', 'HISTORICAL');
+    s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 100, tif: 'day' });
+    s.advance(90); // 15:59:30: bought at 15:58's open
+    expect(s.broker.position('TEST').quantity).toBe(100);
+    expect(s.submit({ symbol: 'TEST', action: 'sell', type: 'stop', stopPrice: 100.5, quantity: 100, tif: 'day' }).ok).toBe(true);
+    s.advance(30);
+    expect(s.broker.position('TEST').quantity).toBe(100);
+    s.jumpTo(et(next, '09:35'));
+    expect(s.broker.state.fills.filter((f) => f.action === 'sell').map((f) => [f.price, f.at, f.time])).toEqual([[99, 'open', et(next, '09:30')]]);
   });
 });
 

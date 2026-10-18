@@ -20,7 +20,7 @@
 import type { Bar, DataSourceKind, EquityPoint, Fill, OrderAction, RoundTrip, Timeframe, UnixSeconds } from '../types';
 import type { ExecutionConfig } from '../broker/config';
 import { SimBroker } from '../broker/SimBroker';
-import { aggregateBars, candleFor } from '../data/aggregate';
+import { aggregateBars, candleFor, candleTimeframe } from '../data/aggregate';
 import { computeStats, type PerformanceStats } from '../analytics/stats';
 import { positionSizeForRisk } from '../risk/risk';
 import { roundToTick } from '../util/math';
@@ -86,9 +86,13 @@ export function warmupCandlesFrom(bars: readonly Bar[], strategy: StrategyDefini
 /** Regular-session candles in a full trading day at each signal timeframe. Extended hours only add candles, so a warm-up counted in these is never short. */
 const CANDLES_PER_DAY: Record<Timeframe, number> = { '1m': 390, '5m': 78, '15m': 26, '30m': 13, '1h': 7, '4h': 2, '1D': 1 };
 
-/** Trading days of history a test needs before its start for the rules' indicators to warm up (strategyWarmup), with a day to spare for a half day. */
-export function warmupTradingDays(strategy: StrategyDefinition, timeframe: Timeframe): number {
-  return Math.ceil(strategyWarmup(strategy) / CANDLES_PER_DAY[timeframe]) + 1;
+/**
+ * Trading days of history a test needs before its start for the rules' indicators to warm up
+ * (strategyWarmup), with a day to spare for a half day. Data coarser than the signal timeframe (daily
+ * bars tested on 5m) has its own bars as candles, so its days are counted in those.
+ */
+export function warmupTradingDays(strategy: StrategyDefinition, timeframe: Timeframe, baseTimeframe: Timeframe): number {
+  return Math.ceil(strategyWarmup(strategy) / CANDLES_PER_DAY[candleTimeframe(timeframe, baseTimeframe)]) + 1;
 }
 
 /**
@@ -97,7 +101,9 @@ export function warmupTradingDays(strategy: StrategyDefinition, timeframe: Timef
  * first had one, and those whose values were still settling.
  */
 function warmupWarning(p: BacktestParams, series: Map<string, number[]>, candles: readonly Bar[], before: number): string | null {
-  const when = (c: Bar) => (p.timeframe === '1D' ? exchangeDate(c.time) : formatExchangeDateTime(c.time));
+  // The candles are the data's own bars when it is coarser than the signal timeframe.
+  const tf = candleTimeframe(p.timeframe, p.baseTimeframe);
+  const when = (c: Bar) => (tf === '1D' ? exchangeDate(c.time) : formatExchangeDateTime(c.time));
   const seen = new Set<string>();
   const notes: string[] = [];
   for (const rule of p.strategy.rules) {
@@ -116,7 +122,7 @@ function warmupWarning(p: BacktestParams, series: Map<string, number[]>, candles
     }
   }
   if (!notes.length) return null;
-  const had = `${before.toLocaleString('en-US')} ${p.timeframe} ${before === 1 ? 'candle' : 'candles'}`;
+  const had = `${before.toLocaleString('en-US')} ${tf} ${before === 1 ? 'candle' : 'candles'}`;
   return `Not enough history before ${exchangeDate(p.tradeFrom)} to warm up the indicators: the data had ${had} before it. ${notes.join(' ')}`;
 }
 

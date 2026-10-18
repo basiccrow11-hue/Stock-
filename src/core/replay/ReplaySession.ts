@@ -128,6 +128,11 @@ export interface RevealedBar {
 export interface Checkpoint {
   /** Bars revealed by each engine (engine order) when it was taken. */
   cursors: number[];
+  /**
+   * The replay's time when it was taken. Orders placed while the replay is paused inside a bar share
+   * that bar's reveal point, so a rewind to an earlier moment there must not take it.
+   */
+  time: UnixSeconds;
   /** Their sum. */
   revealed: number;
   broker: BrokerCheckpoint;
@@ -416,12 +421,13 @@ export class ReplaySession {
     return [...this.engines.values()].map((e) => e.revealedCount);
   }
 
-  /** A checkpoint at the current reveal point. A later one at the same point replaces it (not the start's). */
+  /** A checkpoint at the current reveal point and time. A later one at the same point and time replaces it (not the start's). */
   private checkpoint(): void {
     const cursors = this.cursors();
+    const time = this.now;
     const last = this.checkpoints[this.checkpoints.length - 1];
-    if (this.checkpoints.length > 1 && last.cursors.every((c, i) => c === cursors[i])) this.checkpoints.pop();
-    this.checkpoints.push({ cursors, revealed: cursors.reduce((a, b) => a + b, 0), broker: this.broker.checkpoint(), config: this.broker.cfg });
+    if (this.checkpoints.length > 1 && last.time === time && last.cursors.every((c, i) => c === cursors[i])) this.checkpoints.pop();
+    this.checkpoints.push({ cursors, time, revealed: cursors.reduce((a, b) => a + b, 0), broker: this.broker.checkpoint(), config: this.broker.cfg });
   }
 
   /**
@@ -445,9 +451,12 @@ export class ReplaySession {
     return out;
   }
 
-  /** The newest checkpoint at or before the reveal point `cursors`. */
-  private checkpointAt(cursors: number[]): number {
-    for (let i = this.checkpoints.length - 1; i > 0; i--) if (this.checkpoints[i].cursors.every((c, k) => c <= cursors[k])) return i;
+  /** The newest checkpoint at or before the reveal point `cursors` and the time `time`. */
+  private checkpointAt(cursors: number[], time: UnixSeconds): number {
+    for (let i = this.checkpoints.length - 1; i > 0; i--) {
+      const cp = this.checkpoints[i];
+      if (cp.time <= time && cp.cursors.every((c, k) => c <= cursors[k])) return i;
+    }
     return 0;
   }
 
@@ -593,7 +602,7 @@ export class ReplaySession {
   undoneBy(time: UnixSeconds, restart = false): { open: number; closed: number; hides: boolean } {
     const target = restart ? this.checkpoints[0].cursors : [...this.engines.values()].map((e) => Math.min(e.revealedCount, e.revealedCountAt(time)));
     const hides = this.cursors().some((c, k) => target[k] < c);
-    const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target)];
+    const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target, time)];
     const after = this.broker.fork(cp.broker);
     this.replayFrom(after, cp, target);
     const then = new Map(after.state.roundTrips.map((t) => [t.id, t.closed]));
@@ -620,7 +629,7 @@ export class ReplaySession {
     this.hours = null;
     const cursors = this.cursors();
     const back = cursors.some((c, k) => c < before[k]);
-    const i = restart ? 0 : this.checkpointAt(cursors);
+    const i = restart ? 0 : this.checkpointAt(cursors, time);
     const cp = this.checkpoints[i];
     this.checkpoints.length = i + 1;
     this.broker.rollback(cp.broker);

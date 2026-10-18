@@ -76,6 +76,26 @@ describe('market orders', () => {
   });
 });
 
+describe('ending a session', () => {
+  it('closes at the last price when the session ends, at the spread of that price’s session', () => {
+    const cfg = { spread: { mode: 'cents' as const, value: 0.04, minimum: 0, extendedHoursMultiplier: 4 } };
+    const { broker, next } = setup(cfg);
+    broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
+    broker.submit({ symbol: S, action: 'sell', type: 'limit', limitPrice: 110, quantity: 10, tif: 'day' });
+    next(100, 100.5, 99.5, 100.2);
+    // Ended the next morning before the stock has traded: closed then, at yesterday's last price and its regular-hours spread.
+    const end = et('2025-01-16', '09:45');
+    broker.closeOut(end);
+    const exit = broker.state.fills.at(-1)!;
+    expect([exit.price, exit.time]).toEqual([100.18, end]);
+    expect(broker.state.roundTrips[0]).toMatchObject({ closed: true, exitTime: end });
+    expect(broker.state.orders.find((o) => o.id === exit.orderId)).toMatchObject({ sessionEnd: true, createdAt: end });
+    // Yesterday's DAY limit had expired by then; nothing is left working.
+    expect(broker.state.orders.find((o) => o.type === 'limit')!.status).toBe('expired');
+    expect(broker.workingOrders()).toEqual([]);
+  });
+});
+
 describe('limit orders', () => {
   it('rests until price reaches the limit and fills at the limit', () => {
     const { broker, next } = setup();
@@ -1454,6 +1474,39 @@ describe('the daily limit while a step fills, sub-dollar limits, stop-limits thr
     expect(broker.state.fills).toHaveLength(0);
     next(0.455, 0.455, 0.4519, 0.453); // one tick through
     expect(broker.state.fills.map((f) => f.price)).toEqual([0.452]);
+  });
+
+  it('fills a trade-through limit the market is already a tick past at the market, never a tick worse', () => {
+    const spread = { mode: 'cents' as const, value: 0.02, minimum: 0, extendedHoursMultiplier: 1 };
+    for (const cfg of [{ limitFill: 'trade_through' as const }, { limitFill: 'trade_through' as const, spread }]) {
+      const hs = cfg.spread ? 0.01 : 0;
+      // Placed at the last price of 50, a buy limit one tick past the ask (where trade-through needs
+      // price to be) pays the ask, as one further past does.
+      for (const L of [50.01 + hs, 50.02 + hs]) {
+        const { broker } = setup(cfg, 100_000, 50);
+        broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 10, limitPrice: L });
+        expect(broker.state.fills.map((f) => f.price)).toEqual([50 + hs]);
+      }
+      // Resting, it fills at a bar's open exactly a tick past it at that price.
+      const { broker, next } = setup(cfg, 100_000, 51);
+      broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 10, limitPrice: 50.01 + hs });
+      next(50, 50.005, 49.98, 49.99);
+      expect(broker.state.fills.map((f) => [f.price, f.at])).toEqual([[50 + hs, 'open']]);
+      // A sell limit on a bar opening (and low) a tick above it fills inside the bar's range.
+      const sell = setup(cfg, 100_000, 49);
+      sell.broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
+      sell.broker.submit({ symbol: S, action: 'sell', type: 'limit', quantity: 10, limitPrice: 49.99 - hs });
+      sell.next(50, 50.1, 50, 50.05);
+      expect(sell.broker.state.fills.filter((f) => f.action === 'sell').map((f) => f.price)).toEqual([50 - hs]);
+    }
+  });
+
+  it('fills trade-through limits the path reaches together at their price', () => {
+    const { broker, next } = setup({ limitFill: 'trade_through' }, 100_000, 50.5);
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 10, limitPrice: 50 });
+    broker.submit({ symbol: S, action: 'buy', type: 'limit', quantity: 10, limitPrice: 50 });
+    next(50.5, 50.5, 49.99, 50.2);
+    expect(broker.state.fills.map((f) => f.price)).toEqual([50, 50]);
   });
 
   it('fills a stop-limit whose stop has passed at once when its limit meets the market', () => {

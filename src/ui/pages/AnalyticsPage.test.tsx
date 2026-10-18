@@ -89,6 +89,30 @@ describe('analytics over several data sources', () => {
     v.done();
   });
 
+  it('shows every entry hour, and the most traded symbols with the rest a click away', async () => {
+    const { exchangeTimeToUnix } = await import('../../core/time');
+    // 14 trades, one an hour from 07:40 to 19:40 ET (on 2024-03-11 and 12), on 14 symbols: SPY twice.
+    const entries = Array.from({ length: 14 }, (_, i) => {
+      const e = entry('HISTORICAL', 1);
+      const t = exchangeTimeToUnix(i < 13 ? '2024-03-11' : '2024-03-12', (7 + (i % 13)) * 60 + 40);
+      const symbol = i === 13 ? 'SPY' : i === 0 ? 'SPY' : `S${String(i).padStart(2, '0')}`;
+      return { ...e, symbol, entryTime: t, trip: { ...e.trip, symbol, entryTime: t, exitTime: t + 600 } };
+    });
+    const v = await mount(entries);
+    const card = (title: string) => [...v.host.querySelectorAll('.card')].find((c) => c.querySelector('h3')?.textContent === title)!;
+    const labels = (title: string) => [...card(title).querySelectorAll('tbody tr')].map((tr) => tr.querySelector('td')!.textContent);
+    expect(labels('By entry time (ET)')).toEqual(Array.from({ length: 13 }, (_, i) => `${String(7 + i).padStart(2, '0')}:00–${String(8 + i).padStart(2, '0')}:00`));
+    expect(card('By entry time (ET)').querySelector('button')).toBeNull();
+    // 13 symbols: the 12 most traded (SPY first), and a button for all 13.
+    expect(labels('By symbol')).toHaveLength(12);
+    expect(labels('By symbol')[0]).toBe('SPY');
+    expect(card('By symbol').textContent).toContain('The 12 with the most trades, of 13.');
+    act(() => card('By symbol').querySelector('button')!.click());
+    expect(labels('By symbol')).toHaveLength(13);
+    expect(card('By symbol').querySelector('button')!.textContent).toBe('Show the top 12');
+    v.done();
+  });
+
   it('lets a section heading wrap, so the current session’s source badge stays inside its card on a narrow phone', async () => {
     // The badge never breaks its words: on a 320px phone the heading, the session's name and the badge
     // only fit on two lines. jsdom has no layout, so this checks the rule that allows the second line.

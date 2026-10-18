@@ -357,15 +357,18 @@ describe('backtester: indicator warm-up', () => {
   it('asks for enough history for the longest indicator on the signal timeframe, with room for EMA, MACD, RSI and ATR to settle', () => {
     // SMA 200 crossing on daily candles: 200 candles for its first value and one more for the cross.
     expect(strategyWarmup(smaCross(200))).toBe(201);
-    expect(warmupTradingDays(smaCross(200), '1D')).toBe(202);
+    expect(warmupTradingDays(smaCross(200), '1D', '1m')).toBe(202);
     expect(seriesWarmup({ kind: 'ema', period: 200 })).toBe(600);
     expect(seriesWarmup({ kind: 'rsi', period: 14 })).toBe(71);
     expect(seriesWarmup({ kind: 'atr', period: 14 })).toBe(70);
     expect(seriesWarmup({ kind: 'macd_signal', fast: 12, slow: 26, signal: 9 })).toBe(105);
     expect(seriesWarmup({ kind: 'vwap' })).toBe(1);
     // The day-trading presets need less than a day of 5-minute candles; the MACD preset 107 daily candles.
-    expect(warmupTradingDays(STRATEGY_PRESETS[0], '5m')).toBe(2);
-    expect(warmupTradingDays(STRATEGY_PRESETS[3], '1D')).toBe(107);
+    expect(warmupTradingDays(STRATEGY_PRESETS[0], '5m', '1m')).toBe(2);
+    expect(warmupTradingDays(STRATEGY_PRESETS[3], '1D', '1m')).toBe(107);
+    // Data coarser than the signal timeframe has its own bars as candles: daily or hourly bars tested on 5m.
+    expect(warmupTradingDays(smaCross(200), '5m', '1D')).toBe(202);
+    expect(warmupTradingDays(smaCross(200), '5m', '1h')).toBe(30);
     // Never fewer candles than the series needs for its first value.
     const candles = demoBars('SPY', '2025-01-13', '2025-01-17').filter((b) => marketSession(b.time) === 'regular');
     const refs: SeriesRef[] = [
@@ -478,9 +481,21 @@ describe('backtester: indicator warm-up', () => {
     ]);
     expect(short.signals.every((x) => exchangeDate(x.candleTime) >= firstValue)).toBe(true);
     // With the warm-up the rules ask for, the indicator has a value from the start, and signals come before that date.
-    const full = run(warmupTradingDays(smaCross(200), '1D'));
+    const full = run(warmupTradingDays(smaCross(200), '1D', '1m'));
     expect(full.warnings).toEqual([]);
     expect(full.signals.some((x) => exchangeDate(x.candleTime) < firstValue)).toBe(true);
+    // Tested on an intraday timeframe, daily data asks for as many days and is tested on the same daily
+    // candles; a warning would name them as daily candles, by date.
+    const intraday = (warmDays: number) => {
+      let warm = start;
+      for (let i = 0; i < warmDays; i++) warm = prevTradingDay(warm);
+      const warmupCandles = warmupCandlesFrom(daily.filter((b) => b.time >= et(warm, '00:00') && b.time < et(start, '00:00')), smaCross(200), '5m', '1D');
+      return runBacktest(params(daily.filter((b) => b.time >= et(start, '00:00')), smaCross(200), { baseTimeframe: '1D', timeframe: '5m', tradeFrom: et(start, '00:00'), config: ZERO_COST_CONFIG, warmupCandles }));
+    };
+    const onFive = intraday(warmupTradingDays(smaCross(200), '5m', '1D'));
+    expect(onFive.warnings).toEqual([]);
+    expect(onFive.signals).toEqual(full.signals);
+    expect(intraday(60).warnings).toEqual(short.warnings);
     // Values still settling are named too: an EMA 50 has a value after 50 candles but needs 150.
     const ema: StrategyDefinition = { ...smaCross(200), rules: [{ id: 'e', logic: 'all', action: 'buy', conditions: [{ left: { kind: 'close' }, op: 'above', right: { kind: 'ema', period: 50 } }] }] };
     const warmupCandles = warmupCandlesFrom(daily.filter((b) => b.time < et(start, '00:00')).slice(-100), ema, '1D', '1D');
