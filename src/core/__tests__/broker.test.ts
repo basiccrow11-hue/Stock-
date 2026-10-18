@@ -94,6 +94,32 @@ describe('ending a session', () => {
     expect(broker.state.orders.find((o) => o.type === 'limit')!.status).toBe('expired');
     expect(broker.workingOrders()).toEqual([]);
   });
+
+  it('closes at the spread of the last price’s session however the clock moved since', () => {
+    const cfg = { spread: { mode: 'cents' as const, value: 0.04, minimum: 0, extendedHoursMultiplier: 4 } };
+    /** Long 10 bought the day before, the last bar starting at `hhmm` on D and lasting `seconds`, ended the next morning. */
+    const exit = (hhmm: string, seconds: number, placeFirst: boolean) => {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, ...cfg }, idPrefix: 't' });
+      broker.onBar(S, bar(et('2025-01-14', '15:58'), 100, 100, 100, 100));
+      broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
+      broker.onBar(S, bar(et(D, hhmm), 100, 100.5, 99.5, 100.2), seconds);
+      // An order placed the next morning, before the stock has traded, moves the broker's clock on.
+      if (placeFirst) {
+        broker.syncClock(et('2025-01-16', '09:00'));
+        expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 90, quantity: 10, tif: 'gtc' }).ok).toBe(true);
+      }
+      broker.closeOut(et('2025-01-16', '09:45'));
+      return broker.state.fills.at(-1)!;
+    };
+    for (const placeFirst of [false, true]) {
+      // The 15:59 bar's close is a regular-hours price, and so is a daily bar's.
+      expect(exit('15:59', 60, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      expect(exit('09:30', 6.5 * 3600, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      // An after-hours bar's is not, nor is that of an hourly bar from 15:30, which closed at 16:30.
+      expect(exit('16:05', 60, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
+      expect(exit('15:30', 3600, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
+    }
+  });
 });
 
 describe('limit orders', () => {

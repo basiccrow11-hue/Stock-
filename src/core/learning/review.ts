@@ -418,7 +418,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     const first = main && input.fills.find((f) => f.orderId === main.order.id && trip.fills.includes(f.id));
     if (first?.at === 'placed') return 'once';
     if (!first || !main!.order.placedThrough) return undefined;
-    // It is still marked only if it filled in the first bar it could trade in.
+    // It is still marked only if it filled in the first bar it could trade in, still through the market where it began to.
     if (first?.at === 'bar') return 'after';
     if (first?.at !== 'open') return undefined;
     const a = barAt((main!.order.activeFrom ?? main!.order.createdAt) - 1);

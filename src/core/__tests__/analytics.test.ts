@@ -1898,6 +1898,76 @@ describe('a first stop or target placed after entry, at or past the average entr
     }
   });
 
+  it('judges a stop moved past the market as an ordinary stop when the next bar opens back short of it and it fires on the way', () => {
+    const run = (lastClose: number) => {
+      const broker = new SimBroker({ startingBalance: 100_000, config: { ...DEFAULT_EXECUTION_CONFIG, marketOrderFill: 'next_bar_open' } });
+      const bars: Bar[] = [];
+      const at = (hhmm: string, o: number, h: number, l: number, c: number, v: number) => {
+        bars.push(bar(et('2025-01-15', hhmm), o, h, l, c, v));
+        broker.onBar('X', bars[bars.length - 1]);
+      };
+      at('10:00', 50, 50, 50, 50, 1e6);
+      broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 1000, tif: 'day', stopLoss: 49 });
+      at('10:01', 50, 50.1, 49.25, lastClose, 1e6);
+      const stop = broker.workingOrders('X').find((o) => o.type === 'stop')!;
+      expect(broker.modify(stop.id, { stopPrice: 49.5 }).ok).toBe(true);
+      // Opens at 49.70, back above the stop, then trades down through it: the stop fires there, and the
+      // thin bar's market impact takes the fill well past it.
+      at('10:02', 49.7, 49.75, 49, 49.1, 8000);
+      const st = broker.state;
+      const t = st.roundTrips[0];
+      const review = reviewTrade({ trip: t, fills: st.fills, orders: st.orders, revealedBars: bars, timeframe: '1m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES, ended: true });
+      return { fills: st.fills.map((f) => [f.price, f.quantity, f.at]), text: review.findings.map((f) => `${f.title}: ${f.detail}`).join('\n') };
+    };
+    // Moved past the market (the last close was 49.30), or not (49.60): the same fills, and the same verdict.
+    const through = run(49.3);
+    const notThrough = run(49.6);
+    expect(through.fills).toEqual(notThrough.fills);
+    expect(through.fills).toEqual([
+      [50.02, 1000, 'open'],
+      [49.18, 1000, 'bar'],
+    ]);
+    for (const { text } of [through, notThrough]) {
+      expect(text).toContain('Stop filled well past its price: Your stop at 49.50 filled at 49.18, 0.32 past it');
+      expect(text).toContain('A stop turns into a market order');
+      expect(text).not.toContain('already past the market');
+    }
+  });
+
+  it('keeps a stop or stop-limit marked as placed past the market only while it is still past it where it can first trade', () => {
+    for (const marketOrderFill of ['last_price', 'next_bar_open'] as const) {
+      for (const limitFill of ['touch', 'trade_through'] as const) {
+        for (const type of ['stop', 'stop_limit'] as const) {
+          for (const opensBack of [true, false]) {
+            const broker = new SimBroker({ startingBalance: 10_000, config: { ...ZERO_COST_CONFIG, marketOrderFill, limitFill } });
+            const at = (date: string, hhmm: string, o: number, h: number, l: number, c: number) => broker.onBar('X', bar(et(date, hhmm), o, h, l, c, 5_000_000));
+            at('2025-01-15', '15:58', 50, 50, 50, 50);
+            broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'gtc' });
+            at('2025-01-15', '15:59', 50, 50, 49.3, 49.3);
+            // 09:30:30 the next morning, before the stock has traded today: placed past the market, it cannot fill at once.
+            broker.syncClock(et('2025-01-16', '09:30') + 30);
+            const r = broker.submit({ symbol: 'X', action: 'sell', type, stopPrice: 49.5, ...(type === 'stop_limit' ? { limitPrice: 49.2 } : {}), quantity: 100, tif: 'gtc' });
+            expect(r.order!.placedThrough).toBe(true);
+            // Where it first trades: the first minute's path at 09:30:30, or at next-bar-open, 09:31's open.
+            // There it is back above the stop (49.55, then 49.80) and fires on the way down, or still past it.
+            if (opensBack) {
+              at('2025-01-16', '09:30', 49.9, 50, 49.1, 49.2);
+              at('2025-01-16', '09:31', 49.8, 49.85, 49, 49.1);
+            } else {
+              at('2025-01-16', '09:30', 49.4, 49.45, 49.3, 49.35);
+              at('2025-01-16', '09:31', 49.3, 49.35, 49.25, 49.3);
+            }
+            const exit = broker.state.orders.find((o) => o.id === r.order!.id)!;
+            const label = `${marketOrderFill} ${limitFill} ${type} ${opensBack ? 'opens back' : 'still past'}`;
+            expect(exit.status, label).toBe('filled');
+            expect(!!exit.placedThrough, label).toBe(!opensBack);
+            if (opensBack) expect(broker.state.fills.at(-1)!.price, label).toBe(49.5);
+          }
+        }
+      }
+    }
+  });
+
   it('says a stop placed after entry at or past the average, but already past the market, closed the trade at once', () => {
     for (const [direction, stop, nbo] of [['long', 50, false], ['long', 50.1, false], ['short', 50, false], ['long', 50, true]] as const) {
       const s = setup(nbo ? { ...ZERO_COST_CONFIG, marketOrderFill: 'next_bar_open' } : ZERO_COST_CONFIG);

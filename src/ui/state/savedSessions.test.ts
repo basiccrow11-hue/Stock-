@@ -368,6 +368,98 @@ describe('unfinished sessions and other tabs', () => {
   });
 });
 
+describe('a replay’s undo history in storage', () => {
+  it('stores the log about once, not once per checkpoint, and reads every checkpoint back as it was', async () => {
+    const { ReplaySession } = await import('../../core/replay/ReplaySession');
+    const { DemoDataProvider } = await import('../../core/data/demoProvider');
+    const { ZERO_COST_CONFIG } = await import('../../core/broker/config');
+    const p = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
+    const day = (date: string, hhmm: string) => exchangeTimeToUnix(date, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3)));
+    const symbols = ['SPY', 'AAPL', 'MSFT', 'QQQ'];
+    const setup = { symbol: 'SPY', extraSymbols: symbols.slice(1), date: '2024-03-12', endDate: '2024-03-26', startTime: '04:00', endTime: '20:00', startingBalance: 1_000_000, lookbackDays: 1 };
+    const id = 'long';
+    /** The page's savedSessions module after a reload. */
+    const fresh = async () => {
+      vi.resetModules();
+      return import('../services/savedSessions');
+    };
+    let saved = await fresh();
+    /** The session as the trading store saves it. */
+    const record = (r: import('../../core/replay/ReplaySession').ReplaySession): import('../services/savedSessions').SavedSession => ({
+      version: saved.SAVED_SESSION_VERSION,
+      summary: { id, savedAt: 0, now: r.now } as import('../services/savedSessions').SessionSummary,
+      view: { activeSymbol: 'SPY', timeframe: '1m', speed: 60 },
+      warnings: [],
+      replay: { providerId: 'demo', state: r.save() },
+      journaledTrips: [],
+      watching: [],
+      challenge: null,
+    });
+    const { session: a } = await ReplaySession.load(p, setup, ZERO_COST_CONFIG, id);
+    a.jumpTo(day('2024-03-12', '09:40'));
+    // A full log: orders placed and cancelled, all at one moment (each checkpoint takes the last one's place).
+    for (let i = 0; i < 260; i++) a.cancel(a.submit({ symbol: 'SPY', action: 'buy', type: 'limit', limitPrice: 1, quantity: 1, tif: 'gtc' }).order!.id);
+    // And trades along the way, which add to it (and drop its oldest lines) during the jump.
+    for (const symbol of symbols) {
+      const px = a.broker.markPrice(symbol)!;
+      for (const k of [1, 2, 3, 4, 5]) {
+        a.submit({ symbol, action: 'buy', type: 'limit', limitPrice: Math.round(px * (1 - k / 100) * 100) / 100, quantity: 10, tif: 'gtc', stopLoss: Math.round(px * (0.98 - k / 100) * 100) / 100, takeProfit: Math.round(px * (1 + k / 100) * 100) / 100 });
+      }
+    }
+    expect(a.broker.state.events).toHaveLength(500);
+    const first = a.broker.state.events[0];
+    await saved.writeSession(record(a));
+    a.jumpTo(day('2024-03-25', '12:00'));
+    expect(a.broker.state.roundTrips.filter((t) => t.closed).length).toBeGreaterThan(0);
+    expect(a.broker.state.events).not.toContainEqual(first);
+    await saved.writeSession(record(a));
+    // Back a few days, which drops the checkpoints after it, then trading there and on.
+    a.jumpTo(day('2024-03-20', '10:00'));
+    a.cancel(a.submit({ symbol: 'AAPL', action: 'buy', type: 'limit', limitPrice: 1, quantity: 1, tif: 'gtc' }).order!.id);
+    a.jumpTo(day('2024-03-22', '15:00'));
+    await saved.writeSession(record(a));
+    const kv = db.stores.get('kv')!;
+    const cps = [...kv.entries()].filter(([k]) => k.startsWith(`session-cp:${id}:`)).map(([, v]) => v as { log?: unknown; cp: { broker: { events?: unknown } } });
+    const checkpoints = a.save().checkpoints;
+    expect(cps).toHaveLength(checkpoints.length);
+    expect(checkpoints.filter((c) => c.broker.events.length === 500).length).toBeGreaterThan(100);
+    // The log is stored about once, not 500 lines again for each checkpoint.
+    const logs = cps.reduce((n, c) => n + JSON.stringify(c.log ?? c.cp.broker.events).length, 0);
+    expect(logs).toBeLessThan(3 * JSON.stringify(a.broker.state.events).length);
+
+    // Read back after a reload: every checkpoint as it was, so a rewind to any of them gives the same account.
+    saved = await fresh();
+    const read = (await saved.readSession(id))!;
+    expect(read.replay!.state.checkpoints).toEqual(checkpoints);
+    const b = await ReplaySession.resume(p, read.replay!.state, id);
+    for (const t of [day('2024-03-22', '11:00'), day('2024-03-19', '15:30'), day('2024-03-14', '04:30'), day('2024-03-12', '09:40')]) {
+      a.jumpTo(t);
+      b.jumpTo(t);
+      expect({ ...b.broker.state, version: 0 }).toEqual({ ...a.broker.state, version: 0 });
+    }
+    // Carried on and saved again, its new checkpoints' logs are stored as changes to the ones read back.
+    b.jumpTo(day('2024-03-15', '12:00'));
+    await saved.writeSession(record(b));
+    saved = await fresh();
+    expect((await saved.readSession(id))!.replay!.state.checkpoints).toEqual(b.save().checkpoints);
+
+    // A checkpoint stored whole, as before logs were stored as changes, is read as it was.
+    const keys = (kv.get(`session:${id}`) as { replay: { state: { checkpoints: string[] } } }).replay.state.checkpoints;
+    const k = Math.floor(keys.length / 2);
+    const { log, ...whole } = kv.get(keys[k]) as { log: unknown; cp: { broker: object } };
+    expect(log).toBeDefined();
+    kv.set(keys[k], { ...whole, cp: { ...whole.cp, broker: { ...whole.cp.broker, events: b.save().checkpoints[k].broker.events } } });
+    saved = await fresh();
+    expect((await saved.readSession(id))!.replay!.state.checkpoints).toEqual(b.save().checkpoints);
+    // A log stored as a change to one that is not before it in the list cannot be rebuilt: the session is not read.
+    const last = kv.get(keys.at(-1)!) as { log: { base?: string } };
+    expect(last.log.base).toBe(keys.at(-2));
+    kv.set(keys.at(-1)!, { ...last, log: { ...last.log, base: keys.at(-1) } });
+    saved = await fresh();
+    expect(await saved.readSession(id)).toBeNull();
+  }, 60_000);
+});
+
 /** A new tab: nothing of the closed one's own tab state. */
 function rememberNothing() {
   sessionStorage.clear();

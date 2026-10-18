@@ -456,6 +456,56 @@ describe('ReplaySession: undo is exact', () => {
       expect(JSON.stringify(own).length).toBeLessThan(3000);
     }
   });
+
+  it('keeps what was done at the start when going back to a time before it', () => {
+    const days = ['2025-01-13', '2025-01-14', D, '2025-01-16'].map((d, i) => bar(et(d, '09:30'), 100 + i, 102 + i, 99 + i, 101 + i));
+    const fives = randomBars(60, 9, et(D, '08:00')).map((b, i) => ({ ...b, time: et(D, '08:00') + i * 300 }));
+    const cases: [string, () => ReplaySession, (s: ReplaySession) => void, 'step back' | UnixSeconds][] = [
+      // Daily bars stamped at the 09:30 open and a 10:00 start: Step back goes to 09:30, before the start.
+      [
+        'daily',
+        () => new ReplaySession(new ReplayEngine({ symbol: 'TEST', start: T('10:00'), end: et('2025-01-16', '16:00'), baseTimeframe: '1D' }, days), { ...setupFor(), startTime: '10:00' }, ZERO_COST_CONFIG, 's', 'DEMO'),
+        (s) => void s.step(),
+        'step back',
+      ],
+      // 5-minute bars and a 09:32 start: the 09:30 bar opened before it.
+      [
+        '5m',
+        () => new ReplaySession(new ReplayEngine({ symbol: 'TEST', start: T('09:32'), end: T('16:00'), baseTimeframe: '5m' }, fives), { ...setupFor(), startTime: '09:32' }, ZERO_COST_CONFIG, 's', 'DEMO'),
+        (s) => void s.step(),
+        'step back',
+      ],
+      // 1-minute bars and a jump to before the start.
+      ['1m', () => new ReplaySession(engineWith(bars, T('10:00')), { ...setupFor(), startTime: '10:00' }, ZERO_COST_CONFIG, 's', 'DEMO'), (s) => void s.jumpTo(T('10:30')), T('09:50')],
+    ];
+    const state = (s: ReplaySession) => new Map(s.broker.state.roundTrips.map((t) => [t.id, t.closed]));
+    for (const [name, session, move, back] of cases) {
+      /** The session with a market order and a GTC limit placed at the start. */
+      const atStart = () => {
+        const s = session();
+        const px = s.engine.lastPrice()!;
+        s.submit({ symbol: 'TEST', action: 'buy', type: 'market', quantity: 10 });
+        s.submit({ symbol: 'TEST', action: 'buy', type: 'limit', limitPrice: Math.round(px / 2), quantity: 10, tif: 'gtc' });
+        return s;
+      };
+      const s = atStart();
+      move(s);
+      const target = back === 'step back' ? s.stepBackTarget()! : back;
+      expect(target, name).toBeLessThan(s.start);
+      const predicted = s.undoneBy(target);
+      const before = state(s);
+      if (back === 'step back') s.stepBack();
+      else s.jumpTo(target);
+      // The account as it was once the orders were placed at the start.
+      expect(s.now, name).toBe(s.start);
+      expect(account(s), name).toEqual(account(atStart()));
+      expect(s.broker.workingOrders().length, name).toBeGreaterThan(0);
+      // And the confirmation said what went.
+      const after = state(s);
+      const open = [...before].filter(([id, closed]) => !closed && !after.has(id)).length;
+      expect(predicted, name).toEqual({ open, closed: 0, hides: true });
+    }
+  });
 });
 
 describe('A new day before its first bar', () => {
@@ -888,6 +938,34 @@ describe('Step one candle on a symbol whose data has ended', () => {
     expect(revealed.map((r) => [r.symbol, r.bar.time])).toEqual([['SPY', et(D2, '10:05')]]);
     expect(formatExchangeTime(s.now)).toBe(formatExchangeTime(et(D2, '10:06')));
     expect(s.finished).toBe(false);
+  });
+
+  it('does the same on a symbol whose next bar ends after the end time', () => {
+    const flat = (n: number, px: number) => Array.from({ length: n }, () => [px, px, px, px] as [number, number, number, number]);
+    const D2 = '2025-01-15';
+    // A replay from 09:30 to 12:00: today's daily bar ends at 16:00, and an hourly bar from 11:30 at 12:30.
+    const day = { start: et(D2, '09:30'), end: et(D2, '12:00') };
+    const daily = [bar(et('2025-01-14', '09:30'), 50, 51, 49, 50), bar(et(D2, '09:30'), 50, 52, 48, 51)];
+    const hourly = ['09:30', '10:30', '11:30'].map((t) => bar(et(D2, t), 70, 71, 69, 70));
+    for (const [symbol, tf, bars, at] of [['DLY', '1D', daily, '10:00'], ['HR', '1h', hourly, '11:45']] as const) {
+      const session = () =>
+        new ReplaySession(
+          [new ReplayEngine({ symbol: 'SPY', ...day, baseTimeframe: '1m' }, minuteBars(D2, '09:30', flat(390, 100))), new ReplayEngine({ symbol, ...day, baseTimeframe: tf }, bars)],
+          { symbol: 'SPY', date: D2, startTime: '09:30', endTime: '12:00', startingBalance: 100_000, lookbackDays: 1 },
+          ZERO_COST_CONFIG,
+          'c',
+          'HISTORICAL',
+        );
+      const s = session();
+      const stepped = session();
+      s.jumpTo(et(D2, at));
+      stepped.jumpTo(et(D2, at));
+      const revealed = s.stepCandle(tf, symbol);
+      expect(revealed, symbol).toEqual(stepped.step());
+      expect(revealed.map((r) => r.symbol), symbol).toEqual(['SPY']);
+      expect(s.now, symbol).toBe(stepped.now);
+      expect(s.finished, symbol).toBe(false);
+    }
   });
 });
 

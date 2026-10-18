@@ -20,7 +20,7 @@ import type { ChallengeAttempt } from '../state/challengeStore';
 import type { Timeframe, UnixSeconds } from '../../core/types';
 import type { Checkpoint, SavedReplay } from '../../core/replay/ReplaySession';
 import type { SimMarketSnapshot } from '../../core/sim/SimMarket';
-import type { BrokerState } from '../../core/broker/SimBroker';
+import type { BrokerCheckpoint, BrokerEvent, BrokerState } from '../../core/broker/SimBroker';
 import type { ExecutionConfig } from '../../core/broker/config';
 import type { TradingRules } from '../../core/learning/review';
 import { newId } from '../../core/util/ids';
@@ -68,6 +68,19 @@ export interface SavedSession {
 /** A session as stored: a replay's checkpoints are stored apart, each once, and listed by key. */
 type StoredSession = Omit<SavedSession, 'replay'> & { replay?: { providerId: string; state: Omit<SavedReplay, 'checkpoints'> & { checkpoints: string[] } } };
 
+/**
+ * A checkpoint as stored, its log apart. Each checkpoint holds the whole log as it was then (up to 500
+ * lines), nearly all of them in the log of the checkpoint before it in the session's list (`base`) too,
+ * so the log is stored as what changed since that one: the lines dropped from its front and those added
+ * at its end. Without a base, `added` is the whole log. A checkpoint stored before logs were stored this
+ * way has no `log`: its whole log is in `cp`.
+ */
+interface StoredCheckpoint {
+  key: string;
+  cp: Omit<Checkpoint, 'broker'> & { broker: Omit<BrokerCheckpoint, 'events'> & { events?: BrokerEvent[] } };
+  log?: { base?: string; dropped: number; added: BrokerEvent[] };
+}
+
 /** Where the session's clock had got to when last noted, and what it showed. */
 export interface SessionPosition {
   now: UnixSeconds;
@@ -92,9 +105,29 @@ const storedCheckpoints = new WeakMap<Checkpoint, string>();
 const listedCheckpoints = new Map<string, string[]>();
 
 /**
+ * `after` as a change to the log `before`: the fewest lines dropped from its front (the log keeps only the
+ * newest lines) and the lines added at its end. Null when it is not such a change. Lines are compared by
+ * value, since a log read back from storage is a copy.
+ */
+function logChange(before: BrokerEvent[], after: BrokerEvent[]): { dropped: number; added: BrokerEvent[] } | null {
+  const same = (a: BrokerEvent, b: BrokerEvent) => a === b || (a.time === b.time && a.kind === b.kind && a.message === b.message && a.orderId === b.orderId);
+  if (!before.length) return { dropped: 0, added: after };
+  for (let dropped = Math.max(0, before.length - after.length); dropped < before.length; dropped++) {
+    let k = 0;
+    while (dropped + k < before.length && same(before[dropped + k], after[k])) k++;
+    if (dropped + k === before.length) return { dropped, added: after.slice(k) };
+  }
+  return null;
+}
+
+/**
  * Saves `s`: its new checkpoints, then the session, then its summary, so a session that is listed has
  * its record and a record has every checkpoint it lists, whenever the page goes. Rejects when storage is
  * blocked or full. Saves must not overlap (the trading store makes them one after another).
+ *
+ * A new checkpoint's log is stored as a change to the one before it in the list (StoredCheckpoint). That
+ * one stays listed as long as it does: checkpoints only ever go from the end of the list (a rewind, or a
+ * later one at the same moment taking the last one's place), so one listed has every one before it.
  */
 export async function writeSession(s: SavedSession): Promise<void> {
   const id = s.summary.id;
@@ -102,11 +135,14 @@ export async function writeSession(s: SavedSession): Promise<void> {
   const keys: string[] = [];
   if (s.replay) {
     const { checkpoints, ...rest } = s.replay.state;
-    for (const cp of checkpoints) {
+    for (const [i, cp] of checkpoints.entries()) {
       let key = storedCheckpoints.get(cp);
       if (!key) {
         key = `${CHECKPOINT}${id}:${newId('cp')}`;
-        await idb.set('kv', key, { key, cp });
+        const { events, ...broker } = cp.broker;
+        const change = i > 0 ? logChange(checkpoints[i - 1].broker.events, events) : null;
+        const log = change ? { base: keys[i - 1], ...change } : { dropped: 0, added: events };
+        await idb.set<StoredCheckpoint>('kv', key, { key, cp: { ...cp, broker }, log });
         storedCheckpoints.set(cp, key);
       }
       keys.push(key);
@@ -128,9 +164,24 @@ export async function readSession(id: string): Promise<SavedSession | null> {
   if (!s || s.version !== SAVED_SESSION_VERSION || s.summary?.id !== id) return null;
   if (!s.replay) return { ...s, replay: undefined };
   const keys = s.replay.state.checkpoints;
-  const found = new Map((await idb.withPrefix<{ key: string; cp: Checkpoint }>('kv', `${CHECKPOINT}${id}:`)).map((c) => [c.key, c.cp]));
-  const checkpoints = keys.map((k) => found.get(k));
-  if (!checkpoints.length || checkpoints.some((cp) => !cp)) return null;
+  const found = new Map((await idb.withPrefix<StoredCheckpoint>('kv', `${CHECKPOINT}${id}:`)).map((c) => [c.key, c]));
+  // Each log is rebuilt from the one it is stored as a change to, which comes before it in the list.
+  const logs = new Map<string, BrokerEvent[]>();
+  const checkpoints: Checkpoint[] = [];
+  for (const key of keys) {
+    const c = found.get(key);
+    if (!c) return null;
+    let events = c.cp.broker.events;
+    if (c.log) {
+      const base = c.log.base === undefined ? [] : logs.get(c.log.base);
+      if (!base || c.log.dropped > base.length) return null;
+      events = base.slice(c.log.dropped).concat(c.log.added);
+    }
+    if (!Array.isArray(events)) return null;
+    logs.set(key, events);
+    checkpoints.push({ ...c.cp, broker: { ...c.cp.broker, events } });
+  }
+  if (!checkpoints.length) return null;
   // Settings that were one object in the session are one again (each was stored on its own).
   const configs = new Map<string, ExecutionConfig>();
   const shared = (c: ExecutionConfig) => {
@@ -140,11 +191,11 @@ export async function readSession(id: string): Promise<SavedSession | null> {
   };
   const config = shared(s.replay.state.config);
   for (const [i, cp] of checkpoints.entries()) {
-    cp!.config = shared(cp!.config);
-    storedCheckpoints.set(cp!, keys[i]);
+    cp.config = shared(cp.config);
+    storedCheckpoints.set(cp, keys[i]);
   }
   listedCheckpoints.set(id, keys);
-  return { ...s, replay: { providerId: s.replay.providerId, state: { ...s.replay.state, config, checkpoints: checkpoints as Checkpoint[] } } };
+  return { ...s, replay: { providerId: s.replay.providerId, state: { ...s.replay.state, config, checkpoints } } };
 }
 
 /** Forgets a session: its record, its summary, its checkpoints and where its clock had got to. */

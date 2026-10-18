@@ -1118,7 +1118,13 @@ export class SimBroker {
    * spread of the session the last price is from. Returns the closing orders.
    */
   closeOut(now = this.s.clock): Order[] {
-    const ext = new Map(Object.keys(this.s.positions).map((symbol) => [symbol, this.symbolSession(symbol) !== 'regular']));
+    // That session is the one the last bar closed in, not the clock's, which an order placed since may
+    // have moved on (to a new day before its first bar, say).
+    const closedAt = (symbol: string) => {
+      const bar = this.s.lastBar[symbol];
+      return bar ? bar.time + (this.s.lastBarSeconds?.[symbol] ?? 60) : this.s.clock;
+    };
+    const ext = new Map(Object.keys(this.s.positions).map((symbol) => [symbol, this.symbolSession(symbol, closedAt(symbol)) !== 'regular']));
     this.syncClock(now);
     const time = this.s.clock;
     for (const o of this.workingOrders()) this.cancel(o.id, 'Session ended');
@@ -1469,6 +1475,13 @@ export class SimBroker {
     let capacity = this.barCapacity(bar.volume);
     let traded = 0;
     const ext = session !== 'regular';
+    // A stop placed through the market that is no longer through it where it first trades (the bar opens
+    // back on the far side of it) is an ordinary stop from there on, filled where the path reaches it.
+    for (const o of this.liveOrders()) {
+      if (!o.placedThrough || o.symbol !== symbol || o.status !== 'working' || o.filledQty > 0 || !this.eligible(o, session)) continue;
+      const f = startsAt.get(o.id) ?? 0;
+      if (f < 1 && !this.throughAt(o, points.find((q) => q.f >= f)!.p, ext)) delete o.placedThrough;
+    }
 
     // Excursions (MFE/MAE): every price the path passes while a trade is open, including the part of
     // the bar before a trade closes in it. The path is straight between its points and open P/L is
@@ -1524,6 +1537,15 @@ export class SimBroker {
       if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0 && this.eligible(o, session) && (startsAt.get(o.id) ?? 0) < 1) delete o.placedThrough;
     }
     return traded;
+  }
+
+  /**
+   * Whether a stop or stop-limit is through the market at price `x`, as expectedEntry judges it at the
+   * last price: its stop is passed there, and a stop-limit's limit lets it fill there.
+   */
+  private throughAt(o: Order, x: number, ext: boolean): boolean {
+    const stop = o.triggered || this.triggerLevel({ ...o, type: 'stop' }, x, x, ext) !== null;
+    return stop && (o.type === 'stop' || this.triggerLevel({ ...o, type: 'limit' }, x, x, ext) !== null);
   }
 
   /** Marks a stop or stop-limit placed or changed already through the market (Order.placedThrough). */

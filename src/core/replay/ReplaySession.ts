@@ -540,12 +540,16 @@ export class ReplaySession {
     return this.advanceAll(this.nextRevealTime() ?? this.end);
   }
 
-  /** Reveal one full candle of `timeframe` on `symbol` (default: primary); others follow the clock. A symbol with no bar left steps as Step does. */
+  /**
+   * Reveal one full candle of `timeframe` on `symbol` (default: primary); others follow the clock. A symbol
+   * with no bar left that completes by the end time steps as Step does.
+   */
   stepCandle(timeframe: Timeframe, symbol = this.symbol): RevealedBar[] {
     const e = this.engineFor(symbol) ?? this.engine;
-    // A symbol whose data has ended has no candle to complete: the replay moves on as Step does,
-    // rather than taking every other symbol to the end with it.
-    if (e.nextBarTime() === null) return this.step();
+    // A symbol whose data has ended, or whose next bar ends after the end time (today's daily bar in a
+    // replay that ends at noon), has no candle to complete: the replay moves on as Step does, rather
+    // than taking every other symbol to the end with it.
+    if (!e.nextBarCompletesBy(this.end)) return this.step();
     // The engines go in their order, so the others are taken to the candle's end only once it is known.
     const own = e.stepCandle(timeframe);
     return this.feed(this.reveal((other) => (other === e ? own : other.advanceTo(e.now))));
@@ -643,7 +647,8 @@ export class ReplaySession {
   undoneBy(time: UnixSeconds, restart = false): { open: number; closed: number; hides: boolean } {
     const target = restart ? this.checkpoints[0].cursors : [...this.engines.values()].map((e) => Math.min(e.revealedCount, e.revealedCountAt(time)));
     const hides = this.cursors().some((c, k) => target[k] < c);
-    const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target, time)];
+    // A time before the start goes to the start, as the engines' clocks do.
+    const cp = this.checkpoints[restart ? 0 : this.checkpointAt(target, Math.max(time, this.start))];
     const after = this.broker.fork(cp.broker);
     this.replayFrom(after, cp, target);
     const then = new Map(after.state.roundTrips.map((t) => [t.id, t.closed]));
@@ -670,7 +675,8 @@ export class ReplaySession {
     this.hours = null;
     const cursors = this.cursors();
     const back = cursors.some((c, k) => c < before[k]);
-    const i = restart ? 0 : this.checkpointAt(cursors, time);
+    // A time before the start goes to the start, as the engines' clocks do, orders placed there included.
+    const i = restart ? 0 : this.checkpointAt(cursors, Math.max(time, this.start));
     const cp = this.checkpoints[i];
     this.checkpoints.length = i + 1;
     this.broker.rollback(cp.broker);

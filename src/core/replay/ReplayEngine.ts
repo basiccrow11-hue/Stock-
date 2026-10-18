@@ -216,6 +216,11 @@ export class ReplayEngine {
     return Math.max(this.#firstSessionIndex - 1, lastIndexAtOrBefore(this.#ends, t, (x) => x)) + 1;
   }
 
+  /** Whether there is a next bar and it completes by `t` (one that ends after the end time is never revealed). */
+  nextBarCompletesBy(t: UnixSeconds): boolean {
+    return this.#cursor + 1 < this.#bars.length && this.#ends[this.#cursor + 1] <= t;
+  }
+
   /** When the next bar opens (it is revealed once complete), or null at the end. */
   nextBarTime(): UnixSeconds | null {
     return this.#cursor + 1 < this.#bars.length ? this.#bars[this.#cursor + 1].time : null;
