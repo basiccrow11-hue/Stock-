@@ -1,8 +1,8 @@
 /**
  * Journal snapshots drawn off screen: a picture of one symbol's chart as it stood when a trade on it
  * closed, for a trade the chart on screen could not show at that moment (another symbol of a
- * watchlist replay or the simulated market, or the charted symbol after the replay had already moved
- * past the close in the same step).
+ * watchlist replay or the simulated market, the charted symbol while the chart was scrolled back from
+ * the close, or after the replay had already moved past the close in the same step).
  *
  * The chart is built the way the one on screen is (ChartView): the same theme, chart style, price
  * scale, enabled indicators, fill markers, simulated news markers and data-source watermark, on the

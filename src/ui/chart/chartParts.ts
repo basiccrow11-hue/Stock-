@@ -211,7 +211,8 @@ export function newsMarker(ev: SimEvent, time: Time, p: ChartPalette): SeriesMar
  * The fill and simulated news markers of a chart whose candles start at `oldest` and `newest`, oldest
  * first, each on the candle holding its time (`candleStart`; `ct` gives its chart time).
  * lightweight-charts puts a marker on the nearest candle it has, so those outside the two are left out
- * rather than piled onto the first or last candle.
+ * rather than piled onto the first or last candle. With `newest` Infinity, those after the last candle
+ * (on one that has not formed yet) go on it.
  */
 export function chartMarkers(fills: readonly Fill[], news: readonly SimEvent[], candleStart: (t: number) => number, oldest: number, newest: number, ct: (t: number) => Time, p: ChartPalette): SeriesMarker<Time>[] {
   const markers: SeriesMarker<Time>[] = [];

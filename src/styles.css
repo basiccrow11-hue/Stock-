@@ -281,9 +281,12 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .drawing-layer .drawing:not(.selected) .shape, .drawing-layer .drawing:not(.selected) .hit { pointer-events: none; }
   .drawing-layer .hit { stroke-width: 24; }
 }
-/* The price pane's bottom corner: the button back to the newest candle, and Delete for a selected drawing. */
-.chart-corner { position: absolute; transform: translate(-100%, -100%); z-index: 4; display: flex; gap: 6px; }
-.chart-corner .btn { background: var(--panel); box-shadow: 0 2px 8px var(--shadow); }
+/* The price pane's bottom corner: the button back to the newest candle, and to its left Delete for a
+   selected drawing. While » is not shown an unseen one (.chart-slot) keeps its place, so neither button
+   moves when the other comes or goes. Only the buttons take the pointer; the rest goes to the chart. */
+.chart-corner { position: absolute; transform: translate(-100%, -100%); z-index: 4; display: flex; gap: 6px; pointer-events: none; }
+.chart-corner .btn { background: var(--panel); box-shadow: 0 2px 8px var(--shadow); pointer-events: auto; }
+.chart-corner .chart-slot { visibility: hidden; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 6px; padding-right: 6px; }
 /* While a price is being picked, every click goes to the chart, even over a drawing. */
 .chart-wrap.picking .drawing-layer, .chart-wrap.picking .drawing-layer * { pointer-events: none; }

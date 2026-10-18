@@ -210,6 +210,12 @@ vi.mock('lightweight-charts', async (original) => {
   };
 });
 
+/** Journal pictures drawn off screen: a real one needs a canvas, so a stand-in records the trades' symbols. */
+const offscreen = vi.hoisted(() => ({ drawn: [] as string[] }));
+vi.mock('./offscreenSnapshot', () => ({
+  offscreenSnapshot: async (scene: { symbol: string }) => (offscreen.drawn.push(scene.symbol), 'data:image/jpeg;base64,BB=='),
+}));
+
 vi.mock('../services/idb', () => ({
   idb: {
     all: async () => [],
@@ -614,4 +620,191 @@ describe('the chart during fast play with the pointer on it', () => {
     await matchesFresh();
     act(() => a.root.unmount());
   }, 60_000);
+});
+
+describe('fill markers and journal pictures', () => {
+  /**
+   * A replay of 1-minute bars on a chart of `timeframe`, with snapshots on, and the chart on screen; on a
+   * symbol with no drawings, as jsdom never loads the image a picture draws them from.
+   */
+  async function begin(timeframe: '1m' | '5m') {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { useJournal } = await import('../state/journalStore');
+    const { ChartView, toChartTime } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: true });
+    const ok = await store.startReplay({
+      providerId: 'demo',
+      symbol: 'NVDA',
+      date: '2025-01-06',
+      endDate: '2025-01-17',
+      startTime: '09:30',
+      endTime: '16:00',
+      startingBalance: 100_000,
+      lookbackDays: 5,
+      timeframe,
+      speed: 1,
+      blind: false,
+    });
+    expect(ok).toBe(true);
+    const sessionId = store.useTrading.getState().session!.id;
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const r = createRoot(host);
+    await act(async () => r.render(createElement(ChartView, { symbol: 'NVDA', timeframe })));
+    const chart = lw.charts.at(-1)!;
+    // Laid out (jsdom lays nothing out), and the markers on the chart whenever a picture is taken of it.
+    const el = host.querySelector<HTMLElement>('.chart-canvas')!;
+    Object.defineProperties(el, { clientWidth: { value: 960 }, clientHeight: { value: 480 } });
+    const shots: number[][] = [];
+    Object.assign(chart, {
+      takeScreenshot: () => {
+        shots.push(lw.markers.map((m) => m.time));
+        const canvas = document.createElement('canvas');
+        canvas.toDataURL = () => 'data:image/jpeg;base64,AA==';
+        return canvas;
+      },
+    });
+    offscreen.drawn.length = 0;
+    return {
+      store,
+      host,
+      chart,
+      shots,
+      /** The chart time of the candle holding the newest fill, and that fill. */
+      lastFill: () => {
+        const f = store.useTrading.getState().fills.at(-1)!;
+        return { fill: f, candle: toChartTime(store.candleStartFor('NVDA', f.time, timeframe)) };
+      },
+      mine: () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId),
+      end: async () => {
+        act(() => r.unmount());
+        useSettings.getState().update({ autoSnapshot: false });
+        await store.endSession();
+      },
+    };
+  }
+
+  it('marks a fill on a candle that has not formed yet, and the exit is in the picture taken from the screen', async () => {
+    const { store, chart, shots, lastFill, mine, end } = await begin('5m');
+    const main = chart.series[0];
+    // Three candles on, the clock is at the end of the newest candle: a market order fills at the start
+    // of the next, which has no bars yet. The chart puts its marker on the newest candle until it forms.
+    for (let i = 0; i < 3; i++) act(() => store.stepCandle());
+    act(() => void expect(store.submitOrder({ symbol: 'NVDA', action: 'buy', type: 'market', quantity: 100 }).ok).toBe(true));
+    const buy = lastFill();
+    expect(buy.fill.side).toBe('buy');
+    expect(buy.candle).toBeGreaterThan(main.points.at(-1)!.time);
+    expect(lw.markers.map((m) => m.time)).toEqual([buy.candle]);
+
+    // Closed at the next boundary, the trade's picture is the chart on screen, with its exit marker.
+    for (let i = 0; i < 2; i++) act(() => store.stepCandle());
+    act(() => void expect(store.closePosition('NVDA').ok).toBe(true));
+    const sell = lastFill();
+    expect(sell.fill.side).toBe('sell');
+    expect(sell.candle).toBeGreaterThan(main.points.at(-1)!.time);
+    expect(shots).toEqual([[buy.candle, sell.candle]]);
+    await vi.waitFor(() => expect(mine()).toHaveLength(1));
+    expect(mine()[0].snapshotKey).toBeDefined();
+    expect(mine()[0].snapshotOffscreen).toBeUndefined();
+    expect(offscreen.drawn).toEqual([]);
+    await end();
+  });
+
+  it('draws the picture off screen when the chart on screen is scrolled back from the close', async () => {
+    const { store, host, chart, shots, mine, end } = await begin('1m');
+    const { toChartTime } = await import('./ChartView');
+    const main = chart.series[0];
+    const ts = chart.ts;
+    /** Buys, runs `meanwhile`, then closes the position, and gives the trade's journal entry. */
+    const trade = async (n: number, meanwhile: () => void) => {
+      act(() => void expect(store.submitOrder({ symbol: 'NVDA', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true));
+      act(() => store.stepForward());
+      meanwhile();
+      act(() => void expect(store.closePosition('NVDA').ok).toBe(true));
+      await vi.waitFor(() => expect(mine()).toHaveLength(n));
+      return [...mine()].sort((a, b) => b.exitTime - a.exitTime)[0];
+    };
+
+    // Scrolled back a little: the newest candle, where the trade closed, is off the right of the view.
+    let n = main.points.length;
+    const first = await trade(1, () => act(() => ts.setVisibleLogicalRange({ from: n - 160, to: n - 40 })));
+    expect(first).toMatchObject({ snapshotOffscreen: true, snapshotKey: `snap:${first.id}` });
+    // Scrolled back far, and a step that holds its candle back from the chart before the close.
+    n = main.points.length;
+    act(() => ts.setVisibleLogicalRange({ from: n - 800, to: n - 680 }));
+    const second = await trade(2, () => act(() => store.stepForward()));
+    expect(main.points.at(-1)!.time).toBeLessThan(toChartTime(store.getBaseBars('NVDA').at(-1)!.time));
+    expect(second).toMatchObject({ snapshotOffscreen: true, snapshotKey: `snap:${second.id}` });
+    // Dragged to the end of what the chart holds, the button still down: the candles held back, the
+    // close's among them, are not handed over yet, though no newer candle is off the view.
+    n = main.points.length;
+    act(() => void chart.canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+    act(() => ts.setVisibleLogicalRange({ from: n - 100, to: n + 20 }));
+    const third = await trade(3, () => undefined);
+    expect(main.points.length).toBe(n);
+    expect(host.querySelector('.chart-newest')).toBeNull();
+    expect(third).toMatchObject({ snapshotOffscreen: true, snapshotKey: `snap:${third.id}` });
+    expect(shots).toEqual([]);
+    expect(offscreen.drawn).toEqual(['NVDA', 'NVDA', 'NVDA']);
+
+    // Let go, the chart takes the candles held back: on the newest candle, the screen is the picture again.
+    act(() => void window.dispatchEvent(new MouseEvent('pointerup')));
+    await act(() => new Promise((r) => setTimeout(r, 300)));
+    expect(main.points.at(-1)!.time).toBe(toChartTime(store.getBaseBars('NVDA').at(-1)!.time));
+    const fourth = await trade(4, () => undefined);
+    expect(shots).toHaveLength(1);
+    expect(fourth.snapshotOffscreen).toBeUndefined();
+    expect(offscreen.drawn).toHaveLength(3);
+    await end();
+  });
+});
+
+describe('the buttons in the chart corner', () => {
+  it('keeps » in the corner and Delete to its left, so neither moves when the other comes or goes', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { useDrawings } = await import('./drawings');
+    const { ChartView } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const ok = await store.startReplay({
+      providerId: 'demo',
+      symbol: 'TSLA',
+      date: '2025-01-06',
+      endDate: '2025-01-10',
+      startTime: '09:30',
+      endTime: '16:00',
+      startingBalance: 100_000,
+      lookbackDays: 2,
+      timeframe: '1m',
+      speed: 1,
+      blind: false,
+    });
+    expect(ok).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const r = createRoot(host);
+    await act(async () => r.render(createElement(ChartView, { symbol: 'TSLA', timeframe: '1m' })));
+    const ts = lw.charts.at(-1)!.ts;
+    /** The corner's buttons from left to right; one in brackets is not shown but keeps its place. */
+    const corner = () => [...host.querySelectorAll('.chart-corner > *')].map((e) => (e.getAttribute('aria-hidden') === 'true' ? `(${e.textContent})` : e.textContent));
+    const back = () => act(() => ts.setVisibleLogicalRange({ from: ts.points.length - 300, to: ts.points.length - 200 }));
+
+    // Scrolled back, » is in the corner. Finishing a drawing selects it: Delete comes to the left of ».
+    back();
+    expect(corner()).toEqual(['»']);
+    const bar = store.getBaseBars('TSLA').at(-250)!;
+    act(() => useDrawings.getState().add({ id: 'h', type: 'hline', points: [{ time: bar.time, price: bar.close }], color: '#4f8cff' }));
+    expect(useDrawings.getState().selectedId).toBe('h');
+    expect(corner()).toEqual(['Delete', '»']);
+    // Back on the newest candle, » goes but its place is kept: Delete stays where it was.
+    act(() => host.querySelector<HTMLButtonElement>('.chart-newest')!.click());
+    expect(corner()).toEqual(['Delete', '(»)']);
+    back();
+    expect(corner()).toEqual(['Delete', '»']);
+    act(() => useDrawings.getState().select(null));
+    expect(corner()).toEqual(['»']);
+    act(() => r.unmount());
+    await store.endSession();
+  });
 });

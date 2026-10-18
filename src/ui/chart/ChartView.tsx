@@ -340,6 +340,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     stacked.addEventListener('change', syncTouch);
 
     registerSnapshotProvider(async () => {
+      // Scrolled back off the newest candle, or with candles held back from the chart, the screen does
+      // not show the moment of the close: no picture, and the journal draws one off screen instead.
+      if (offNewestRef.current || heldRef.current !== null) return null;
       // Fill markers and order lines follow the store in effects: apply them before the picture.
       flushSync(() => {});
       return snapshot(chart, el);
@@ -1006,10 +1009,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   useEffect(() => {
     const m = markersRef.current;
     if (!m) return;
-    // Those outside the candles handed to the chart are left out (see chartMarkers).
+    // Those outside the candles handed to the chart are left out (see chartMarkers): before the oldest,
+    // and while newer candles are held back, after the newest. Otherwise a fill on a candle that has not
+    // formed yet (an order filled at a candle's end on a chart coarser than the data) goes on the newest.
     const shown = shownCandles();
     const oldest = shown[0]?.time ?? Infinity;
-    const newest = shown[shown.length - 1]?.time ?? -Infinity;
+    const newest = heldRef.current === null ? Infinity : (shown[shown.length - 1]?.time ?? -Infinity);
     const own = fills.filter((f) => f.symbol === symbol);
     m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), (t) => candleStartFor(symbol, t, timeframe), oldest, newest, ct, pal));
   }, [fills, symbol, timeframe, simEventCount, seriesVersion, windowVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
@@ -1073,12 +1078,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
       {geometry && (
         <div className="chart-corner" style={{ left: geometry.paneWidth() - 8, top: geometry.paneHeight() - 8 }}>
-          {offNewest && (
+          <DeleteDrawingButton />
+          {offNewest ? (
             <button className="btn sm chart-newest" onClick={toNewest} title="Scroll to the newest candle" aria-label="Scroll to the newest candle">
               »
             </button>
+          ) : (
+            // Keeps the »'s place in the corner, so Delete never moves into it.
+            <span className="btn sm chart-slot" aria-hidden="true">
+              »
+            </span>
           )}
-          <DeleteDrawingButton />
         </div>
       )}
       <ChartLegend source={legendSource} />
@@ -1094,10 +1104,12 @@ function axisLabel(color: string): { axisLabelColor: string; axisLabelTextColor:
 }
 
 /**
- * Deletes the selected drawing. It sits in the price pane's bottom corner (clear of the legend)
- * rather than in the toolbar, where it would re-wrap the toolbar and move the chart under the
- * pointer on every select. It appears the moment a drawing is finished or picked, so the click that
- * ends that same tap can land on it: only a press that starts on it, or the keyboard, deletes.
+ * Deletes the selected drawing. It sits in the price pane's bottom corner (clear of the legend), left
+ * of the place kept for the » button, rather than in the toolbar, where it would re-wrap the toolbar
+ * and move the chart under the pointer on every select. Neither button moves when the other comes or
+ * goes, so a click meant for » never lands on it. It appears the moment a drawing is finished or
+ * picked, so the click that ends that same tap can land on it: only a press that starts on it, or the
+ * keyboard, deletes.
  */
 function DeleteDrawingButton() {
   const selectedId = useDrawings((s) => s.selectedId);

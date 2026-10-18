@@ -505,7 +505,8 @@ function processClosedTrips(ended = false): Promise<void> {
             picture = snapshotFn().catch(() => null);
           }
           const onScreen = picture;
-          // A chart that is not laid out gives no picture: one is drawn off screen instead.
+          // A chart that is not laid out, or is scrolled back from the close, gives no picture: one is
+          // drawn off screen instead.
           snap = () => onScreen.then((img) => (img ? { img, offscreen: false } : offscreen()));
         } else snap = offscreen;
       } catch (e) {
