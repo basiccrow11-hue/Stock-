@@ -171,11 +171,13 @@ interface JournalStore {
   updateRuleCheck: (id: string, rule: string, followed: boolean | null) => Promise<void>;
   /**
    * Add entries the journal does not have yet (a restored backup), with their snapshots. An entry
-   * already stored under the same id, in this tab or another, is left as it is. Each shows in the
+   * already stored under the same id, in this tab or another, is left as it is, but gets its snapshot
+   * if this browser does not have it (a backup restored before without snapshots). Each shows in the
    * list as soon as it is stored, and one stored but missing from the list (a restore that stopped
-   * partway) is put back in it. Resolves with the ids added.
+   * partway) is put back in it. Resolves with the ids added and how many snapshots entries already
+   * here got.
    */
-  importEntries: (entries: JournalEntry[], snapshots: Record<string, string>) => Promise<string[]>;
+  importEntries: (entries: JournalEntry[], snapshots: Record<string, string>) => Promise<{ added: string[]; snapshots: number }>;
 }
 
 export const useJournal = create<JournalStore>()((set, get) => ({
@@ -261,14 +263,20 @@ export const useJournal = create<JournalStore>()((set, get) => ({
   },
   importEntries: async (list, snapshots) => {
     const added: string[] = [];
+    let shots = 0;
     for (const e of list) {
       // Whether it is here is decided by storage, not by the list, which a restore that stopped
       // partway may have left without entries it had stored.
       const stored = await idb.get<JournalEntry>('journal', e.id);
-      if (stored && get().entries.some((x) => x.id === e.id)) continue;
-      // The snapshot first, so an entry is never stored without it.
+      const here = !!stored && get().entries.some((x) => x.id === e.id);
+      // The snapshot first, so an entry is never stored without it. One this browser has is kept;
+      // one it lacks is added to an entry already here too, if it is that entry's snapshot.
       const shot = e.snapshotKey && snapshots[e.snapshotKey];
-      if (shot && (!stored || stored.snapshotKey === e.snapshotKey)) await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => cur ?? shot);
+      if (shot && (!stored || stored.snapshotKey === e.snapshotKey)) {
+        const put = await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => (cur ? undefined : shot));
+        if (put && here) shots++;
+      }
+      if (here) continue;
       // Checked and written in one transaction, so an entry another tab has just saved is never replaced.
       const entry = stored ?? (await idb.modify<JournalEntry>('journal', e.id, (cur) => (cur ? undefined : e)));
       if (!entry) continue;
@@ -276,7 +284,7 @@ export const useJournal = create<JournalStore>()((set, get) => ({
       added.push(e.id);
       if (!stored) announce(e.id);
     }
-    return added;
+    return { added, snapshots: shots };
   },
 }));
 

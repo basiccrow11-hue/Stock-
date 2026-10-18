@@ -5,8 +5,9 @@
  * imported price data. API keys are never included.
  *
  * Restoring adds; it never deletes or overwrites. A journal entry, challenge attempt, drawing or
- * dataset already here under the same id or ticker is kept as it is; the streak keeps every day
- * either record has (see mergeStreak). Only the settings are replaced, and only when asked.
+ * dataset already here under the same id or ticker is kept as it is (a journal entry gets the
+ * backup's chart snapshot if this browser does not have it); the streak keeps every day either
+ * record has (see mergeStreak). Only the settings are replaced, and only when asked.
  */
 import { idb } from './idb';
 import type { JournalEntry } from '../../core/journal';
@@ -214,6 +215,8 @@ export function parseBackup(text: string): BackupContents {
 export interface RestoreResult {
   journalAdded: number;
   journalKept: number;
+  /** Chart snapshots added to journal entries already here that did not have theirs. */
+  snapshotsAdded: number;
   challengesAdded: number;
   drawingsAdded: number;
   datasetsAdded: string[];
@@ -224,7 +227,7 @@ export interface RestoreResult {
 }
 
 export async function restoreBackup(b: Backup, o: { settings: boolean }): Promise<RestoreResult> {
-  const added = await useJournal.getState().importEntries(b.journal, b.snapshots);
+  const { added, snapshots } = await useJournal.getState().importEntries(b.journal, b.snapshots);
   const challengesAdded = await useChallenges.getState().importAttempts(b.challenges);
   restoreStreak(b.streak);
   let drawingsAdded = 0;
@@ -257,6 +260,7 @@ export async function restoreBackup(b: Backup, o: { settings: boolean }): Promis
   return {
     journalAdded: added.length,
     journalKept: b.journal.length - added.length,
+    snapshotsAdded: snapshots,
     challengesAdded,
     drawingsAdded,
     datasetsAdded,

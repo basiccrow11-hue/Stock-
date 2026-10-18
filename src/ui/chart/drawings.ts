@@ -33,7 +33,8 @@ const key = (symbol: string) => `stock-replay-drawings:${symbol}`;
 
 function load(symbol: string): Drawing[] {
   try {
-    return JSON.parse(localStorage.getItem(key(symbol)) ?? '[]') as Drawing[];
+    const list: unknown = JSON.parse(localStorage.getItem(key(symbol)) ?? '[]');
+    return Array.isArray(list) ? (list as Drawing[]) : [];
   } catch {
     return [];
   }
@@ -126,3 +127,15 @@ export const useDrawings = create<DrawingStore>()((set, get) => ({
     save(get().symbol, []);
   },
 }));
+
+// Every change here saves the shown symbol's whole list, so a change another tab saves to it (a
+// drawing, or a restored backup) is taken in as it lands; otherwise the next change here would put
+// this tab's older list back over it. Storage cleared there (key null) is taken in too.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    const { symbol, selectedId } = useDrawings.getState();
+    if (!symbol || (e.key !== null && e.key !== key(symbol))) return;
+    const drawings = load(symbol);
+    useDrawings.setState({ drawings, selectedId: drawings.some((d) => d.id === selectedId) ? selectedId : null });
+  });
+}

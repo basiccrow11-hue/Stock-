@@ -91,3 +91,38 @@ describe('backing up while blind sessions have not ended', () => {
     card.unmount();
   });
 });
+
+describe('restoring a backup', () => {
+  afterEach(() => vi.doUnmock('../services/backup'));
+
+  /** Restores a chosen file through the card, with `restore` doing the restoring; what the card says then. */
+  async function restoreWith(restore: () => Promise<unknown>) {
+    vi.doMock('../services/backup', async (original) => ({ ...(await original<typeof import('../services/backup')>()), restoreBackup: restore }));
+    const card = await mount();
+    await choose(card.host, backupFile);
+    await act(async () => [...card.host.querySelectorAll('button')].find((b) => b.textContent === 'Restore')!.click());
+    const said = `${card.host.querySelector('[role=status]')!.textContent}${card.host.querySelector('[role=alert]')!.textContent}`;
+    card.unmount();
+    vi.resetModules();
+    return said;
+  }
+
+  const result = { journalAdded: 0, journalKept: 2, snapshotsAdded: 0, challengesAdded: 0, drawingsAdded: 0, datasetsAdded: [], datasetsKept: [], settings: false, streakDays: 0 };
+
+  it('says how many missing chart snapshots it added to trades already there, when it added any', async () => {
+    expect(await restoreWith(async () => ({ ...result, snapshotsAdded: 2 }))).toBe(
+      'Restored: 0 trades added to your journal (2 already there, kept as they were); 2 missing chart snapshots added to trades already there.',
+    );
+    expect(await restoreWith(async () => result)).toBe('Restored: 0 trades added to your journal (2 already there, kept as they were).');
+  });
+
+  it('says restoring again adds the rest, after a reload when a newer version of the app has updated storage', async () => {
+    const { STORAGE_UPGRADED } = await import('../services/idb');
+    expect(await restoreWith(() => Promise.reject(new Error('The storage quota has been exceeded')))).toBe(
+      'Restoring stopped partway: The storage quota has been exceeded. What was restored before that is kept, and restoring the same file again adds the rest.',
+    );
+    expect(await restoreWith(() => Promise.reject(new Error(STORAGE_UPGRADED)))).toBe(
+      `Restoring stopped partway: ${STORAGE_UPGRADED}. What was restored before that is kept, and restoring the same file again once the page is reloaded adds the rest.`,
+    );
+  });
+});

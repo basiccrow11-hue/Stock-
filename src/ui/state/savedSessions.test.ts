@@ -11,36 +11,55 @@ import { CHALLENGES } from '../../core/challenges/challenges';
 /**
  * IndexedDB stand-in: one Map per store, kept across module resets as a browser keeps it across a reload.
  * `written`: the keys written, in order. `held`: while set, deleting a session's summary waits for it.
+ * `commitMs`: while set, each call waits for those before it and then takes that long, as IndexedDB runs
+ * its transactions one after another (`queue` is the last one).
  */
-const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), written: [] as string[], held: null as Promise<void> | null }));
+const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), written: [] as string[], held: null as Promise<void> | null, commitMs: 0, queue: Promise.resolve() as Promise<unknown> }));
 vi.mock('../services/idb', () => {
   const store = (name: string) => {
     if (!db.stores.has(name)) db.stores.set(name, new Map());
     return db.stores.get(name)!;
   };
+  const run = <T>(fn: () => T | Promise<T>): Promise<T> => {
+    if (!db.commitMs) {
+      try {
+        return Promise.resolve(fn());
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    const done = db.queue.then(() => new Promise((r) => setTimeout(r, db.commitMs))).then(fn);
+    db.queue = done.catch(() => undefined);
+    return done;
+  };
   return {
     idb: {
-      all: async (s: string) => [...store(s).values()].map((v) => structuredClone(v)),
-      withPrefix: async (s: string, prefix: string) =>
-        [...store(s).entries()]
-          .filter(([k]) => k.startsWith(prefix))
-          .sort(([a], [b]) => (a < b ? -1 : 1))
-          .map(([, v]) => structuredClone(v)),
-      get: async (s: string, k: string) => structuredClone(store(s).get(k)),
-      set: async (s: string, k: string, v: unknown) => {
-        db.written.push(k);
-        store(s).set(k, structuredClone(v));
-      },
-      delete: async (s: string, k: string) => {
-        if (db.held && k.startsWith('session-summary:')) await db.held;
-        store(s).delete(k);
-      },
-      modify: async (s: string, k: string, fn: (v: unknown) => unknown) => {
-        const next = fn(structuredClone(store(s).get(k)));
-        if (next !== undefined) store(s).set(k, structuredClone(next));
-        return next;
-      },
-      clear: async (s: string) => void store(s).clear(),
+      all: (s: string) => run(() => [...store(s).values()].map((v) => structuredClone(v))),
+      withPrefix: (s: string, prefix: string) =>
+        run(() =>
+          [...store(s).entries()]
+            .filter(([k]) => k.startsWith(prefix))
+            .sort(([a], [b]) => (a < b ? -1 : 1))
+            .map(([, v]) => structuredClone(v)),
+        ),
+      get: (s: string, k: string) => run(() => structuredClone(store(s).get(k))),
+      set: (s: string, k: string, v: unknown) =>
+        run(() => {
+          db.written.push(k);
+          store(s).set(k, structuredClone(v));
+        }),
+      delete: (s: string, k: string) =>
+        run(async () => {
+          if (db.held && k.startsWith('session-summary:')) await db.held;
+          store(s).delete(k);
+        }),
+      modify: (s: string, k: string, fn: (v: unknown) => unknown) =>
+        run(() => {
+          const next = fn(structuredClone(store(s).get(k)));
+          if (next !== undefined) store(s).set(k, structuredClone(next));
+          return next;
+        }),
+      clear: (s: string) => run(() => void store(s).clear()),
     },
   };
 });
@@ -93,6 +112,8 @@ beforeEach(() => {
   db.stores.clear();
   db.written = [];
   db.held = null;
+  db.commitMs = 0;
+  db.queue = Promise.resolve();
   localStorage.clear();
   sessionStorage.clear();
   locks.mine.clear();
@@ -547,6 +568,68 @@ describe('unfinished sessions and other tabs', () => {
     }
     expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual(ids.slice(-MAX_SAVED_SESSIONS).reverse());
   });
+
+  // IndexedDB runs its transactions one after another, each taking a moment, so the session that just
+  // ended is still stored while the next one starts: it is not one of the few kept.
+  it.each([
+    ['a position open', 'position'],
+    ['Play on', 'playing'],
+    ['a position open and the simulated market starts', 'sim'],
+  ] as const)('keeps the latest few when the session that ends had %s', async (_, how) => {
+    db.commitMs = 3;
+    let p = await page();
+    const { MAX_SAVED_SESSIONS } = p.saved;
+    const older: string[] = [];
+    for (let i = 0; i < MAX_SAVED_SESSIONS - 1; i++) {
+      expect(await p.store.startReplay(replay)).toBe(true);
+      older.push(p.store.useTrading.getState().session!.id);
+      await drained();
+      rememberNothing();
+      p = await page();
+    }
+    expect(await p.store.startReplay(replay)).toBe(true);
+    await drained();
+    if (how === 'playing') p.store.play();
+    else {
+      p.store.stepForward();
+      expect(p.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    }
+    expect(await (how === 'sim' ? p.store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 }) : p.store.startReplay(replay))).toBe(true);
+    await drained();
+    expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([...older].reverse());
+  });
+
+  it('keeps the latest few when one is carried on while the session that ends has a position open', async () => {
+    db.commitMs = 3;
+    let p = await page();
+    const { MAX_SAVED_SESSIONS } = p.saved;
+    const older: string[] = [];
+    for (let i = 0; i < MAX_SAVED_SESSIONS - 1; i++) {
+      expect(await p.store.startReplay(replay)).toBe(true);
+      older.push(p.store.useTrading.getState().session!.id);
+      await drained();
+      rememberNothing();
+      p = await page();
+    }
+    // One more runs in another tab while this tab starts its own...
+    expect(await p.store.startReplay(replay)).toBe(true);
+    const other = p.store.useTrading.getState().session!.id;
+    await drained();
+    rememberNothing();
+    p = await page();
+    locks.elsewhere = new Set([`stock-replay-session:${other}`]);
+    expect(await p.store.startReplay(replay)).toBe(true);
+    await drained();
+    p.store.stepForward();
+    expect(p.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    // ...and that tab closes, leaving five to offer: this tab carries its session on.
+    locks.elsewhere.clear();
+    expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([other, ...[...older].reverse()]);
+    expect(await p.store.resumeSession(other)).toBe(true);
+    await drained();
+    expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([...older].reverse());
+    expect(p.store.useTrading.getState().session!.id).toBe(other);
+  });
 });
 
 describe('a session as saved when its replay or its challenge attempt ends', () => {
@@ -856,6 +939,16 @@ describe('a blind session left unfinished', () => {
     expect((await import('./liveBlind')).useLiveBlind.getState().sessions).toEqual({});
   });
 });
+
+/** Waits until storage has done all it was asked to (with `commitMs` set). */
+async function drained() {
+  let last: Promise<unknown>;
+  do {
+    last = db.queue;
+    await last;
+    await settle();
+  } while (last !== db.queue);
+}
 
 /** A new tab: nothing of the closed one's own tab state. */
 function rememberNothing() {

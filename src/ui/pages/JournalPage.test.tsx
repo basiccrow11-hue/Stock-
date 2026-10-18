@@ -7,7 +7,8 @@ import type { RoundTrip } from '../../core/types';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('../services/idb', () => ({
+vi.mock('../services/idb', async (original) => ({
+  ...(await original<typeof import('../services/idb')>()),
   idb: { all: async () => [], set: async () => undefined, delete: async () => undefined, get: async () => undefined, modify: async () => undefined },
 }));
 
@@ -55,6 +56,20 @@ describe('the journal’s exports', () => {
     // A blind session that has ended leaves nothing out.
     v = await mount([entry('a', true), entry('c', false)], {});
     expect(v.note()).toBeUndefined();
+    v.done();
+  });
+});
+
+describe('a journal storage error', () => {
+  it('says entries may not persist, except when only reloading the page is needed (a newer version of the app has updated storage)', async () => {
+    const { STORAGE_UPGRADED } = await import('../services/idb');
+    const { useJournal } = await import('../state/journalStore');
+    const v = await mount([], {});
+    const alert = () => document.querySelector('.alert.error')?.textContent;
+    act(() => useJournal.setState({ error: 'The storage quota has been exceeded' }));
+    expect(alert()).toBe('Journal storage error: The storage quota has been exceeded. Entries may not persist in this browser.');
+    act(() => useJournal.setState({ error: STORAGE_UPGRADED }));
+    expect(alert()).toBe(`Journal storage error: ${STORAGE_UPGRADED}.`);
     v.done();
   });
 });

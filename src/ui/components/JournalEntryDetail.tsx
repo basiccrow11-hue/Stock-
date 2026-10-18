@@ -29,6 +29,9 @@ const NO_SNAPSHOT: Record<NonNullable<JournalEntry['snapshotMissing']>, string> 
   failed: 'No chart snapshot: the picture of the chart could not be drawn or saved when this trade closed.',
 };
 
+/** An entry whose snapshot this browser does not have (restored from a backup or journal export without snapshots). */
+const SNAPSHOT_NOT_HERE = 'No chart snapshot: its picture is not in this browser. Restoring a backup made with chart snapshots adds it.';
+
 const EXIT_LABEL: Record<string, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual exit', session_end: 'Session ended', other: 'Other' };
 
 /** The note fields that differ from what the editor last took in from the store. */
@@ -47,7 +50,8 @@ export function JournalEntryDetail({
   notesOnly?: boolean;
 }) {
   const updateNotes = useJournal((s) => s.updateNotes);
-  const [snapshot, setSnapshot] = useState<string | null>(null);
+  /** The entry's snapshot: undefined until it has been read, null when this browser does not have it. */
+  const [snapshot, setSnapshot] = useState<string | null | undefined>(undefined);
   const [notes, setNotes] = useState<JournalNotes>(entry.notes);
   const [tag, setTag] = useState(entry.tag);
   const [saved, setSaved] = useState(true);
@@ -89,7 +93,7 @@ export function JournalEntryDetail({
     setTag(entry.tag);
     setSaved(true);
     let alive = true;
-    setSnapshot(null);
+    setSnapshot(undefined);
     if (entry.snapshotKey && !notesOnly)
       loadSnapshot(entry.snapshotKey)
         .then((s) => alive && setSnapshot(s ?? null))
@@ -210,6 +214,7 @@ export function JournalEntryDetail({
           )}
         </figure>
       )}
+      {snapshot === null && <p className="small muted">{SNAPSHOT_NOT_HERE}</p>}
       {!entry.snapshotKey && entry.snapshotMissing && <p className="small muted">{NO_SNAPSHOT[entry.snapshotMissing]}</p>}
 
       {showReview && r && (

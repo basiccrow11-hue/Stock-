@@ -142,6 +142,12 @@ function logChange(before: BrokerEvent[], after: BrokerEvent[]): { dropped: numb
  */
 export async function writeSession(s: SavedSession): Promise<void> {
   const id = s.summary.id;
+  // Saved before but its summary gone: storage was emptied under the app (site data cleared with it
+  // open), so the checkpoints stored then are gone too and are stored again.
+  if (listedCheckpoints.has(id) && !(await idb.get('kv', SUMMARY + id))) {
+    listedCheckpoints.delete(id);
+    for (const cp of s.replay?.state.checkpoints ?? []) storedCheckpoints.delete(cp);
+  }
   let stored: StoredSession = { ...s, replay: undefined };
   const keys: string[] = [];
   if (s.replay) {

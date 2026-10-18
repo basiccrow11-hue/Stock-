@@ -919,14 +919,17 @@ async function adoptSession(id: string): Promise<void> {
 
 /** The session ended: nothing is kept of it to carry on. */
 function forgetSession(id: string): void {
-  releaseSession(id);
   if (tabSession() === id) rememberTabSession(null);
   // Off the blind listing once it is deleted, so a tab opening meanwhile does not list it again; its
-  // dates stay hidden until then.
+  // dates stay hidden until then. Held until then too, so it is not offered (here or in another tab)
+  // or counted among the few kept while it is still stored.
   saving = saving
     .then(() => deleteSession(id))
     .catch(() => undefined)
-    .then(() => setSavedBlind(id, null));
+    .then(() => {
+      setSavedBlind(id, null);
+      releaseSession(id);
+    });
 }
 
 if (typeof document !== 'undefined') {

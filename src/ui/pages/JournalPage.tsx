@@ -8,6 +8,7 @@ import { useDateHidden, useEntryTime } from '../components/useEntryTime';
 import { takeFocusRequest } from '../services/focusRequest';
 import type { JournalEntry } from '../../core/journal';
 import { download } from '../services/download';
+import { STORAGE_UPGRADED } from '../services/idb';
 
 function toCsv(entries: JournalEntry[]): string {
   const cols = ['symbol', 'direction', 'source', 'mode', 'entryTime', 'exitTime', 'quantity', 'avgEntry', 'avgExit', 'stopLoss', 'takeProfit', 'pnl', 'returnPct', 'rMultiple', 'holdingSeconds', 'commission', 'tag', 'rewound', 'why', 'setup', 'good', 'bad', 'change', 'other'];
@@ -123,7 +124,7 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
             Export JSON
           </button>
         </div>
-        {error && <div className="alert error">Journal storage error: {error}. Entries may not persist in this browser.</div>}
+        {error && <div className="alert error">Journal storage error: {error}.{error === STORAGE_UPGRADED ? '' : ' Entries may not persist in this browser.'}</div>}
         {!entries.length ? (
           <EmptyState title="Your journal is empty">Start a replay or the simulated market and close a trade. It will be journaled here with a chart snapshot and review.</EmptyState>
         ) : (

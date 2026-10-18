@@ -88,6 +88,12 @@ async function app() {
   return { ...backup, useJournal, useChallenges, streak, useSettings, drawings, registry };
 }
 
+/** A chart snapshot stored as the journal stores one. */
+function saveShot(key: string, img: string) {
+  if (!db.stores.has('snapshots')) db.stores.set('snapshots', new Map());
+  db.stores.get('snapshots')!.set(key, img);
+}
+
 /** Clearing the browser's site data. */
 function clearSiteData() {
   db.stores.clear();
@@ -224,6 +230,31 @@ describe('backing up and restoring this browser’s data', () => {
     db.stores.set('challenges', new Map([['c1', { ...b.useChallenges.getState().attempts[2], label: 'stored here' }]]));
     expect(await c.restoreBackup(c.parseBackup(text).backup, { settings: false })).toMatchObject({ challengesAdded: 3 });
     expect(c.useChallenges.getState().attempts.map((x) => [x.id, x.label])).toEqual([['c3', 'Risk 1%'], ['c2', 'Risk 1%'], ['c1', 'stored here']]);
+  });
+
+  it('adds the chart snapshots a backup without them left off entries already here, and never replaces one here', async () => {
+    const a = await app();
+    for (const id of ['j1', 'j2', 'j3']) {
+      await a.useJournal.getState().add(entry(id, { snapshotKey: `k-${id}` }));
+      saveShot(`k-${id}`, `data:image/png;base64,${id}`);
+    }
+    const small = JSON.stringify((await a.createBackup({ snapshots: false, datasets: false, holdBack: () => false })).backup);
+    const full = JSON.stringify((await a.createBackup({ snapshots: true, datasets: false, holdBack: () => false })).backup);
+    // A journal exported from the Journal page has the snapshots' keys but not the pictures.
+    const exported = JSON.stringify(a.useJournal.getState().entries);
+
+    clearSiteData();
+    const b = await app();
+    expect(await b.restoreBackup(b.parseBackup(small).backup, { settings: false })).toMatchObject({ journalAdded: 3, snapshotsAdded: 0 });
+    expect(await b.restoreBackup(b.parseBackup(exported).backup, { settings: false })).toMatchObject({ journalAdded: 0, journalKept: 3, snapshotsAdded: 0 });
+    expect(db.stores.get('snapshots')?.size ?? 0).toBe(0);
+    // A picture this browser has stays; one that is another entry's picture here is not this one's.
+    saveShot('k-j1', 'data:image/png;base64,mine');
+    db.stores.get('journal')!.set('j3', entry('j3', { snapshotKey: 'k-other' }));
+    const c = await app();
+    expect(await c.restoreBackup(c.parseBackup(full).backup, { settings: false })).toMatchObject({ journalAdded: 0, journalKept: 3, snapshotsAdded: 1 });
+    expect(Object.fromEntries(db.stores.get('snapshots')!)).toEqual({ 'k-j1': 'data:image/png;base64,mine', 'k-j2': 'data:image/png;base64,j2' });
+    expect(await c.restoreBackup(c.parseBackup(full).backup, { settings: false })).toMatchObject({ journalAdded: 0, journalKept: 3, snapshotsAdded: 0 });
   });
 
   it('never keeps restored data only in memory: a failed save is finished by restoring again, and data stored but not shown is put back', async () => {

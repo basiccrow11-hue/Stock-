@@ -310,4 +310,11 @@ describe('chart snapshot', () => {
     expect(older.host.querySelector('img')).toBeNull();
     older.done();
   });
+
+  it('says so when its picture is not in this browser (restored from a backup without snapshots), and how to add it', async () => {
+    const v = await show({ ...base, snapshotKey: 'snap:t2' });
+    expect(v.host.querySelector('img')).toBeNull();
+    expect(v.host.querySelector('p.muted')?.textContent).toBe('No chart snapshot: its picture is not in this browser. Restoring a backup made with chart snapshots adds it.');
+    v.done();
+  });
 });

@@ -5,6 +5,7 @@ import { download } from '../services/download';
 import { useDateHidden } from './useEntryTime';
 import { toast } from '../state/toasts';
 import { csvProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
+import { STORAGE_UPGRADED } from '../services/idb';
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
 
@@ -28,6 +29,7 @@ function describe(c: BackupContents): string {
 function summary(r: RestoreResult): string {
   const parts: string[] = [];
   parts.push(`${plural(r.journalAdded, 'trade')} added to your journal${r.journalKept ? ` (${r.journalKept} already there, kept as they were)` : ''}`);
+  if (r.snapshotsAdded) parts.push(`${plural(r.snapshotsAdded, 'missing chart snapshot')} added to trades already there`);
   if (r.challengesAdded) parts.push(plural(r.challengesAdded, 'challenge attempt'));
   if (r.streakDays) parts.push(`${plural(r.streakDays, 'practice day')} merged into your streak`);
   if (r.drawingsAdded) parts.push(plural(r.drawingsAdded, 'drawing'));
@@ -90,7 +92,10 @@ export function BackupCard() {
       setChosen(null);
       setFileBox((n) => n + 1);
     } catch (e) {
-      setError(`Restoring stopped partway: ${(e as Error).message}. What was restored before that is kept, and restoring the same file again adds the rest.`);
+      const message = (e as Error).message;
+      // Storage a newer version of the app has upgraded takes nothing more until the page is reloaded.
+      const rest = message === STORAGE_UPGRADED ? 'restoring the same file again once the page is reloaded adds the rest' : 'restoring the same file again adds the rest';
+      setError(`Restoring stopped partway: ${message}. What was restored before that is kept, and ${rest}.`);
     } finally {
       setBusy(null);
     }
