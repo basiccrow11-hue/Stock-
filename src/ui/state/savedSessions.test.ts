@@ -975,7 +975,8 @@ describe('the Trade screen as a reload carries its session on', () => {
     expect(document.body.textContent).not.toContain('No CSV data');
     loaded();
     await vi.waitFor(() => expect(warning()).toBeNull(), { timeout: 5000 });
-    expect(document.querySelector('#setup-symbols option')?.getAttribute('value')).toBe('ACME');
+    // The form reads the tickers again once the data is in, in a moment of its own.
+    await vi.waitFor(() => expect(document.querySelector('#setup-symbols option')?.getAttribute('value')).toBe('ACME'), { timeout: 5000 });
     await vi.waitFor(() => expect(document.body.textContent).toContain('Available data: 2024-03-12 to 2024-03-12'), { timeout: 5000 });
     [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Start replay')!.click();
     await vi.waitFor(() => expect(app.store.useTrading.getState().session?.symbols).toEqual(['ACME']), { timeout: 5000 });
