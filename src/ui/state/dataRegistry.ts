@@ -27,22 +27,51 @@ export function onCsvDatasetsChanged(fn: () => void): () => void {
 }
 const datasetsChanged = () => datasetListeners.forEach((fn) => fn());
 
+/**
+ * A daily dataset with its bars filed under their session day (sessionStampDailyBars); any other
+ * dataset, or one already filed that way, as it is. Daily files imported before bars were filed
+ * under their session day, and backups of them, may carry midnight stamps, which would show each
+ * day's bar the evening before.
+ */
+export function sessionStamped(d: CsvDataset): CsvDataset {
+  if (d.baseTimeframe !== '1D') return d;
+  const bars = sessionStampDailyBars(d.bars).bars;
+  return bars.length === d.bars.length && bars.every((b, i) => b.time === d.bars[i].time) ? d : { ...d, bars };
+}
+
 export async function loadCsvDatasets(): Promise<CsvDataset[]> {
   try {
-    // Daily files imported before bars were filed under their session day may carry midnight stamps.
-    const list = (await idb.all<CsvDataset>('datasets')).map((d) => (d.baseTimeframe === '1D' ? { ...d, bars: sessionStampDailyBars(d.bars).bars } : d));
+    const stored = await idb.all<CsvDataset>('datasets');
+    const list = stored.map(sessionStamped);
     csvProvider.setDatasets(list);
     datasetsChanged();
+    // Saved back that way, so storage (which a backup reads) keeps no midnight stamps. In one
+    // transaction each, so a dataset another tab has just saved is never replaced.
+    for (const d of list.filter((d, i) => d !== stored[i]))
+      await idb
+        .modify<CsvDataset>('datasets', d.symbol.toUpperCase(), (cur) => {
+          const next = cur && sessionStamped(cur);
+          return next !== cur ? next : undefined;
+        })
+        .catch(() => undefined);
     return list;
   } catch {
     return [];
   }
 }
 
+/** Store an imported dataset, then show it: the list never has data a reload would not find. */
 export async function saveCsvDataset(d: CsvDataset): Promise<void> {
-  csvProvider.upsert(d);
+  const stamped = sessionStamped(d);
+  await idb.set('datasets', stamped.symbol.toUpperCase(), stamped);
+  csvProvider.upsert(stamped);
   datasetsChanged();
-  await idb.set('datasets', d.symbol.toUpperCase(), d);
+}
+
+/** Show a stored dataset this tab's list is missing (left so by a restore that stopped partway). */
+export function showStoredCsvDataset(d: CsvDataset): void {
+  csvProvider.upsert(sessionStamped(d));
+  datasetsChanged();
 }
 
 export async function deleteCsvDataset(symbol: string): Promise<void> {

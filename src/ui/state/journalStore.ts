@@ -171,7 +171,9 @@ interface JournalStore {
   updateRuleCheck: (id: string, rule: string, followed: boolean | null) => Promise<void>;
   /**
    * Add entries the journal does not have yet (a restored backup), with their snapshots. An entry
-   * already stored under the same id, in this tab or another, is left as it is. Resolves with the ids added.
+   * already stored under the same id, in this tab or another, is left as it is. Each shows in the
+   * list as soon as it is stored, and one stored but missing from the list (a restore that stopped
+   * partway) is put back in it. Resolves with the ids added.
    */
   importEntries: (entries: JournalEntry[], snapshots: Record<string, string>) => Promise<string[]>;
 }
@@ -258,21 +260,23 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     await write(id, entry, mark(entry), mark);
   },
   importEntries: async (list, snapshots) => {
-    const added: JournalEntry[] = [];
+    const added: string[] = [];
     for (const e of list) {
-      // Checked and written in one transaction, so an entry another tab has just saved is never replaced.
-      const wrote = await idb.modify<JournalEntry>('journal', e.id, (cur) => (cur ? undefined : e));
-      if (!wrote) continue;
+      // Whether it is here is decided by storage, not by the list, which a restore that stopped
+      // partway may have left without entries it had stored.
+      const stored = await idb.get<JournalEntry>('journal', e.id);
+      if (stored && get().entries.some((x) => x.id === e.id)) continue;
+      // The snapshot first, so an entry is never stored without it.
       const shot = e.snapshotKey && snapshots[e.snapshotKey];
-      if (shot) await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => cur ?? shot);
-      added.push(e);
-      announce(e.id);
+      if (shot && (!stored || stored.snapshotKey === e.snapshotKey)) await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => cur ?? shot);
+      // Checked and written in one transaction, so an entry another tab has just saved is never replaced.
+      const entry = stored ?? (await idb.modify<JournalEntry>('journal', e.id, (cur) => (cur ? undefined : e)));
+      if (!entry) continue;
+      replace(e.id, entry);
+      added.push(e.id);
+      if (!stored) announce(e.id);
     }
-    if (added.length) {
-      const ids = new Set(added.map((e) => e.id));
-      set({ entries: [...get().entries.filter((e) => !ids.has(e.id)), ...added].sort(byExit) });
-    }
-    return added.map((e) => e.id);
+    return added;
   },
 }));
 

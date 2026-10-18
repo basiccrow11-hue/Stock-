@@ -2,23 +2,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_NOTES, type JournalEntry } from '../../core/journal';
 import type { CsvDataset } from '../../core/data/csvProvider';
+import { exchangeTimeToUnix } from '../../core/time';
 
-/** IndexedDB stand-in: one Map per store, kept across module resets like a real browser's storage. */
-const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>() }));
+/**
+ * IndexedDB stand-in: one Map per store, kept across module resets like a real browser's storage.
+ * `failing` makes chosen writes fail, as a full disk does.
+ */
+const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), failing: null as ((store: string, key: string) => boolean) | null }));
 vi.mock('./idb', () => {
   const store = (name: string) => {
     if (!db.stores.has(name)) db.stores.set(name, new Map());
     return db.stores.get(name)!;
   };
+  const write = (s: string, k: string, v: unknown) => {
+    if (db.failing?.(s, k)) throw new Error('The storage quota has been exceeded');
+    store(s).set(k, structuredClone(v));
+  };
   return {
     idb: {
       all: async (s: string) => [...store(s).values()].map((v) => structuredClone(v)),
       get: async (s: string, k: string) => structuredClone(store(s).get(k)),
-      set: async (s: string, k: string, v: unknown) => void store(s).set(k, structuredClone(v)),
+      set: async (s: string, k: string, v: unknown) => write(s, k, v),
       delete: async (s: string, k: string) => void store(s).delete(k),
       modify: async (s: string, k: string, fn: (v: unknown) => unknown) => {
         const next = fn(structuredClone(store(s).get(k)));
-        if (next !== undefined) store(s).set(k, structuredClone(next));
+        if (next !== undefined) write(s, k, next);
         return next;
       },
       clear: async (s: string) => void store(s).clear(),
@@ -83,6 +91,7 @@ async function app() {
 /** Clearing the browser's site data. */
 function clearSiteData() {
   db.stores.clear();
+  db.failing = null;
   localStorage.clear();
 }
 
@@ -161,6 +170,54 @@ describe('backing up and restoring this browser’s data', () => {
     expect(await a.restoreBackup(a.parseBackup(JSON.stringify(backup)).backup, { settings: false })).toMatchObject({ journalAdded: 0, journalKept: 2 });
   });
 
+  it('finishes a restore cut off by a failed write when the same file is restored again, journal included', async () => {
+    const a = await app();
+    for (const id of ['j1', 'j2', 'j3']) await a.useJournal.getState().add(entry(id, { snapshotKey: `k-${id}` }));
+    for (const id of ['j1', 'j2', 'j3']) db.stores.get('snapshots')?.set(`k-${id}`, 'data:image/png;base64,AA') ?? db.stores.set('snapshots', new Map([[`k-${id}`, 'data:image/png;base64,AA']]));
+    const text = JSON.stringify((await a.createBackup({ snapshots: true, datasets: false, holdBack: () => false })).backup);
+
+    clearSiteData();
+    const b = await app();
+    db.failing = (store, key) => store === 'snapshots' && key === 'k-j3';
+    await expect(b.restoreBackup(b.parseBackup(text).backup, { settings: false })).rejects.toThrow('quota');
+    // What was written shows at once; the entry whose picture could not be saved was not saved either.
+    expect(b.useJournal.getState().entries.map((e) => e.id).sort()).toEqual(['j1', 'j2']);
+    expect([...db.stores.get('journal')!.keys()].sort()).toEqual(['j1', 'j2']);
+    db.failing = null;
+    expect(await b.restoreBackup(b.parseBackup(text).backup, { settings: false })).toMatchObject({ journalAdded: 1, journalKept: 2 });
+    expect(b.useJournal.getState().entries.map((e) => e.id).sort()).toEqual(['j1', 'j2', 'j3']);
+    expect(db.stores.get('snapshots')!.get('k-j3')).toBe('data:image/png;base64,AA');
+
+    // An entry stored but missing from this tab's list (left so by an earlier version) is put back in it, with its picture.
+    clearSiteData();
+    const c = await app();
+    db.stores.set('journal', new Map([['j1', entry('j1', { snapshotKey: 'k-j1' })]]));
+    expect(await c.restoreBackup(c.parseBackup(text).backup, { settings: false })).toMatchObject({ journalAdded: 3, journalKept: 0 });
+    expect(c.useJournal.getState().entries.map((e) => e.id).sort()).toEqual(['j1', 'j2', 'j3']);
+    expect(db.stores.get('snapshots')!.get('k-j1')).toBe('data:image/png;base64,AA');
+  });
+
+  it('never keeps restored data only in memory: a failed save is finished by restoring again, and data stored but not shown is put back', async () => {
+    const a = await app();
+    await a.registry.saveCsvDataset(dataset);
+    const text = JSON.stringify((await a.createBackup({ snapshots: false, datasets: true, holdBack: () => false })).backup);
+
+    clearSiteData();
+    const b = await app();
+    db.failing = (store) => store === 'datasets';
+    await expect(b.restoreBackup(b.parseBackup(text).backup, { settings: false })).rejects.toThrow('quota');
+    expect(b.registry.csvProvider.list()).toEqual([]);
+    db.failing = null;
+    expect(await b.restoreBackup(b.parseBackup(text).backup, { settings: false })).toMatchObject({ datasetsAdded: ['ACME'], datasetsKept: [] });
+    expect((await app()).registry.csvProvider.list().map((d) => d.symbol)).toEqual(['ACME']);
+
+    clearSiteData();
+    const c = await app();
+    db.stores.set('datasets', new Map([['ACME', { ...dataset, fileName: 'mine.csv' }]]));
+    expect(await c.restoreBackup(c.parseBackup(text).backup, { settings: false })).toMatchObject({ datasetsAdded: ['ACME'], datasetsKept: [] });
+    expect(c.registry.csvProvider.list().map((d) => d.fileName)).toEqual(['mine.csv']);
+  });
+
   it('leaves out the trades of a blind session still running, and imported data unless asked', async () => {
     const a = await app();
     await a.useJournal.getState().add(entry('seen'));
@@ -170,6 +227,53 @@ describe('backing up and restoring this browser’s data', () => {
     expect(heldBack).toBe(1);
     expect(backup.journal.map((e) => e.id)).toEqual(['seen']);
     expect(backup.datasets).toBeUndefined();
+  });
+});
+
+describe('daily data imported with midnight stamps', () => {
+  // Jan 8-12 2024 stamped at midnight UTC, as daily files imported before bars were filed under their session were.
+  const days = ['2024-01-08', '2024-01-09', '2024-01-10', '2024-01-11', '2024-01-12'];
+  const raw: CsvDataset = {
+    symbol: 'ACME',
+    name: 'ACME',
+    baseTimeframe: '1D',
+    importedAt: 1,
+    fileName: 'acme-daily.csv',
+    bars: days.map((d, i) => ({ time: Date.parse(`${d}T00:00:00Z`) / 1000, open: 100 + i, high: 110 + i, low: 90 + i, close: 104 + i, volume: 1000 })),
+  };
+  const sessionOpens = days.map((d) => exchangeTimeToUnix(d, 9 * 60 + 30));
+  const storedTimes = () => (db.stores.get('datasets')!.get('ACME') as CsvDataset).bars.map((b) => b.time);
+
+  it('are filed under their session when loaded, and saved that way', async () => {
+    db.stores.set('datasets', new Map([['ACME', raw]]));
+    const a = await app();
+    expect(a.registry.csvProvider.list()[0].bars.map((b) => b.time)).toEqual(sessionOpens);
+    expect(storedTimes()).toEqual(sessionOpens);
+    // Filing them again changes nothing.
+    expect(a.registry.sessionStamped(a.registry.csvProvider.list()[0])).toBe(a.registry.csvProvider.list()[0]);
+  });
+
+  it('are backed up filed under their session, even when storage still has the midnight stamps', async () => {
+    const a = await app();
+    db.stores.set('datasets', new Map([['ACME', raw]]));
+    const { backup } = await a.createBackup({ snapshots: false, datasets: true, holdBack: () => false });
+    expect(backup.datasets![0].bars.map((b) => b.time)).toEqual(sessionOpens);
+  });
+
+  it('are restored filed under their session, so a replay never shows a day’s bar before that day has traded', async () => {
+    const text = JSON.stringify({ format: 'stock-replay-backup', version: 1, createdAt: 1, journal: [], datasets: [raw] });
+    const b = await app();
+    expect(await b.restoreBackup(b.parseBackup(text).backup, { settings: false })).toMatchObject({ datasetsAdded: ['ACME'] });
+    expect(b.registry.csvProvider.list()[0].bars.map((x) => x.time)).toEqual(sessionOpens);
+    expect(storedTimes()).toEqual(sessionOpens);
+    // Without a reload: Jan 10 to 12, jumped to 09:31 on Jan 11. Jan 11's bar has not traded yet.
+    const trading = await import('../state/tradingStore');
+    const replay = { providerId: 'csv', symbol: 'ACME', date: '2024-01-10', startTime: '09:30', endDate: '2024-01-12', endTime: '16:00', startingBalance: 25_000, lookbackDays: 2 };
+    expect(await trading.startReplay({ ...replay, timeframe: '1D', speed: 1, blind: false })).toBe(true);
+    trading.jumpTo(exchangeTimeToUnix('2024-01-11', 9 * 60 + 31));
+    expect(trading.lastPrice('ACME')).toBe(106);
+    expect(trading.getBaseBars('ACME').every((x) => x.time < exchangeTimeToUnix('2024-01-11', 0))).toBe(true);
+    await trading.endSession();
   });
 });
 
@@ -212,5 +316,51 @@ describe('reading a backup file', () => {
     expect(backup.datasets).toEqual([]);
     expect(backup.streak.days).toEqual({});
     expect(skipped).toBe(3);
+  });
+
+  it('skips data of a bar size the replay does not support, and drawings of an unknown kind or with the wrong number of points', async () => {
+    const { parseBackup } = await app();
+    const { backup, skipped } = parseBackup(
+      JSON.stringify({
+        format: 'stock-replay-backup',
+        version: 1,
+        createdAt: 1,
+        journal: [],
+        drawings: {
+          TSLA: [
+            { id: 'ok', type: 'trend', color: '#fff', points: [{ time: 1, price: 1 }, { time: 2, price: 2 }] },
+            { id: 'short', type: 'trend', color: '#fff', points: [{ time: 1, price: 1 }] },
+            { id: 'odd', type: 'circle', color: '#fff', points: [{ time: 1, price: 1 }] },
+          ],
+        },
+        datasets: [dataset, { ...dataset, symbol: 'ODD', baseTimeframe: '3m' }],
+      }),
+    );
+    expect(backup.drawings.TSLA.map((d) => d.id)).toEqual(['ok']);
+    expect(backup.datasets!.map((d) => d.symbol)).toEqual(['ACME']);
+    expect(skipped).toBe(3);
+  });
+
+  it('restores only settings it can use, never the settings store’s own functions, and they stay right after a reload', async () => {
+    const a = await app();
+    const { backup } = a.parseBackup(
+      JSON.stringify({
+        format: 'stock-replay-backup',
+        version: 1,
+        createdAt: 1,
+        journal: [],
+        settings: { watchlist: 'SPY', update: 1, execution: { commissionPerShare: 'abc', commission: { perShare: 'abc', perOrder: 1 } }, replay: { symbol: 'AAPL', timeframe: '3m' } },
+      }),
+    );
+    expect(backup.settings).toEqual({ execution: { commission: { perOrder: 1 } }, replay: { symbol: 'AAPL' } });
+    expect(a.parseBackup(JSON.stringify({ format: 'stock-replay-backup', version: 1, settings: { update: 1 } })).backup.settings).toBeNull();
+    expect((await a.restoreBackup(backup, { settings: true })).settings).toBe(true);
+    const b = await app();
+    await vi.waitFor(() => expect(b.useSettings.persist.hasHydrated()).toBe(true));
+    const s = b.useSettings.getState();
+    expect(typeof s.update).toBe('function');
+    expect(s.watchlist).toEqual(['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'META']);
+    expect(s.execution.commission).toEqual({ perShare: 0, perOrder: 1, minimumPerOrder: 0, maxPctOfValue: 0 });
+    expect(s.replay).toMatchObject({ symbol: 'AAPL', timeframe: '1m' });
   });
 });

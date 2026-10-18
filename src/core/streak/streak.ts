@@ -133,9 +133,11 @@ export function sanitizeStreak(raw: unknown): StreakData {
 /**
  * The streak record after restoring `other` (a backup) into `current`: every practice day either
  * kept, with the larger time and trade count, met if either met its goal; a day frozen in either
- * stays frozen unless its goal was met; the larger bank of freezes and best streak (at least the
- * longest run the merged days make). The goal and any pending celebration stay as they are, unless
- * nothing has been practised here yet, when the backup's goal is taken. Call settle() afterwards.
+ * stays frozen unless its goal was met; the larger bank of freezes, once each side's bank allows
+ * for the other's history (see bankAfterMerge), and best streak (at least the longest run the
+ * merged days make). The goal and any pending celebration stay as they are, unless no day's goal
+ * has been met here and the goal is still the default, when the backup's goal is taken (opening
+ * the app already counts a few seconds of practice). Call settle() afterwards.
  */
 export function mergeStreak(current: StreakData, other: StreakData): StreakData {
   const days: Record<DayKey, DayActivity> = { ...current.days };
@@ -144,17 +146,30 @@ export function mergeStreak(current: StreakData, other: StreakData): StreakData 
     days[k] = a ? { activeSeconds: Math.max(a.activeSeconds, b.activeSeconds), tradesClosed: Math.max(a.tradesClosed, b.tradesClosed), done: a.done || b.done } : { ...b };
   }
   const frozen = [...new Set([...current.frozen, ...other.frozen])].filter((k) => !days[k]?.done).sort();
+  const fresh = current.goalMinutes === DEFAULT_GOAL_MINUTES && !Object.values(current.days).some((d) => d.done);
   const merged: StreakData = {
     ...current,
-    goalMinutes: Object.keys(current.days).length ? current.goalMinutes : other.goalMinutes,
+    goalMinutes: fresh ? other.goalMinutes : current.goalMinutes,
     days,
     frozen,
-    freezes: Math.min(MAX_FREEZES, Math.max(current.freezes, other.freezes)),
+    freezes: Math.min(MAX_FREEZES, Math.max(0, bankAfterMerge(current, other, days, frozen), bankAfterMerge(other, current, days, frozen))),
     creditedUntil: Math.max(current.creditedUntil, other.creditedUntil),
   };
   let longest = 0;
   for (const k of [...Object.keys(days), ...frozen]) if (!isCovered(merged, addDays(k, 1))) longest = Math.max(longest, streakEndingAt(merged, k));
   return { ...merged, best: Math.max(current.best, other.best, longest) };
+}
+
+/**
+ * `side`'s bank of freezes once the merge has `days` and `frozen`: one more for each day it froze
+ * whose goal the other record met (the freeze goes back, as in recordActivity), and one fewer for
+ * each day only the other record froze that stays frozen (a freeze spent that `side` has not counted).
+ * So restoring an older backup, once or many times, never gives back a freeze already spent.
+ */
+function bankAfterMerge(side: StreakData, otherSide: StreakData, days: Record<DayKey, DayActivity>, frozen: DayKey[]): number {
+  const refunded = side.frozen.filter((k) => !side.days[k]?.done && days[k]?.done).length;
+  const spent = frozen.filter((k) => otherSide.frozen.includes(k) && !side.frozen.includes(k)).length;
+  return side.freezes + refunded - spent;
 }
 
 // ------------------------------------------------------------------ queries

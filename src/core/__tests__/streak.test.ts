@@ -379,4 +379,38 @@ describe('restoring a backup of the streak', () => {
     expect(merged.best).toBe(3);
     expect(sanitizeStreak(merged)).toEqual(merged);
   });
+
+  it('never gives back a freeze spent since the backup, however often it is restored', () => {
+    // Oct 1-7 practised earns a freeze, and the backup is made. Oct 8 is missed; on Oct 9 the freeze covers it.
+    const backup = practise(emptyStreak(), run('2026-10-01', 7));
+    expect(backup.freezes).toBe(1);
+    const here = settle(backup, '2026-10-09').data;
+    expect(here).toMatchObject({ freezes: 0, frozen: ['2026-10-08'] });
+    const once = settle(mergeStreak(here, backup), '2026-10-09').data;
+    expect(once).toMatchObject({ freezes: 0, frozen: ['2026-10-08'] });
+    const twice = settle(mergeStreak(once, backup), '2026-10-09').data;
+    expect(twice).toMatchObject({ freezes: 0, frozen: ['2026-10-08'] });
+  });
+
+  it('brings the backup’s freezes into a fresh browser, and gives back a freeze on a day the other record practised', () => {
+    const before = practise(emptyStreak(), run('2026-10-01', 7));
+    const spent = settle(before, '2026-10-09').data;
+    expect(mergeStreak(emptyStreak(), before).freezes).toBe(1);
+    expect(mergeStreak(emptyStreak(), spent).freezes).toBe(0);
+    // Oct 8, frozen here, was practised in another browser: the day counts as practised and its freeze comes back.
+    const elsewhere = practise(emptyStreak(), ['2026-10-08']);
+    const merged = mergeStreak(spent, elsewhere);
+    expect(merged.frozen).toEqual([]);
+    expect(merged.freezes).toBe(1);
+    expect(mergeStreak(elsewhere, spent).freezes).toBe(1);
+  });
+
+  it('takes the backup’s goal into a browser where no day’s goal has been met and the goal is unchanged', () => {
+    const backup = setGoal(practise(emptyStreak(), ['2026-10-01']), '2026-10-01', 30).data;
+    // Opening the app on the Trade screen already counts a few seconds.
+    const opened = recordActivity(emptyStreak(), '2026-10-18', { activeSeconds: 5 }).data;
+    expect(mergeStreak(opened, backup).goalMinutes).toBe(30);
+    // A goal chosen here is kept.
+    expect(mergeStreak(setGoal(opened, '2026-10-18', 15).data, backup).goalMinutes).toBe(15);
+  });
 });

@@ -1,6 +1,6 @@
 /** Data & Settings: back up what the app keeps in this browser to a file, and restore it. */
 import { useEffect, useState } from 'react';
-import { backupFileName, createBackup, parseBackup, restoreBackup, type BackupContents, type RestoreResult } from '../services/backup';
+import { backupFileName, createBackup, hasSavedSettings, parseBackup, restoreBackup, type BackupContents, type RestoreResult } from '../services/backup';
 import { download } from '../services/download';
 import { useDateHidden } from './useEntryTime';
 import { toast } from '../state/toasts';
@@ -45,7 +45,7 @@ export function BackupCard() {
   useEffect(() => onCsvDatasetsChanged(() => setImported(csvProvider.list().length)), []);
   const [busy, setBusy] = useState<'backup' | 'restore' | null>(null);
   const [chosen, setChosen] = useState<{ name: string; contents: BackupContents } | null>(null);
-  const [withSettings, setWithSettings] = useState(true);
+  const [withSettings, setWithSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [fileBox, setFileBox] = useState(0);
@@ -72,6 +72,8 @@ export function BackupCard() {
     if (!f) return;
     try {
       setChosen({ name: f.name, contents: parseBackup(await f.text()) });
+      // A browser with no settings of its own (a fresh one) usually wants everything back.
+      setWithSettings(!hasSavedSettings());
     } catch (e) {
       setError((e as Error).message);
     }
@@ -97,7 +99,8 @@ export function BackupCard() {
       <h2>Back up and restore</h2>
       <p className="muted small">
         Your journal, challenge history, streak, settings and drawings live only in this browser: clearing its site data deletes them. A backup file keeps a copy you can restore here or in another
-        browser. API keys are never included. Restoring adds what you don't have and keeps what you do: nothing here is deleted.
+        browser. API keys are never included. Restoring adds what you don't have and keeps what you do: nothing here is deleted. Your settings and appearance are replaced only if
+        the box for that is ticked, which it is at first only when this browser has no settings of its own yet.
       </p>
       <div className="row wrap" style={{ gap: 16 }}>
         <label className="check">

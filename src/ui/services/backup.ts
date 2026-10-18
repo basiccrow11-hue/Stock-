@@ -16,9 +16,10 @@ import { sanitizeStreak } from '../../core/streak/streak';
 import { useJournal } from '../state/journalStore';
 import { useChallenges, type ChallengeAttempt } from '../state/challengeStore';
 import { readStreak, restoreStreak } from '../state/streakStore';
-import { useSettings } from '../state/settingsStore';
-import { allDrawings, mergeDrawings, type Drawing } from '../chart/drawings';
-import { csvProvider, saveCsvDataset } from '../state/dataRegistry';
+import { savedSettings, useSettings } from '../state/settingsStore';
+import { allDrawings, mergeDrawings, POINTS_NEEDED, type Drawing } from '../chart/drawings';
+import { TIMEFRAMES } from '../../core/types';
+import { csvProvider, saveCsvDataset, sessionStamped, showStoredCsvDataset } from '../state/dataRegistry';
 
 export const BACKUP_FORMAT = 'stock-replay-backup';
 export const BACKUP_VERSION = 1;
@@ -88,9 +89,22 @@ export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; 
     streak: readStreak(),
     settings,
     drawings: allDrawings(),
-    ...(o.datasets ? { datasets: await stored<CsvDataset>('datasets', () => []) } : {}),
+    // Daily data stored with midnight stamps by an earlier version goes in filed under its session.
+    ...(o.datasets ? { datasets: (await stored<CsvDataset>('datasets', () => [])).map(sessionStamped) } : {}),
   };
   return { backup, heldBack: all.length - journal.length };
+}
+
+/**
+ * Whether this browser has saved settings of its own. A fresh one has none until a setting is
+ * changed or a session started. Storage that cannot be read counts as having them.
+ */
+export function hasSavedSettings(): boolean {
+  try {
+    return localStorage.getItem(SETTINGS_KEY) !== null;
+  } catch {
+    return true;
+  }
 }
 
 export function backupFileName(b: Backup): string {
@@ -127,11 +141,12 @@ function validAttempt(v: unknown): v is ChallengeAttempt {
 }
 
 function validDrawing(v: unknown): v is Drawing {
-  return isObj(v) && isStr(v.id) && isStr(v.type) && isStr(v.color) && Array.isArray(v.points) && v.points.every((p) => isObj(p) && isNum(p.time) && isNum(p.price));
+  if (!isObj(v) || !isStr(v.id) || !isStr(v.type) || !Object.hasOwn(POINTS_NEEDED, v.type) || !isStr(v.color) || !Array.isArray(v.points)) return false;
+  return v.points.length === POINTS_NEEDED[v.type as Drawing['type']] && v.points.every((p) => isObj(p) && isNum(p.time) && isNum(p.price));
 }
 
 function validDataset(v: unknown): v is CsvDataset {
-  if (!isObj(v) || !isStr(v.symbol) || !v.symbol.trim() || !isStr(v.baseTimeframe) || !Array.isArray(v.bars) || !v.bars.length) return false;
+  if (!isObj(v) || !isStr(v.symbol) || !v.symbol.trim() || !TIMEFRAMES.includes(v.baseTimeframe as CsvDataset['baseTimeframe']) || !Array.isArray(v.bars) || !v.bars.length) return false;
   let last = -Infinity;
   for (const b of v.bars as unknown[]) {
     if (!isObj(b) || ![b.time, b.open, b.high, b.low, b.close].every(isNum) || (b.time as number) <= last) return false;
@@ -175,6 +190,8 @@ export function parseBackup(text: string): BackupContents {
       if (sym && good.length) drawings[sym] = good;
     }
   }
+  // Only settings the app can use (savedSettings): a hand-edited file can break nothing.
+  const settings = isObj(raw.settings) ? savedSettings(raw.settings) : {};
   const backup: Backup = {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
@@ -183,7 +200,7 @@ export function parseBackup(text: string): BackupContents {
     snapshots,
     challenges: keep(raw.challenges, validAttempt),
     streak: sanitizeStreak(raw.streak),
-    settings: isObj(raw.settings) ? raw.settings : null,
+    settings: Object.keys(settings).length ? settings : null,
     drawings,
     ...(raw.datasets !== undefined ? { datasets: keep(raw.datasets, validDataset) } : {}),
   };
@@ -214,10 +231,13 @@ export async function restoreBackup(b: Backup, o: { settings: boolean }): Promis
   const datasetsKept: string[] = [];
   for (const d of b.datasets ?? []) {
     const sym = d.symbol.toUpperCase();
-    const here = csvProvider.list().some((x) => x.symbol.toUpperCase() === sym) || (await idb.get('datasets', sym).catch(() => undefined)) !== undefined;
-    if (here) datasetsKept.push(sym);
+    // Decided by storage: what this tab shows is always stored, but a restore that stopped partway
+    // may have stored data this tab does not show yet.
+    const mine = await idb.get<CsvDataset>('datasets', sym).catch(() => undefined);
+    if (mine && csvProvider.list().some((x) => x.symbol.toUpperCase() === sym)) datasetsKept.push(sym);
     else {
-      await saveCsvDataset({ ...d, symbol: sym });
+      if (mine) showStoredCsvDataset(mine);
+      else await saveCsvDataset({ ...d, symbol: sym });
       datasetsAdded.push(sym);
     }
   }
