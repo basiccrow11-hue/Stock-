@@ -81,6 +81,22 @@ type Pointer = { x: number; y: number; pane: number; clientX: number; clientY: n
 /** A chart that was drawn: its symbol, timeframe and session (the session's id, empty for none). */
 type DrawnChart = { symbol: string; timeframe: Timeframe; session: string };
 
+/**
+ * Scroll positions each chart has been given and not yet drawn. lightweight-charts (5.2.1) applies one
+ * on its next frame, and a takeScreenshot before then, after new data, never returns: it draws what is
+ * waiting by merging it into itself, and a scroll position adds to the list it is going through. The
+ * picture of such a chart is drawn off screen instead (see the snapshot provider).
+ */
+const scrollsWaiting = new WeakMap<IChartApi, number>();
+
+/** Scrolls `chart` so its newest candle is `position` candles from the right edge (as of its next frame). */
+function scrollToPosition(chart: IChartApi, position: number): void {
+  chart.timeScale().scrollToPosition(position, false);
+  scrollsWaiting.set(chart, (scrollsWaiting.get(chart) ?? 0) + 1);
+  // Frames run in the order they were asked for, and the chart asked for its own as the scroll came in.
+  requestAnimationFrame(() => scrollsWaiting.set(chart, (scrollsWaiting.get(chart) ?? 1) - 1));
+}
+
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
@@ -354,6 +370,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       if (offNewestRef.current || heldRef.current !== null) return null;
       // Fill markers and order lines follow the store in effects: apply them before the picture.
       flushSync(() => {});
+      // A scroll position the chart has not drawn yet (a chart just switched, or »): its picture now would
+      // never come back (scrollsWaiting), so it is drawn off screen.
+      if (scrollsWaiting.get(chart)) return null;
       return snapshot(chart, el);
     });
     return () => {
@@ -461,7 +480,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const range = shown.session === session?.id ? chartRef.current?.timeScale().getVisibleLogicalRange() : null;
     const fromNewest = range ? windowStartRef.current + range.to - (candlesRef.current.length - 1) : null;
     fullRedraw();
-    if (fromNewest !== null) chartRef.current?.timeScale().scrollToPosition(fromNewest, false);
+    if (fromNewest !== null && chartRef.current) scrollToPosition(chartRef.current, fromNewest);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shift, session?.id]);
 
@@ -739,8 +758,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /** Scrolls to the newest candle, with the usual room after it, keeping the zoom. */
   function toNewest(): void {
     catchUp();
-    const ts = chartRef.current?.timeScale();
-    ts?.scrollToPosition(ts.options().rightOffset, false);
+    const chart = chartRef.current;
+    if (chart) scrollToPosition(chart, chart.timeScale().options().rightOffset);
   }
 
   /** Bring every indicator's values up to date after the candles from index `from` on changed. */
@@ -934,10 +953,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     hoverRef.current = null;
     computeIndicators(0);
     setWindowData();
-    if (drawn && !same) {
+    const api = chartRef.current;
+    if (drawn && !same && api) {
       // A position counted from the newest candle, which the library applies on its next frame.
-      const ts = chartRef.current?.timeScale();
-      ts?.scrollToPosition(edge === null ? ts.options().rightOffset : edge - (candlesRef.current.length - 1), false);
+      scrollToPosition(api, edge === null ? api.timeScale().options().rightOffset : edge - (candlesRef.current.length - 1));
     }
     syncLastDirection();
     syncPercentBase();

@@ -1262,6 +1262,76 @@ describe('the view when the chart is redrawn', () => {
     vi.useRealTimers();
     now.mockRestore();
   }, 60_000);
+
+  it('draws the picture of a trade off screen while the chart has a scroll position still to draw, and from the screen once it has', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { useJournal } = await import('../state/journalStore');
+    const { ChartView } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    const replay = (date: string) =>
+      store.startReplay({ providerId: 'demo', symbol: 'AMZN', date, endDate: '2025-02-28', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 5, timeframe: '1m', speed: 60, blind: false });
+    expect(await replay('2025-02-10')).toBe(true);
+    const a = await mount('AMZN');
+    await frame();
+    const el = a.host.querySelector<HTMLElement>('.chart-canvas')!;
+    Object.defineProperties(el, { clientWidth: { value: 960 }, clientHeight: { value: 480 } });
+    // lightweight-charts' takeScreenshot with a scroll position waiting for its frame, after new data,
+    // never returns (scrollsWaiting): here it throws instead.
+    const ts = a.chart.ts as unknown as { queued: unknown[] };
+    let shots = 0;
+    let hung = 0;
+    Object.assign(a.chart, {
+      takeScreenshot: () => {
+        if (ts.queued.length) {
+          hung++;
+          throw new Error('takeScreenshot with a scroll position waiting would never return');
+        }
+        shots++;
+        const canvas = document.createElement('canvas');
+        canvas.toDataURL = () => 'data:image/jpeg;base64,AA==';
+        return canvas;
+      },
+    });
+    offscreen.drawn.length = 0;
+    useSettings.getState().update({ autoSnapshot: true });
+    /** A round trip closed now: its journal entry, once it is in. */
+    const trade = async () => {
+      act(() => void expect(store.submitOrder({ symbol: 'AMZN', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true));
+      act(() => store.stepForward());
+      act(() => void expect(store.closePosition('AMZN').ok).toBe(true));
+      const id = store.useTrading.getState().session!.id;
+      await vi.waitFor(() => expect(useJournal.getState().entries.filter((e) => e.sessionId === id).length).toBeGreaterThan(0));
+      return useJournal.getState().entries.find((e) => e.sessionId === id)!;
+    };
+
+    // Another session is put on its newest candle by a scroll position, drawn on the next frame. A trade
+    // closed before that frame gets its picture drawn off screen.
+    expect(await replay('2025-02-18')).toBe(true);
+    await act(async () => a.root.render(createElement(ChartView, { symbol: 'AMZN', timeframe: '1m' })));
+    expect(ts.queued.length).toBeGreaterThan(0);
+    act(() => store.stepForward());
+    const before = await trade();
+    expect(hung).toBe(0);
+    expect(shots).toBe(0);
+    expect(offscreen.drawn).toEqual(['AMZN']);
+    expect(before).toMatchObject({ snapshotOffscreen: true });
+    expect(before.snapshotMissing).toBeUndefined();
+
+    // Once it has drawn, the picture is the chart on screen.
+    await frame();
+    await useJournal.getState().removeWhere(() => true);
+    const after = await trade();
+    expect(hung).toBe(0);
+    expect(shots).toBe(1);
+    expect(offscreen.drawn).toEqual(['AMZN']);
+    expect(after.snapshotOffscreen).toBeUndefined();
+    expect(after.snapshotKey).toBeDefined();
+    useSettings.getState().update({ autoSnapshot: false });
+    act(() => a.root.unmount());
+    await store.endSession();
+  }, 30_000);
 });
 
 describe('letting go of the chart', () => {
