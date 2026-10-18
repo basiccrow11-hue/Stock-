@@ -2,7 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { Bar } from '../../core/types';
+import type { Bar, Timeframe } from '../../core/types';
 import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, regularCloseMinute } from '../../core/time';
 
 /**
@@ -985,7 +985,7 @@ describe('the view when the chart is redrawn', () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     await act(async () => root.render(createElement(ChartView, { symbol, timeframe: '1m' })));
-    return { root, chart: lw.charts.at(-1)! };
+    return { root, chart: lw.charts.at(-1)!, host };
   }
   type Shown = Awaited<ReturnType<typeof mount>>;
   /** The times of the candles at the left and right edges of the view. */
@@ -1105,5 +1105,260 @@ describe('the view when the chart is redrawn', () => {
       act(() => a.root.unmount());
       await store.endSession();
     }
+  }, 60_000);
+
+  it('keeps the moment at the right edge through a switch of timeframe or symbol, or the newest candle when that was on screen', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { ChartView, fromChartTime, blindChartShift } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    for (const blind of [false, true]) {
+      const ok = await store.startReplay({
+        providerId: 'demo',
+        symbol: 'AMZN',
+        extraSymbols: ['MSFT'],
+        date: '2025-02-03',
+        endDate: '2025-02-14',
+        startTime: '09:30',
+        endTime: '16:00',
+        startingBalance: 100_000,
+        lookbackDays: 5,
+        timeframe: '1m',
+        speed: 1,
+        blind,
+      });
+      expect(ok).toBe(true);
+      act(() => store.jumpTo(exchangeTimeToUnix('2025-02-05', 11 * 60)));
+      // A blind session's chart shows moved times: the moment kept is the real one.
+      const shift = blind ? blindChartShift(store.useTrading.getState().session!.id) : 0;
+      const a = await mount('AMZN');
+      await frame();
+      const main = () => a.chart.series[0];
+      /** The chart of `symbol` on `timeframe`, as the chart panel shows it once the store has switched. */
+      const show = async (symbol: string, timeframe: Timeframe) => {
+        act(() => {
+          store.setActiveSymbol(symbol);
+          store.setTimeframe(timeframe);
+          a.root.render(createElement(ChartView, { symbol, timeframe }));
+        });
+        await frame();
+      };
+      /** The real time of the candle at the view's right edge. */
+      const right = () => fromChartTime(edges(a)[1]!, shift);
+      /** The real time of the last bar of `symbol` in the 5-minute candle from `t`. */
+      const lastBarIn5m = (symbol: string, t: number) => store.getBaseBars(symbol).filter((b) => b.time >= t && b.time < t + 300).at(-1)!.time;
+      const newestButton = () => a.host.querySelector<HTMLButtonElement>('.chart-newest');
+      const onNewest = () => {
+        expect(a.chart.ts.rightOffset, `${blind}`).toBe(8);
+        expect(newestButton(), `${blind}`).toBeNull();
+      };
+
+      // Scrolled back on the 1m chart: on 5m the right edge is the candle holding that minute, and back on
+      // 1m the last minute of that candle. Nothing moves on the frames after.
+      const n = main().points.length;
+      act(() => a.chart.ts.scrollTo({ from: n - 400, to: n - 300 }));
+      const t1 = right();
+      await show('AMZN', '5m');
+      const t5 = right();
+      expect(t1 - t5, `${blind}`).toBeGreaterThanOrEqual(0);
+      expect(t1 - t5, `${blind}`).toBeLessThan(300);
+      await frame();
+      expect(right()).toBe(t5);
+      expect(newestButton()).not.toBeNull();
+      await show('AMZN', '1m');
+      expect(right(), `${blind}`).toBe(lastBarIn5m('AMZN', t5));
+      // Another symbol of the session keeps the moment too.
+      await show('MSFT', '1m');
+      expect(right(), `${blind}`).toBe(lastBarIn5m('MSFT', t5));
+      await frame();
+      expect(right()).toBe(lastBarIn5m('MSFT', t5));
+      // An hourly chart, months of history back: on 5m, which begins later, the view starts at its first candle.
+      await show('AMZN', '1h');
+      await vi.waitFor(() => expect(main().points.length).toBeGreaterThan(1000));
+      act(() => a.chart.ts.scrollTo({ from: 200, to: 300 }));
+      await show('AMZN', '5m');
+      expect(edges(a), `${blind}`).toEqual([main().points[0].time, main().points[100].time]);
+      expect(fromChartTime(main().points[0].time, shift)).toBe(store.candleStarts('AMZN', '5m')(store.getBaseBars('AMZN')[0].time));
+
+      // On the newest candle, or within a candle of it, a switch stays on the newest.
+      act(() => newestButton()!.click());
+      await frame();
+      onNewest();
+      await show('MSFT', '15m');
+      onNewest();
+      expect(fromChartTime(main().points.at(-1)!.time, shift)).toBe(store.candleStarts('MSFT', '15m')(store.getBaseBars('MSFT').at(-1)!.time));
+      // The newest minute, 11:00, begins a 5-minute candle; the view ends on the minute before it.
+      await show('AMZN', '1m');
+      act(() => store.stepForward());
+      expect(store.getBaseBars('AMZN').at(-1)!.time).toBe(exchangeTimeToUnix('2025-02-05', 11 * 60));
+      const m = main().points.length;
+      act(() => a.chart.ts.scrollTo({ from: m - 102, to: m - 2 }));
+      await show('AMZN', '5m');
+      onNewest();
+      store.setTimeframe('1m');
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+  }, 60_000);
+
+  it('opens a new session on its newest candle however far back the last one was scrolled, and play moves it on', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { ChartView, toChartTime, blindChartShift } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    const replay = (symbol: string, date: string, blind: boolean) =>
+      store.startReplay({ providerId: 'demo', symbol, date, endDate: '2025-02-28', startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 5, timeframe: '1m', speed: 23_400, blind });
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    /** Each way to a new session, given the way to show the chart the store now has, as the chart panel does. */
+    const variants: [string, boolean, (show: () => Promise<void>) => Promise<boolean>][] = [
+      ['a replay of the same symbol', false, () => replay('AMZN', '2025-02-18', false)],
+      ['a replay of another symbol', false, () => replay('MSFT', '2025-02-18', false)],
+      ['a blind replay after a blind one', true, () => replay('AMZN', '2025-02-18', true)],
+      ['the simulated market', false, () => store.startSim({ config: { seed: 5 }, startingBalance: 100_000, speed: 300 })],
+      // An empty chart in between.
+      ['a replay once the last session has ended', false, async (show) => (await store.endSession(), await show(), await frame(), replay('AMZN', '2025-02-18', false))],
+    ];
+    for (const [what, blind, start] of variants) {
+      expect(await replay('AMZN', '2025-02-10', blind), what).toBe(true);
+      const a = await mount('AMZN');
+      await frame();
+      const main = a.chart.series[0];
+      const show = async () => {
+        const { activeSymbol: symbol, timeframe } = store.useTrading.getState();
+        await act(async () => a.root.render(createElement(ChartView, { symbol, timeframe })));
+      };
+      const n = main.points.length;
+      act(() => a.chart.ts.scrollTo({ from: n - 1100, to: n - 1000 }));
+      await frame();
+
+      expect(await start(show), what).toBe(true);
+      await show();
+      await frame();
+      const { activeSymbol: symbol, session } = store.useTrading.getState();
+      const shift = session!.blind ? blindChartShift(session!.id) : 0;
+      const newest = () => toChartTime(store.getBaseBars(symbol).at(-1)!.time, shift);
+      expect(a.chart.ts.rightOffset, what).toBe(8);
+      expect(main.points.at(-1)!.time, what).toBe(newest());
+      expect(a.host.querySelector('.chart-newest'), what).toBeNull();
+      // Play moves the chart on with the newest candle: none is held back.
+      const before = main.points.at(-1)!.time;
+      act(() => store.play());
+      act(() => {
+        clock += 1000;
+        vi.advanceTimersByTime(50);
+      });
+      act(() => store.pause());
+      await frame();
+      expect(main.points.at(-1)!.time, what).toBeGreaterThan(before);
+      expect(main.points.at(-1)!.time, what).toBe(newest());
+      expect(a.chart.ts.rightOffset, what).toBe(8);
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+    vi.useRealTimers();
+    now.mockRestore();
+  }, 60_000);
+});
+
+describe('letting go of the chart', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('hands over the candles held back only once no finger or button is on the chart: not when one finger of a pinch lifts', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { ChartView, toChartTime } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    // The chart's frames come only when one is let go by (none is needed here).
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    const ok = await store.startReplay({
+      providerId: 'demo',
+      symbol: 'AMZN',
+      date: '2025-02-03',
+      endDate: '2025-02-14',
+      startTime: '09:30',
+      endTime: '16:00',
+      startingBalance: 100_000,
+      lookbackDays: 5,
+      timeframe: '1m',
+      speed: 1,
+      blind: false,
+    });
+    expect(ok).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const r = createRoot(host);
+    await act(async () => r.render(createElement(ChartView, { symbol: 'AMZN', timeframe: '1m' })));
+    const chart = lw.charts.at(-1)!;
+    const main = chart.series[0];
+    const newest = () => toChartTime(store.getBaseBars('AMZN').at(-1)!.time);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    /** The view rests for longer than the catch-up delay. */
+    const rest = () => act(() => void vi.advanceTimersByTime(300));
+    const pointer = (type: string, pointerId: number, buttons = 0, target: EventTarget = window) =>
+      act(() => void target.dispatchEvent(new PointerEvent(type, { pointerId, buttons, bubbles: true })));
+    /** Scrolled far back, play adds 150 candles: the chart holds them back. Then the user brings the view to within 500 candles of the newest it holds. */
+    const holdThenComeBack = () => {
+      const n = main.points.length;
+      act(() => chart.ts.scrollTo({ from: n - 1100, to: n - 1000 }));
+      for (let i = 0; i < 150; i++) act(() => store.stepForward());
+      expect(main.points.length).toBe(n);
+      return n;
+    };
+    const comeBack = (n: number) => act(() => chart.ts.scrollTo({ from: n - 400, to: n - 300 }));
+
+    // Two fingers go down and pinch the view to within 500 candles of the newest the chart holds.
+    let n = holdThenComeBack();
+    pointer('pointerdown', 1, 1, chart.canvas);
+    pointer('pointerdown', 2, 1, chart.canvas);
+    comeBack(n);
+    rest();
+    expect(main.points.length).toBe(n);
+    // The second finger lifts; the first pans on, then rests on the chart: nothing is handed over.
+    pointer('pointerup', 2);
+    pointer('pointermove', 1, 1, chart.canvas);
+    act(() => chart.ts.scrollTo({ from: n - 390, to: n - 290 }));
+    rest();
+    expect(main.points.length).toBe(n);
+    // The last finger lifts: the chart takes the candles once the view rests.
+    pointer('pointerup', 1);
+    rest();
+    expect(main.points.length).toBe(n + 150);
+    expect(main.points.at(-1)!.time).toBe(newest());
+
+    // A finger the browser takes over (pointercancel) is off the chart; a button still down keeps the
+    // candles back until a move over the chart shows it is not (it was let go outside the window).
+    n = holdThenComeBack();
+    pointer('pointerdown', 3, 1, chart.canvas);
+    pointer('pointerdown', 4, 1, chart.canvas);
+    comeBack(n);
+    pointer('pointercancel', 4);
+    rest();
+    expect(main.points.length).toBe(n);
+    pointer('pointermove', 3, 0, chart.canvas);
+    rest();
+    expect(main.points.length).toBe(n + 150);
+
+    // The window losing focus lets go of every pointer.
+    n = holdThenComeBack();
+    pointer('pointerdown', 5, 1, chart.canvas);
+    pointer('pointerdown', 6, 1, chart.canvas);
+    comeBack(n);
+    rest();
+    expect(main.points.length).toBe(n);
+    act(() => void window.dispatchEvent(new FocusEvent('blur')));
+    rest();
+    expect(main.points.length).toBe(n + 150);
+
+    vi.useRealTimers();
+    act(() => r.unmount());
+    await store.endSession();
   }, 60_000);
 });
