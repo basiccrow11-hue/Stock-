@@ -191,13 +191,15 @@ export const CHALLENGES: ChallengeDefinition[] = [
           plannedRR(t),
         );
         const marks = ctx.ownRuleMarks?.get(t.id);
-        const brokeOwn = own.filter((rule) => marks?.[rule] === false);
+        // Only a mark of its own: a rule worded like a name every object has ("constructor") is unmarked until marked.
+        const marked = (rule: string) => (marks && Object.hasOwn(marks, rule) ? marks[rule] : undefined);
+        const brokeOwn = own.filter((rule) => marked(rule) === false);
         if (!followedAllRules(checks) || brokeOwn.length) {
           const broken = [...checks.filter((c) => c.passed === false).map((c) => c.rule), ...brokeOwn].join(', ');
           return { status: 'failed', progress: 0, detail: `Rule broken on a ${t.symbol} trade: ${broken}.` };
         }
         if (own.length && ctx.deletedEntries?.has(t.id)) deleted++;
-        else if (own.some((rule) => marks?.[rule] === undefined)) unmarked++;
+        else if (own.some((rule) => marked(rule) === undefined)) unmarked++;
       }
       const counted = closed.length - unmarked - deleted;
       if (counted >= 20) return { status: 'passed', progress: 1, detail: '20 trades, every rule followed.' };

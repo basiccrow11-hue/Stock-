@@ -101,7 +101,8 @@ export interface TradingSnapshot {
   pickedPrice: { field: string; price: number; seq: number } | null;
   /**
    * After a reload, the session this tab was running, until resumeAfterReload has carried it on or found
-   * that it cannot: meanwhile it is not offered to resume or discard, since the reload carries it on itself.
+   * that it cannot (or, sooner, the app has found it is no longer kept): meanwhile it is not offered to
+   * resume or discard, since the reload carries it on itself.
    */
   carryingOn: string | null;
 }
@@ -198,7 +199,7 @@ const eng: Engines = {
 export const REPLAY_SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 23400];
 export const SIM_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300];
 
-/** What starting or ending a session resets: not carryingOn, which only resumeAfterReload settles. */
+/** What starting or ending a session resets: not carryingOn, which only the reload settles. */
 const EMPTY: Omit<TradingSnapshot, 'carryingOn'> = {
   session: null,
   activeSymbol: 'SPY',
@@ -229,6 +230,22 @@ const EMPTY: Omit<TradingSnapshot, 'carryingOn'> = {
 };
 
 export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY, carryingOn: tabSession() }));
+
+// As the app opens: a session this tab was running that is no longer kept at all (it ended, or was
+// discarded) cannot come back, which is known before the journal and imported data are in. One kept
+// but held by another tab still waits for resumeAfterReload: just after a reload, the page before may
+// not have let go of it yet.
+if (typeof window !== 'undefined') {
+  const id = tabSession();
+  if (id)
+    void keptSessions()
+      .then((kept) => {
+        if (kept.some((k) => k.id === id) || useTrading.getState().carryingOn !== id) return;
+        if (tabSession() === id) rememberTabSession(null);
+        useTrading.setState({ carryingOn: null });
+      })
+      .catch(() => undefined);
+}
 
 // Other open tabs keep this tab's running blind session's dates hidden too (they share the journal).
 useTrading.subscribe((s, prev) => {
@@ -972,6 +989,8 @@ export async function discardSession(id: string): Promise<boolean> {
     saving = saving.then(() => deleteSession(id)).catch(() => undefined);
     await saving;
     setSavedBlind(id, null);
+    // Nothing is left of it for a reload of this tab to carry on.
+    if (tabSession() === id) rememberTabSession(null);
   } finally {
     releaseSession(id);
   }

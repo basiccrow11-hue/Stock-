@@ -38,7 +38,9 @@ export const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
  *  - DEMO: synthetic bars bundled with the app so it works offline. Not real prices.
  *  - SIMULATED: the fictional, continuously generated market
  */
-export type DataSourceKind = 'LIVE' | 'HISTORICAL' | 'DEMO' | 'SIMULATED';
+export type DataSourceKind = (typeof DATA_SOURCE_KINDS)[number];
+/** Every kind of data source, so one read from a file can be checked. */
+export const DATA_SOURCE_KINDS = ['LIVE', 'HISTORICAL', 'DEMO', 'SIMULATED'] as const;
 
 export type Side = 'buy' | 'sell';
 /** The four user-facing actions. buy/sell act on longs, short/cover on shorts. */

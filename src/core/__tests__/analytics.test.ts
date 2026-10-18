@@ -2556,6 +2556,16 @@ describe('your own rules', () => {
     expect(evaluateChallenge(rulesChallenge, { ...ctx(trips), rules: { ...rules, custom: [] }, deletedEntries: deleted }).status).toBe('passed');
   });
 
+  it('wait for their marks in the rules challenge whatever they are called, even a name every object has', () => {
+    const odd = ['constructor', 'toString', '__proto__'];
+    const withOdd = (marks: Map<string, Record<string, boolean>>) => ({ ...ctx(trips, marks), rules: { ...rules, custom: odd } });
+    expect(evaluateChallenge(rulesChallenge, withOdd(new Map(trips.map((t) => [t.id, {}]))))).toMatchObject({ status: 'in_progress', progress: 0 });
+    const marks = new Map(trips.map((t) => [t.id, Object.fromEntries(odd.map((r) => [r, true]))]));
+    expect(evaluateChallenge(rulesChallenge, withOdd(marks)).status).toBe('passed');
+    marks.set(trips[4].id, Object.fromEntries(odd.map((r) => [r, r !== 'constructor'])));
+    expect(evaluateChallenge(rulesChallenge, withOdd(marks))).toMatchObject({ status: 'failed', detail: 'Rule broken on a T trade: constructor.' });
+  });
+
   it('are the ones the challenge started with: a mark on a rule added since does not count', () => {
     const marks = new Map(trips.map((t) => [t.id, { ...followed, 'Added later': false }]));
     expect(evaluateChallenge(rulesChallenge, ctx(trips, marks)).status).toBe('passed');

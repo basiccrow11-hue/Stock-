@@ -517,27 +517,29 @@ describe('a hand-edited or foreign backup', () => {
     expect(page).toContain('Attempt a1 broke a rule.');
   });
 
+  /** A trade review as the journal keeps one. */
+  const review = {
+    tripId: 't-r1',
+    outcome: 'win',
+    exitReason: 'manual',
+    rMultiple: 1.5,
+    plannedRR: null,
+    mfe: { perShare: 1, dollars: 10, pct: 1, r: 1.5 },
+    mae: { perShare: 0, dollars: 0, pct: 0, r: 0 },
+    capturePct: 100,
+    riskDollars: 6.67,
+    riskPctOfEquity: 0.03,
+    equityAtEntry: 25_000,
+    atrAtEntry: null,
+    stopDistanceAtr: null,
+    targetDistanceAtr: null,
+    afterExit: null,
+    findings: [{ tone: 'good', title: 'Kept the gain', detail: 'You kept all of it.' }],
+    rules: [{ rule: 'Use a stop', passed: true, detail: 'It had one.' }],
+  };
+
   it('skips journal entries and imported data that a screen could not show', async () => {
     const a = await app();
-    const review = {
-      tripId: 't-r1',
-      outcome: 'win',
-      exitReason: 'manual',
-      rMultiple: 1.5,
-      plannedRR: null,
-      mfe: { perShare: 1, dollars: 10, pct: 1, r: 1.5 },
-      mae: { perShare: 0, dollars: 0, pct: 0, r: 0 },
-      capturePct: 100,
-      riskDollars: 6.67,
-      riskPctOfEquity: 0.03,
-      equityAtEntry: 25_000,
-      atrAtEntry: null,
-      stopDistanceAtr: null,
-      targetDistanceAtr: null,
-      afterExit: null,
-      findings: [{ tone: 'good', title: 'Kept the gain', detail: 'You kept all of it.' }],
-      rules: [{ rule: 'Use a stop', passed: true, detail: 'It had one.' }],
-    };
     const ds = (symbol: string, over: Partial<Record<keyof CsvDataset, unknown>> = {}) => ({ ...dataset, symbol, name: symbol, ...over });
     const { backup, skipped } = a.parseBackup(
       JSON.stringify({
@@ -583,6 +585,85 @@ describe('a hand-edited or foreign backup', () => {
     expect(await shown(createElement(SettingsPage))).toContain('acme.csv');
     const { SessionSetup } = await import('../components/SessionSetup');
     expect(await shown(createElement(SessionSetup, { mode: 'replay', onClose: () => undefined }))).not.toContain(STOPPED);
+  });
+
+  it('skips entries and attempts whose data source, exit reason or missing snapshot the app does not know, and keeps every one it ever wrote', async () => {
+    const a = await app();
+    const known = [
+      entry('demo'),
+      entry('historical', { source: 'HISTORICAL' }),
+      entry('simulated', { source: 'SIMULATED', mode: 'sim' }),
+      entry('live', { source: 'LIVE' }),
+      ...['stop_loss', 'take_profit', 'manual', 'session_end', 'other'].map((r) => entry(`exit-${r}`, { review: { ...review, exitReason: r } as never })),
+      entry('shot-off', { snapshotMissing: 'off' }),
+      entry('shot-failed', { snapshotMissing: 'failed' }),
+    ];
+    const { backup, skipped } = a.parseBackup(
+      JSON.stringify({
+        format: 'stock-replay-backup',
+        version: 1,
+        createdAt: 1,
+        journal: [
+          ...known,
+          entry('proto', { source: '__proto__' as never }),
+          entry('foo', { source: 'FOO' as never }),
+          entry('exit-proto', { review: { ...review, exitReason: '__proto__' } as never }),
+          entry('exit-foo', { review: { ...review, exitReason: 'stop' } as never }),
+          entry('shot-proto', { snapshotMissing: '__proto__' as never }),
+        ],
+        challenges: [
+          attempt('a1'),
+          { ...attempt('a2'), source: 'HISTORICAL' },
+          { ...attempt('a3'), startedAt: Date.UTC(2026, 9, 10) },
+          { ...attempt('a4'), source: '__proto__' },
+          { ...attempt('a5'), source: 'FOO' },
+          { ...attempt('a6'), startedAt: 1e20 },
+          { ...attempt('a7'), startedAt: '2026-10-10' },
+        ],
+      }),
+    );
+    expect(backup.journal.map((e) => e.id)).toEqual(known.map((e) => e.id));
+    expect(backup.challenges.map((x) => x.id)).toEqual(['a1', 'a2', 'a3']);
+    expect(skipped).toBe(9);
+    expect(await a.restoreBackup(backup, { settings: false })).toMatchObject({ journalAdded: known.length, challengesAdded: 3 });
+    const { JournalPage } = await import('../pages/JournalPage');
+    expect(await shown(createElement(JournalPage, { focusId: 'exit-session_end' }))).toContain('Session ended');
+    const { AnalyticsPage } = await import('../pages/AnalyticsPage');
+    expect(await shown(createElement(AnalyticsPage))).not.toContain(STOPPED);
+    const { ChallengesPage } = await import('../pages/ChallengesPage');
+    expect(await shown(createElement(ChallengesPage, { onStart: () => undefined }))).not.toContain(STOPPED);
+  });
+
+  it('shows entries already stored with a data source, exit reason or missing snapshot the app does not know, as written', async () => {
+    const stored = [
+      entry('j1'),
+      entry('proto', { source: '__proto__' as never }),
+      entry('ctor', { source: 'constructor' as never }),
+      entry('exit-proto', { review: { ...review, exitReason: '__proto__' } as never }),
+      entry('exit-tostring', { review: { ...review, exitReason: 'toString' } as never }),
+      entry('shot-proto', { snapshotMissing: '__proto__' as never }),
+    ];
+    db.stores.set('journal', new Map(stored.map((e) => [e.id, e])));
+    db.stores.set('challenges', new Map<string, unknown>([['a1', { ...attempt('a1'), source: '__proto__' }], ['a2', { ...attempt('a2'), startedAt: 1e20 }], ['a3', { ...attempt('a3'), source: 'SIMULATED' }]]));
+    const a = await app();
+    expect(a.useJournal.getState().entries).toHaveLength(stored.length);
+    const { JournalPage } = await import('../pages/JournalPage');
+    for (const e of stored) expect(await shown(createElement(JournalPage, { focusId: e.id }))).not.toContain(STOPPED);
+    expect(await shown(createElement(JournalPage, { focusId: 'ctor' }))).toContain('constructor');
+    expect(await shown(createElement(JournalPage, { focusId: 'exit-proto' }))).toContain('Exit reason__proto__');
+    expect(await shown(createElement(JournalPage, { focusId: 'exit-tostring' }))).toContain('Exit reasontoString');
+    expect(await shown(createElement(JournalPage, { focusId: 'shot-proto' }))).toContain('No chart snapshot.');
+    const { AnalyticsPage } = await import('../pages/AnalyticsPage');
+    const analytics = await shown(createElement(AnalyticsPage));
+    expect(analytics).not.toContain(STOPPED);
+    expect(analytics).toContain('Their prices are synthetic, unknown and unknown');
+    const byExit = analytics.slice(analytics.indexOf('By exit reason'));
+    expect(byExit).toContain('__proto__');
+    expect(byExit).toContain('toString');
+    // An attempt the Challenges page could not show is left out as it loads.
+    expect(a.useChallenges.getState().attempts.map((x) => x.id)).toEqual(['a3']);
+    const { ChallengesPage } = await import('../pages/ChallengesPage');
+    expect(await shown(createElement(ChallengesPage, { onStart: () => undefined }))).not.toContain(STOPPED);
   });
 
   it('leaves out an attempt stored before such files were checked, and takes a good copy of it from a later restore', async () => {

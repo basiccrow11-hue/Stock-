@@ -19,7 +19,8 @@ import { useChallenges, validAttempt, type ChallengeAttempt } from '../state/cha
 import { readStreak, restoreStreak } from '../state/streakStore';
 import { savedSettings, useSettings } from '../state/settingsStore';
 import { allDrawings, mergeDrawings, readDrawing, type Drawing } from '../chart/drawings';
-import { TIMEFRAMES } from '../../core/types';
+import { DATA_SOURCE_KINDS, TIMEFRAMES, type DataSourceKind } from '../../core/types';
+import { EXIT_REASONS, type ExitReason } from '../../core/learning/review';
 import { isCalendarTime } from '../../core/time';
 import { csvProvider, saveCsvDataset, sessionStamped, showStoredCsvDataset } from '../state/dataRegistry';
 
@@ -132,7 +133,9 @@ function validEntry(v: unknown): v is JournalEntry {
   if (![e.id, e.sessionId, e.symbol, e.tag].every(isStr)) return false;
   if (e.direction !== 'long' && e.direction !== 'short') return false;
   if (e.mode !== 'replay' && e.mode !== 'sim') return false;
-  if (!isStr(e.source)) return false;
+  // Shown in the app's own words for it (DEMO DATA · SYNTHETIC, say): one the app knows.
+  if (!DATA_SOURCE_KINDS.includes(e.source as DataSourceKind)) return false;
+  if (e.snapshotMissing !== undefined && e.snapshotMissing !== 'off' && e.snapshotMissing !== 'failed') return false;
   if (![e.avgEntry, e.avgExit, e.quantity, e.pnl, e.returnPct, e.holdingSeconds, e.commission, e.createdAt].every(isNum)) return false;
   // Shown as dates: in a year the calendar has.
   if (![e.entryTime, e.exitTime].every(isCalendarTime)) return false;
@@ -147,7 +150,7 @@ function validEntry(v: unknown): v is JournalEntry {
 
 /** Whether `v` has what the trade review shows: its figures numbers (or none), its findings and rule checks text. */
 function validReview(v: unknown): boolean {
-  if (!isObj(v) || !isStr(v.exitReason) || !isObj(v.mfe) || !isObj(v.mae)) return false;
+  if (!isObj(v) || !EXIT_REASONS.includes(v.exitReason as ExitReason) || !isObj(v.mfe) || !isObj(v.mae)) return false;
   if (![v.rMultiple, v.plannedRR, v.capturePct, v.riskDollars, v.riskPctOfEquity, v.atrAtEntry, v.stopDistanceAtr, v.mfe.r, v.mae.r].every(numOrNull)) return false;
   if (!(v.riskLimitPct === undefined || isNum(v.riskLimitPct)) || !(v.largestRiskPct === undefined || numOrNull(v.largestRiskPct))) return false;
   if (!Array.isArray(v.findings) || !v.findings.every((f) => isObj(f) && [f.tone, f.title, f.detail].every(isStr))) return false;

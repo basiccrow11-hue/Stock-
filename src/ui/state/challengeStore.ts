@@ -3,7 +3,8 @@ import { create } from 'zustand';
 import { idb } from '../services/idb';
 import type { ChallengeResult } from '../../core/challenges/challenges';
 import type { TradingRules } from '../../core/learning/review';
-import type { DataSourceKind } from '../../core/types';
+import { DATA_SOURCE_KINDS, type DataSourceKind } from '../../core/types';
+import { isCalendarTime } from '../../core/time';
 
 export interface ChallengeAttempt {
   id: string;
@@ -25,11 +26,12 @@ const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFin
 
 /**
  * Whether `v` is an attempt the Challenges page can show (one stored here, or read from a backup file):
- * its result's status and detail are text, whether it counts is a yes or no, and its progress, if it has
- * one, is a number.
+ * it started in a year the calendar has, its data source, if it says, is one the app knows, its result's
+ * status and detail are text, whether it counts is a yes or no, and its progress, if it has one, is a number.
  */
 export function validAttempt(v: unknown): v is ChallengeAttempt {
-  if (!isObj(v) || ![v.id, v.challengeId, v.sessionId, v.label].every(isStr) || !isNum(v.startedAt) || !isObj(v.result)) return false;
+  if (!isObj(v) || ![v.id, v.challengeId, v.sessionId, v.label].every(isStr) || !isNum(v.startedAt) || !isCalendarTime(v.startedAt / 1000) || !isObj(v.result)) return false;
+  if (v.source !== undefined && !DATA_SOURCE_KINDS.includes(v.source as DataSourceKind)) return false;
   const r = v.result;
   return isStr(r.status) && isStr(r.detail) && typeof r.official === 'boolean' && (r.progress === undefined || isNum(r.progress));
 }

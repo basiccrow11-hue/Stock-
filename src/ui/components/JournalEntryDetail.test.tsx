@@ -178,6 +178,49 @@ describe('your own rules on a trade review', () => {
     act(() => root.unmount());
   });
 
+  it('are marked whatever they are called, even a name every object has', async () => {
+    const { reviewTrade, DEFAULT_TRADING_RULES } = await import('../../core/learning/review');
+    const t = 1_700_000_000;
+    const trip = {
+      ...{ id: 'r3', symbol: 'AAPL', direction: 'long' as const, entryTime: t, exitTime: t + 600, maxQuantity: 10, avgEntry: 100, avgExit: 101, entryQtyTotal: 10, exitQtyTotal: 10 },
+      ...{ pnl: 10, commission: 0, initialStop: 99, initialTarget: 102, highWhileOpen: 101, lowWhileOpen: 99.5, fills: [], closed: true, source: 'DEMO' as const },
+    };
+    const rules = { ...DEFAULT_TRADING_RULES, custom: ['constructor', '__proto__'] };
+    const review = reviewTrade({ trip, fills: [], orders: [], revealedBars: [], timeframe: '1m', equityCurve: [], startingBalance: 25_000, allTrips: [trip], rules });
+    db.set('r3', {
+      ...{ id: 'r3', sessionId: 's1', mode: 'replay', source: 'DEMO', symbol: 'AAPL', direction: 'long', entryTime: t, exitTime: t + 600, stopLoss: 99, takeProfit: 102 },
+      ...{ avgEntry: 100, avgExit: 101, quantity: 10, pnl: 10, returnPct: 1, holdingSeconds: 600, commission: 0, rewound: false, createdAt: 1 },
+      ...{ tag: '', notes: { ...EMPTY_NOTES }, trip, review, ruleChecks: {} },
+    });
+    vi.resetModules();
+    const { JournalEntryDetail } = await import('./JournalEntryDetail');
+    const { useJournal } = await import('../state/journalStore');
+    await useJournal.getState().load();
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const render = () => root.render(createElement(JournalEntryDetail, { entry: useJournal.getState().entries[0] }));
+    act(render);
+    const unsub = useJournal.subscribe(() => act(render));
+    const group = (rule: string) => host.querySelector<HTMLElement>(`[role="group"][aria-label="Did you follow your rule “${rule}”?"]`)!;
+    const mark = (rule: string) => group(rule).closest('.rule-row')!.firstElementChild!.textContent;
+    const stored = () => JSON.stringify((db.get('r3') as JournalEntry).ruleChecks);
+
+    expect(mark('constructor')).toBe('–');
+    expect(mark('__proto__')).toBe('–');
+    act(() => [...group('__proto__').querySelectorAll('button')].find((b) => b.textContent === 'Followed')!.click());
+    await settle();
+    expect(stored()).toBe('{"__proto__":true}');
+    expect(mark('__proto__')).toBe('✓');
+    expect(mark('constructor')).toBe('–');
+    act(() => [...group('__proto__').querySelectorAll('button')].find((b) => b.textContent === 'Followed')!.click());
+    await settle();
+    expect(stored()).toBe('{}');
+    expect(mark('__proto__')).toBe('–');
+    unsub();
+    act(() => root.unmount());
+  });
+
   it('are buttons at least 24 px tall with rows apart, and fingertip-sized on touch screens', () => {
     const style = document.createElement('style');
     style.textContent = readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');

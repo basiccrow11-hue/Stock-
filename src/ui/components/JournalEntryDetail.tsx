@@ -215,7 +215,7 @@ export function JournalEntryDetail({
         </figure>
       )}
       {snapshot === null && <p className="small muted">{SNAPSHOT_NOT_HERE}</p>}
-      {!entry.snapshotKey && entry.snapshotMissing && <p className="small muted">{NO_SNAPSHOT[entry.snapshotMissing]}</p>}
+      {!entry.snapshotKey && entry.snapshotMissing && <p className="small muted">{Object.hasOwn(NO_SNAPSHOT, entry.snapshotMissing) ? NO_SNAPSHOT[entry.snapshotMissing] : 'No chart snapshot.'}</p>}
 
       {showReview && r && (
         <ReviewView
@@ -255,7 +255,7 @@ function ReviewView({
         <span className="small muted">Explains what happened. It does not tell you what to trade next.</span>
       </div>
       <div className="stat-grid">
-        <Stat k="Exit reason" v={EXIT_LABEL[r.exitReason] ?? r.exitReason} />
+        <Stat k="Exit reason" v={Object.hasOwn(EXIT_LABEL, r.exitReason) ? EXIT_LABEL[r.exitReason] : r.exitReason} />
         <Stat k="Max favorable (MFE)" v={`${signedMoney(r.mfe.dollars)}${r.mfe.r !== null ? ` · ${r.mfe.r.toFixed(2)}R` : ''}`} cls="pos" />
         <Stat k="Max adverse (MAE)" v={`${signedMoney(-Math.abs(r.mae.dollars))}${r.mae.r !== null ? ` · ${r.mae.r.toFixed(2)}R` : ''}`} cls="neg" />
         <Stat k="Kept of best open profit" v={r.capturePct !== null ? `${r.capturePct.toFixed(0)}%` : '—'} />
@@ -288,7 +288,7 @@ function ReviewView({
           <h4 style={{ marginBottom: 6 }}>Your rules</h4>
           {r.rules.map((c, i) => {
             // Your own rules: the app cannot check them, so you say whether you followed them.
-            const passed = c.own ? (checks?.[c.rule] ?? null) : c.passed;
+            const passed = c.own ? (checks && Object.hasOwn(checks, c.rule) ? checks[c.rule] : null) : c.passed;
             return (
               <div key={i} className="rule-row">
                 <span className={passed === null ? 'muted' : passed ? 'success' : 'error'}>{passed === null ? '–' : passed ? '✓' : '✗'}</span>

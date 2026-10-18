@@ -252,12 +252,11 @@ export const useJournal = create<JournalStore>()((set, get) => ({
   updateRuleCheck: async (id, rule, followed) => {
     const entry = get().entries.find((e) => e.id === id);
     if (!entry) return;
-    // Only this rule's mark: another tab may have marked the others.
+    // Only this rule's mark: another tab may have marked the others. Each is the rule's own entry, whatever
+    // it is called (`checks[rule] = …` would not store one for a rule called "__proto__").
     const mark = (e: JournalEntry): JournalEntry => {
-      const checks = { ...e.ruleChecks };
-      if (followed === null) delete checks[rule];
-      else checks[rule] = followed;
-      return { ...e, ruleChecks: checks };
+      const others = Object.fromEntries(Object.entries(e.ruleChecks ?? {}).filter(([r]) => r !== rule));
+      return { ...e, ruleChecks: followed === null ? others : { ...others, [rule]: followed } };
     };
     await write(id, entry, mark(entry), mark);
   },

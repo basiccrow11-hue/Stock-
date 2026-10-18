@@ -6,6 +6,7 @@ import { useSettings } from '../state/settingsStore';
 import { computeStats, rMultiple, type PerformanceStats } from '../../core/analytics/stats';
 import type { DataSourceKind, EquityPoint, RoundTrip } from '../../core/types';
 import type { JournalEntry } from '../../core/journal';
+import type { ExitReason } from '../../core/learning/review';
 import { EmptyState, SourceBadge, Stat } from '../components/common';
 import { useDateHidden } from '../components/useEntryTime';
 import { LineChart, type LineSpec } from '../chart/LineChart';
@@ -177,7 +178,7 @@ function SourceMix({ entries, base }: { entries: JournalEntry[]; base: number })
           {badges}
         </div>
         <span>
-          Their prices are {listed(sources.map((s) => PRICE_KIND[s] ?? 'unknown'))}, so the curve and the numbers below mix them. The table shows each source on its own; choose one under Data source to see only it.
+          Their prices are {listed(sources.map((s) => (Object.hasOwn(PRICE_KIND, s) ? PRICE_KIND[s] : 'unknown')))}, so the curve and the numbers below mix them. The table shows each source on its own; choose one under Data source to see only it.
         </span>
       </div>
       <div>
@@ -250,6 +251,14 @@ function RHistogram({ entries }: { entries: JournalEntry[] }) {
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const EXIT_GROUP: Record<ExitReason, string> = { stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual', session_end: 'Session ended', other: 'Other' };
+
+/** Why a trade closed, as the breakdown names it: a reason the app does not know (on an entry restored from a file edited by hand) as written. */
+function exitGroup(e: JournalEntry): string {
+  const reason = e.review?.exitReason ?? 'other';
+  return Object.hasOwn(EXIT_GROUP, reason) ? EXIT_GROUP[reason] : reason;
+}
 
 export function AnalyticsPage() {
   const entries = useJournal((s) => s.entries);
@@ -364,7 +373,7 @@ export function AnalyticsPage() {
                 }).sort((a, b) => a.key.localeCompare(b.key))}
               />
               <Breakdown title="By weekday" groups={groupBy(filtered, (e) => (dateHidden(e) ? 'Blind session (hidden)' : WEEKDAYS[weekdayOf(exchangeDate(e.entryTime))]))} />
-              <Breakdown title="By exit reason" groups={groupBy(filtered, (e) => ({ stop_loss: 'Stop loss', take_profit: 'Take profit', manual: 'Manual', session_end: 'Session ended', other: 'Other' })[e.review?.exitReason ?? 'other'])} />
+              <Breakdown title="By exit reason" groups={groupBy(filtered, exitGroup)} />
             </div>
           </>
         )}

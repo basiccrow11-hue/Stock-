@@ -200,10 +200,12 @@ export const SOURCE_EXPLAIN: Record<DataSourceKind, string> = {
 };
 
 export function SourceBadge({ source, title }: { source: DataSourceKind; title?: boolean }) {
+  // A source the app does not know (on a journal entry restored from a file edited by hand) shows as written.
+  const known = Object.hasOwn(SOURCE_TEXT, source);
   return (
-    <span className={`badge ${source}`} title={title === false ? undefined : SOURCE_EXPLAIN[source]}>
+    <span className={`badge ${source}`} title={title === false || !known ? undefined : SOURCE_EXPLAIN[source]}>
       <span className="dot" />
-      {SOURCE_TEXT[source]}
+      {known ? SOURCE_TEXT[source] : source}
     </span>
   );
 }

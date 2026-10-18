@@ -71,8 +71,9 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
             {loading ? (
               <EmptyState title="Loading market data…">Preparing the replay. Future bars stay hidden.</EmptyState>
             ) : carryingOn ? (
-              // A reload carries on the session this tab was running: it is not offered to resume or discard meanwhile.
-              <EmptyState title="Picking up where you left off…">The session this tab was running comes back as it was, paused.</EmptyState>
+              // A reload carries on the session this tab was running, unless another tab runs it (this one was
+              // duplicated from it): it is not offered to resume or discard meanwhile.
+              <EmptyState title="Picking up where you left off…">If the session this tab was running can be carried on, it comes back as it was, paused.</EmptyState>
             ) : (
               <div className="stack" style={{ alignItems: 'center', width: '100%', maxWidth: 520, textAlign: 'center' }}>
                 {error && <div className="alert error">{error}</div>}

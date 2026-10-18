@@ -39,7 +39,9 @@ export const DEFAULT_TRADING_RULES: TradingRules = {
   custom: [],
 };
 
-export type ExitReason = 'stop_loss' | 'take_profit' | 'manual' | 'session_end' | 'other';
+export type ExitReason = (typeof EXIT_REASONS)[number];
+/** Every exit reason, so one read from a file can be checked. */
+export const EXIT_REASONS = ['stop_loss', 'take_profit', 'manual', 'session_end', 'other'] as const;
 
 export interface Excursion {
   perShare: number;
