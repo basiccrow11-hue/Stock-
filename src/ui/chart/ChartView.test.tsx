@@ -281,8 +281,24 @@ beforeAll(() => {
 /**
  * Lets the charts draw their next frame, where lightweight-charts applies a range or scroll position the
  * app set. (jsdom runs frames on setInterval, which the tests that play fake, so they are drawn here.)
+ * Only the library's part of the frame: the app's own frame callbacks wait for jsdom's, or for a frame
+ * let go by with controlFrames.
  */
 const nextFrame = () => act(() => lw.charts.forEach((c) => c.ts.drawFrame()));
+
+/** Makes the charts' frames come only when the test lets one go by; returns the way to let one go by. */
+function controlFrames() {
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => (frames.set(++frameId, cb), frameId));
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => void frames.delete(id));
+  return () =>
+    act(() => {
+      const due = [...frames.values()];
+      frames.clear();
+      for (const cb of due) cb(0);
+    });
+}
 
 let root: Root | null = null;
 afterAll(() => {
@@ -927,12 +943,15 @@ describe('fill markers and journal pictures', () => {
 });
 
 describe('the buttons in the chart corner', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it('keeps » in the corner and Delete to its left, so neither moves when the other comes or goes', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');
     const { useDrawings } = await import('./drawings');
     const { ChartView } = await import('./ChartView');
     useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
     const ok = await store.startReplay({
       providerId: 'demo',
       symbol: 'TSLA',
@@ -965,7 +984,7 @@ describe('the buttons in the chart corner', () => {
     expect(corner()).toEqual(['Delete', '»']);
     // Back on the newest candle, » goes but its place is kept: Delete stays where it was.
     act(() => host.querySelector<HTMLButtonElement>('.chart-newest')!.click());
-    nextFrame();
+    frame();
     expect(corner()).toEqual(['Delete', '(»)']);
     back();
     expect(corner()).toEqual(['Delete', '»']);
@@ -977,19 +996,6 @@ describe('the buttons in the chart corner', () => {
 });
 
 describe('the view when the chart is redrawn', () => {
-  /** Makes the charts' frames come only when the test lets one go by; returns the way to let one go by. */
-  function controlFrames() {
-    const frames = new Map<number, FrameRequestCallback>();
-    let frameId = 0;
-    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => (frames.set(++frameId, cb), frameId));
-    vi.stubGlobal('cancelAnimationFrame', (id: number) => void frames.delete(id));
-    return () =>
-      act(() => {
-        const due = [...frames.values()];
-        frames.clear();
-        for (const cb of due) cb(0);
-      });
-  }
   afterEach(() => vi.unstubAllGlobals());
 
   async function mount(symbol: string) {
@@ -1196,6 +1202,66 @@ describe('the view when the chart is redrawn', () => {
     }
   }, 60_000);
 
+  it('stays on its candles through a jump to the end of a blind replay scrolled back to its first candles, which shows its real dates, and through two jumps before a frame', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { toChartTime, fromChartTime, blindChartShift } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    // Whether the replay is blind, its last day, how many candles play adds first (held back from the chart),
+    // and whether a jump to 12:00 comes first, the chart drawing no frame between the two.
+    const variants: [boolean, string, number, boolean][] = [
+      [true, '2025-02-04', 0, false],
+      [true, '2025-02-04', 300, false],
+      [true, '2025-02-04', 0, true],
+      [true, '2025-02-07', 0, false],
+      [false, '2025-02-04', 0, false],
+      [false, '2025-02-04', 300, false],
+      [false, '2025-02-04', 0, true],
+    ];
+    for (const [blind, endDate, held, twice] of variants) {
+      const what = `${blind ? 'blind' : 'open'} to ${endDate}${held ? `, ${held} held` : ''}${twice ? ', two jumps' : ''}`;
+      const ok = await store.startReplay({
+        providerId: 'demo',
+        symbol: 'AMZN',
+        date: '2025-02-04',
+        endDate,
+        startTime: '09:30',
+        endTime: '16:00',
+        startingBalance: 100_000,
+        lookbackDays: 1,
+        timeframe: '1m',
+        speed: 1,
+        blind,
+      });
+      expect(ok).toBe(true);
+      const shift = blindChartShift(store.useTrading.getState().session!.id);
+      /** The real times of the candles at the view's edges. */
+      const real = (a: Shown) => edges(a).map((t) => (t === undefined ? undefined : fromChartTime(t, store.useTrading.getState().session!.blind ? shift : 0)));
+      act(() => store.jumpTo(exchangeTimeToUnix('2025-02-04', 9 * 60 + 31)));
+      const a = await mount('AMZN');
+      await frame();
+      const main = a.chart.series[0];
+      // The right edge 100 candles from the oldest: the jump adds more than that, so the library moves the view.
+      act(() => a.chart.ts.scrollTo({ from: 0, to: 100 }));
+      await frame();
+      const before = real(a);
+      const n = main.points.length;
+      for (let i = 0; i < held; i++) act(() => store.stepForward());
+      expect(main.points.length, what).toBe(n);
+      if (twice) act(() => store.jumpTo(exchangeTimeToUnix('2025-02-04', 12 * 60)));
+      await act(async () => store.jumpTo(exchangeTimeToUnix(endDate, 16 * 60)));
+      expect(store.useTrading.getState().finished, what).toBe(true);
+      expect(store.useTrading.getState().session!.blind, what).toBe(false);
+      await vi.waitFor(() => expect(main.points.at(-1)!.time).toBe(toChartTime(store.getBaseBars('AMZN').at(-1)!.time)));
+      await frame();
+      await frame();
+      expect(real(a), what).toEqual(before);
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+  }, 60_000);
+
   it('keeps the moment at the right edge through a switch of timeframe or symbol, or the newest candle when that was on screen', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');
@@ -1290,6 +1356,53 @@ describe('the view when the chart is redrawn', () => {
       await store.endSession();
     }
   }, 60_000);
+
+  it('keeps the moment at the right edge through a switch of timeframe drawn in the same frame as a jump, and goes to the newest candle after »', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { ChartView, fromChartTime } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    for (const before of ['jump', '»'] as const) {
+      const ok = await store.startReplay({
+        providerId: 'demo',
+        symbol: 'AMZN',
+        date: '2025-02-04',
+        startTime: '09:30',
+        endTime: '16:00',
+        startingBalance: 100_000,
+        lookbackDays: 1,
+        timeframe: '1m',
+        speed: 1,
+        blind: false,
+      });
+      expect(ok).toBe(true);
+      act(() => store.jumpTo(exchangeTimeToUnix('2025-02-04', 9 * 60 + 31)));
+      const a = await mount('AMZN');
+      await frame();
+      // The right edge 100 candles from the oldest: the jump adds more than that, so the library moves the
+      // view until the scroll position that puts it back is drawn.
+      act(() => a.chart.ts.scrollTo({ from: 0, to: 100 }));
+      await frame();
+      const t = fromChartTime(edges(a)[1]!);
+      if (before === 'jump') act(() => store.jumpTo(exchangeTimeToUnix('2025-02-04', 14 * 60)));
+      else act(() => a.host.querySelector<HTMLButtonElement>('.chart-newest')!.click());
+      act(() => {
+        store.setTimeframe('5m');
+        a.root.render(createElement(ChartView, { symbol: 'AMZN', timeframe: '5m' }));
+      });
+      await frame();
+      await frame();
+      if (before === 'jump') expect(fromChartTime(edges(a)[1]!), before).toBe(store.candleStarts('AMZN', '5m')(t));
+      else {
+        expect(a.chart.ts.rightOffset, before).toBe(8);
+        expect(a.host.querySelector('.chart-newest'), before).toBeNull();
+      }
+      store.setTimeframe('1m');
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+  }, 30_000);
 
   it("keeps the moment at the right edge on a symbol whose history is still loading once it arrives, unless the view was moved meanwhile", async () => {
     const store = await import('../state/tradingStore');

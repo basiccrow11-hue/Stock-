@@ -82,19 +82,23 @@ type Pointer = { x: number; y: number; pane: number; clientX: number; clientY: n
 type DrawnChart = { symbol: string; timeframe: Timeframe; session: string };
 
 /**
- * Scroll positions each chart has been given and not yet drawn. lightweight-charts (5.2.1) applies one
- * on its next frame, and a takeScreenshot before then, after new data, never returns: it draws what is
- * waiting by merging it into itself, and a scroll position adds to the list it is going through. The
- * picture of such a chart is drawn off screen instead (see the snapshot provider).
+ * Scroll positions each chart has been given and not yet drawn: how many, and the last one, which is where
+ * its view really is (see visibleRange). lightweight-charts (5.2.1) applies them in turn on its next frame,
+ * and a takeScreenshot before then, after new data, never returns: it draws what is waiting by merging it
+ * into itself, and a scroll position adds to the list it is going through. The picture of such a chart is
+ * drawn off screen instead (see the snapshot provider).
  */
-const scrollsWaiting = new WeakMap<IChartApi, number>();
+const scrollsWaiting = new WeakMap<IChartApi, { count: number; position: number }>();
 
 /** Scrolls `chart` so its newest candle is `position` candles from the right edge (as of its next frame). */
 function scrollToPosition(chart: IChartApi, position: number): void {
   chart.timeScale().scrollToPosition(position, false);
-  scrollsWaiting.set(chart, (scrollsWaiting.get(chart) ?? 0) + 1);
+  scrollsWaiting.set(chart, { count: (scrollsWaiting.get(chart)?.count ?? 0) + 1, position });
   // Frames run in the order they were asked for, and the chart asked for its own as the scroll came in.
-  requestAnimationFrame(() => scrollsWaiting.set(chart, (scrollsWaiting.get(chart) ?? 1) - 1));
+  requestAnimationFrame(() => {
+    const waiting = scrollsWaiting.get(chart);
+    if (waiting && --waiting.count <= 0) scrollsWaiting.delete(chart);
+  });
 }
 
 /** Whether `a` and `b` are the same chart: the same symbol, timeframe and session. */
@@ -315,7 +319,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       clearTimeout(catchUpTimer);
       catchUpTimer = window.setTimeout(() => {
         catchUpTimer = 0;
-        const range = chart.timeScale().getVisibleLogicalRange();
+        const range = visibleRange();
         if (!down.size && range && range.to >= chartCount() - 1 - HOLD_MARGIN) catchUp();
       }, CATCH_UP_DELAY);
     };
@@ -391,7 +395,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       flushSync(() => {});
       // A scroll position the chart has not drawn yet (a chart just switched, or »): its picture now would
       // never come back (scrollsWaiting), so it is drawn off screen.
-      if (scrollsWaiting.get(chart)) return null;
+      if (scrollsWaiting.has(chart)) return null;
       return snapshot(chart, el);
     });
     return () => {
@@ -488,15 +492,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
   // A blind session's times are moved on the chart (and back when it ends): every point is re-sent.
   // With every time changed the library cannot keep the view on its candles, so it is put back as far
-  // from the newest candle as it was (a scroll position, which the library applies on its next frame).
-  // Another session's chart is put in place when it is drawn (rightEdgeOn), maybe already, before this
-  // runs: it is only redrawn with the new times.
+  // from the newest candle as it was (a scroll position, which the library applies on its next frame):
+  // where a position still waiting for that frame puts it, such as the one by which the jump that ended
+  // the session kept the view on its candles (visibleRange). Another session's chart is put in place
+  // when it is drawn (rightEdgeOn), maybe already, before this runs: it is only redrawn with the new times.
   const shownShift = useRef({ shift, session: session?.id });
   useEffect(() => {
     const shown = shownShift.current;
     shownShift.current = { shift, session: session?.id };
     if (shown.shift === shift) return;
-    const range = shown.session === session?.id ? chartRef.current?.timeScale().getVisibleLogicalRange() : null;
+    const range = shown.session === session?.id ? visibleRange() : null;
     const fromNewest = range ? windowStartRef.current + range.to - (candlesRef.current.length - 1) : null;
     fullRedraw();
     if (fromNewest !== null && chartRef.current) scrollToPosition(chartRef.current, fromNewest);
@@ -700,7 +705,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const start = windowStartRef.current;
     let base: number | null = null;
     if (percent && candles.length > start) {
-      const r = chart.timeScale().getVisibleLogicalRange();
+      const r = visibleRange();
       const i = r ? Math.min(candles.length - 1, start + Math.max(0, Math.ceil(r.from))) : start;
       base = candles[i].close;
     }
@@ -720,7 +725,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   function lastUp(): boolean {
     const c = candlesRef.current;
     const start = windowStartRef.current;
-    const i = lastVisibleIndex(chartRef.current?.timeScale().getVisibleLogicalRange() ?? null, chartCount());
+    const i = lastVisibleIndex(visibleRange(), chartCount());
     const b = i < 0 ? undefined : c[start + i];
     return !b || b.close >= b.open;
   }
@@ -746,6 +751,21 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   /**
+   * The chart's view, as logical indexes: the library's range, or, while a scroll position it was given waits
+   * for its next frame (scrollsWaiting), the range that position puts on screen, as wide. Until then the
+   * library's own range is only for the moment: candles handed over meanwhile may have moved it (see
+   * drawCandles), and the position will move it again. Whatever keeps or moves the view starts from this.
+   */
+  function visibleRange(): LogicalRange | null {
+    const chart = chartRef.current;
+    const range = chart?.timeScale().getVisibleLogicalRange() ?? null;
+    const waiting = chart ? scrollsWaiting.get(chart) : undefined;
+    if (!range || !waiting) return range;
+    const to = chartCount() - 1 + waiting.position;
+    return { from: to - (range.to - range.from), to } as LogicalRange;
+  }
+
+  /**
    * Hands the chart the candles held back from it, keeping the view on the candles it shows; or, when
    * the newest one it had is on screen (the user went to the end), moving on to the newest, as the chart
    * does when play adds a candle while the newest is on screen. The library applies the range set here
@@ -755,7 +775,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
    */
   function catchUp(keepRange = true): void {
     if (heldRef.current === null) return;
-    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const range = visibleRange();
     const atEnd = !!range && Math.ceil(range.to) >= chartCount() - 1;
     heldRef.current = null;
     setWindowData();
@@ -766,7 +786,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
   /** Shows the button back to the newest candle while that candle is off the right of the view. */
   function syncOffNewest(): void {
-    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const range = visibleRange();
     const newest = candlesRef.current.length - 1 - windowStartRef.current;
     const off = !!range && newest >= 0 && Math.ceil(range.to) < newest;
     if (off === offNewestRef.current) return;
@@ -845,7 +865,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /** Hands the chart older candles, as many again as it has, once the user scrolls near the oldest. */
   function extendWindow(): void {
     const start = windowStartRef.current;
-    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const range = visibleRange();
     if (!range || start === 0 || range.from >= WINDOW_MARGIN) return;
     windowStartRef.current = Math.max(0, start - Math.max(WINDOW, chartCount()));
     // The chart keeps its place counted from the newest candle, so the view does not move.
@@ -865,7 +885,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const candles = candlesRef.current;
     const held = candles.length - windowStartRef.current;
     if (held < 2 * WINDOW) return;
-    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const range = visibleRange();
     if (!range || range.to < held - 1) return;
     const keep = Math.max(WINDOW, held - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN);
     if (held - keep < WINDOW) return;
@@ -978,16 +998,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     const drawn = windowKeyRef.current;
     const chart: DrawnChart = { symbol, timeframe, session: useTrading.getState().session?.id ?? '' };
     const same = !!drawn && sameChart(drawn, chart);
-    // The same chart's view before anything changes: its right edge as an index among the candles (those held
-    // back included), and whether the newest candle the chart holds is off it.
+    // The same chart's view before anything changes (visibleRange: after an earlier redraw this frame, where the
+    // position it gave puts it): its right edge as an index among the candles (those held back included), and
+    // whether the newest candle the chart holds is off it.
     const old = candlesRef.current;
-    const view = same ? (chartRef.current?.timeScale().getVisibleLogicalRange() ?? null) : null;
+    const view = same ? visibleRange() : null;
     const right = view ? windowStartRef.current + view.to : 0;
     const off = !!view && Math.ceil(view.to) < chartCount() - 1;
     // With candles held back the chart counts from an older newest one: hand them over first, with no
     // range set for the next frame, which would come after the candles below and put the view on others.
     if (same) catchUp(false);
-    const range = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
+    const range = visibleRange();
     // Where the view's right edge goes (null: on the newest candle) when it is put in place: on another chart
     // (rightEdgeOn), and on this one once the history it waited for is in (pendingEdgeOn). Its window reaches
     // back to a margin before the view, which keeps its width in candles. The first chart drawn opens on the
@@ -1022,12 +1043,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       // The library keeps the view on its candles when candles are added after the newest one while that one is
       // off the view, and else as far from the newest candle as it was. Only, it never leaves the view's right
       // edge closer to the oldest candle it holds than the number of candles added: after a long jump, or with
-      // many candles held back, the view is put back there.
+      // many candles held back, the view is put back there. A position an earlier redraw gave, still waiting for
+      // the frame, is given again too when it would put the view elsewhere.
       const next = candlesRef.current;
       const k = Math.max(0, Math.floor(right));
       const added = off && next.length > 0 && next[next.length - 1].time > old[old.length - 1].time;
       const position = added ? lastIndexAtOrBefore(next, old[k].time, (c) => c.time) + right - k - (next.length - 1) : right - (old.length - 1);
-      const now = api.timeScale().getVisibleLogicalRange();
+      const now = visibleRange();
       if (now && Math.abs(windowStartRef.current + now.to - (next.length - 1) - position) > 0.001) scrollToPosition(api, position);
     }
     syncLastDirection();
@@ -1096,7 +1118,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     for (const c of aggregateBars(base.slice(start), timeframe, baseTfRef.current)) candles.push(c);
     computeIndicators(firstChanged);
     if (heldRef.current === null) {
-      const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+      const range = visibleRange();
       if (range && range.to < before - windowStartRef.current - 1 - HOLD_MARGIN) heldRef.current = before;
     }
     if (heldRef.current !== null) {
