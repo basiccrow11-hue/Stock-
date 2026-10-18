@@ -14,7 +14,8 @@ function useBlindStart(): (entry: JournalEntry) => string | null {
   return (entry) => {
     if (!entry.blind) return null;
     if (session?.blind && entry.sessionId === session.id) return session.startDate;
-    return live[entry.sessionId] ?? null;
+    // Only a session listed under that id: one restored from a file can be called anything ("constructor").
+    return Object.hasOwn(live, entry.sessionId) ? live[entry.sessionId] : null;
   };
 }
 

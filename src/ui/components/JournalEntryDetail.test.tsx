@@ -11,6 +11,10 @@ import { EMPTY_NOTES, type JournalEntry } from '../../core/journal';
 const db = new Map<string, unknown>();
 let queue: Promise<unknown> = Promise.resolve();
 const turn = <T,>(fn: () => T): Promise<T> => (queue = queue.then(() => new Promise((r) => setTimeout(r, 5))).then(fn)) as Promise<T>;
+/** Until every request made so far is answered: earlier tests' journals, listening for other tabs' writes, can still have some queued. */
+const idle = async () => {
+  for (let last: Promise<unknown> | undefined; last !== queue; ) await (last = queue);
+};
 vi.mock('../services/idb', () => ({
   idb: {
     all: () => turn(() => [...db.values()].map((v) => structuredClone(v))),
@@ -39,10 +43,10 @@ function type(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-async function mount() {
+async function mount(id = 't1') {
   const t = 1_700_000_000;
-  db.set('t1', {
-    ...{ id: 't1', sessionId: 's1', mode: 'replay', source: 'demo', symbol: 'AAPL', direction: 'long', entryTime: t, exitTime: t + 600 },
+  db.set(id, {
+    ...{ id, sessionId: 's1', mode: 'replay', source: 'demo', symbol: 'AAPL', direction: 'long', entryTime: t, exitTime: t + 600 },
     ...{ avgEntry: 100, avgExit: 101, quantity: 10, pnl: 10, returnPct: 1, holdingSeconds: 600, commission: 0, rewound: false, createdAt: 1 },
     ...{ tag: '', notes: { ...EMPTY_NOTES } },
   });
@@ -58,7 +62,7 @@ async function mount() {
   const unsub = useJournal.subscribe(() => act(render));
   const tagInput = host.querySelector<HTMLInputElement>('input[type=text]')!;
   const why = host.querySelector<HTMLTextAreaElement>('textarea')!;
-  return { useJournal, tagInput, why, stored: () => db.get('t1') as JournalEntry, done: () => (unsub(), act(() => root.unmount())) };
+  return { useJournal, tagInput, why, stored: () => db.get(id) as JournalEntry, done: () => (unsub(), act(() => root.unmount())) };
 }
 
 describe('journal entry editor', () => {
@@ -116,6 +120,20 @@ describe('journal entry editor', () => {
     act(() => type(m.why, 'breakout'));
     await settle();
     expect(m.stored()).toMatchObject({ tag: 'ORB', notes: { why: 'breakout' } });
+    m.done();
+  });
+
+  it.each(['constructor', '__proto__', 'toString'])('saves the tag and notes of an entry whose id is "%s", a name every object has', async (id) => {
+    const m = await mount(id);
+    act(() => type(m.tagInput, 'ORB'));
+    act(() => type(m.why, 'breakout'));
+    act(() => void window.dispatchEvent(new Event('pagehide')));
+    // Kept for the entry as the write starts, so a tab closed mid-write loses nothing.
+    expect(Object.keys(JSON.parse(localStorage.getItem('stock-replay-journal-drafts') ?? '{}'))).toEqual([id]);
+    await settle();
+    expect(m.stored()).toMatchObject({ tag: 'ORB', notes: { why: 'breakout' } });
+    expect(m.useJournal.getState().entries[0]).toMatchObject({ id, tag: 'ORB', notes: { why: 'breakout' } });
+    expect(localStorage.getItem('stock-replay-journal-drafts')).toBeNull();
     m.done();
   });
 });
@@ -319,7 +337,7 @@ describe('chart snapshot', () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     act(() => root.render(createElement(JournalEntryDetail, { entry, showReview: false })));
-    await act(() => new Promise((r) => setTimeout(r, 50)));
+    await act(idle);
     return { host, done: () => act(() => root.unmount()) };
   }
 

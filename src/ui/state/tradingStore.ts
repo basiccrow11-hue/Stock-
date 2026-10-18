@@ -35,7 +35,7 @@ import {
   type SavedSession,
   type SessionSummary,
 } from '../services/savedSessions';
-import { getProvider } from './dataRegistry';
+import { csvDatasetsLoaded, csvProvider, getProvider } from './dataRegistry';
 import { getSettings, useSettings } from './settingsStore';
 import { useCredentials } from './credentials';
 import { useJournal, saveSnapshot } from './journalStore';
@@ -1063,6 +1063,9 @@ async function endCurrent(): Promise<void> {
 export async function startReplay(setup: ReplaySetup & { providerId: string; timeframe: Timeframe; speed: number; blind: boolean; challengeId?: string }): Promise<boolean> {
   const seq = ++loadSeq;
   const provider = getProvider(setup.providerId);
+  // Imported data is there only once the app has read it, which can be after this is asked for as it opens.
+  if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
+  if (seq !== loadSeq) return false;
   const reason = provider.unavailableReason();
   if (reason) {
     useTrading.setState({ loading: false, error: reason });
@@ -1233,6 +1236,8 @@ export async function resumeSession(id: string): Promise<boolean> {
       const provider = getProvider(rec.replay.providerId);
       // A key kept on the server is known only once the server has answered, which can be after a reload gets here.
       if (provider.requiresCredentials && provider.unavailableReason() && !useCredentials.getState().serverChecked) await serverKeysChecked();
+      // Imported data is there only once the app has read it, which can be after Resume is pressed as it opens.
+      if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
       const reason = provider.unavailableReason();
       if (reason) throw new Error(`${reason} Then resume the session.`);
       replay = await ReplaySession.resume(provider, rec.replay.state, id);

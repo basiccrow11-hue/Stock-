@@ -1,7 +1,7 @@
 /** New-session dialog: historical replay setup or simulated market setup. */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Modal, SourceBadge, NumberField } from './common';
-import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
+import { HISTORICAL_PROVIDERS, csvProvider, demoProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { REPLAY_SPEEDS, SIM_SPEEDS, play, sessionEndNotice, startReplay, startSim, useTrading } from '../state/tradingStore';
 import { toast } from '../state/toasts';
@@ -92,6 +92,10 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   }, [loading]);
 
   const provider: HistoricalDataProvider = HISTORICAL_PROVIDERS.find((p) => p.id === providerId) ?? demoProvider;
+  // Imported data read as the app opens, or changed since the form opened: its tickers and days are read again.
+  const [datasets, datasetsChanged] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => onCsvDatasetsChanged(datasetsChanged), []);
+  const imported = provider === csvProvider ? datasets : 0;
   const unavailable = provider.unavailableReason();
 
   useEffect(() => {
@@ -103,7 +107,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     return () => {
       alive = false;
     };
-  }, [provider]);
+  }, [provider, imported]);
 
   useEffect(() => {
     let alive = true;
@@ -120,7 +124,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
     return () => {
       alive = false;
     };
-  }, [provider, symbol]);
+  }, [provider, symbol, imported]);
 
   useEffect(() => {
     if (!challengeId) return;

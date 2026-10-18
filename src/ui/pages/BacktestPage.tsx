@@ -1,5 +1,5 @@
 /** Rule-based backtester: build IF/THEN rules, pick data, run without look-ahead, inspect results. */
-import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import { CandlestickSeries, createChart, createSeriesMarkers, PriceLineSource, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
 import {
   OPERATOR_LABELS,
@@ -14,7 +14,7 @@ import {
   type StrategyDefinition,
 } from '../../core/backtest/strategy';
 import { warmupCandlesFrom, warmupTradingDays, type BacktestResult } from '../../core/backtest/Backtester';
-import { HISTORICAL_PROVIDERS, demoProvider } from '../state/dataRegistry';
+import { HISTORICAL_PROVIDERS, demoProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { toast } from '../state/toasts';
@@ -368,7 +368,9 @@ export function BacktestPage({ active = true }: { active?: boolean }) {
         : null;
 
   // Read on every render: a key or a CSV added on another page makes the source available without
-  // changing anything this page holds.
+  // changing anything this page holds. Imported data read as the app opens draws the page again.
+  const [, datasetsChanged] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => onCsvDatasetsChanged(datasetsChanged), []);
   const unavailable = provider.unavailableReason();
   const fieldError = useMemo(() => {
     if (!symbol.trim()) return 'Choose a ticker.';

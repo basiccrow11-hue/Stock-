@@ -885,6 +885,103 @@ describe('the Trade screen as a reload carries its session on', () => {
     app.close();
   }, 20_000);
 
+  const acme = { symbol: 'ACME', name: 'ACME', baseTimeframe: '1m' as const, importedAt: 1, fileName: 'a.csv', bars: Array.from({ length: 120 }, (_, i) => ({ time: at('09:30') + i * 60, open: 10, high: 10.1, low: 9.9, close: 10, volume: 1000 })) };
+  const acmeReplay = { ...replay, providerId: 'csv', symbol: 'ACME', startTime: '10:00', endTime: '11:00' };
+
+  /** A replay of imported data, left by a tab that closed: its id. */
+  async function leaveImported() {
+    const a = await page();
+    await (await import('./dataRegistry')).saveCsvDataset(acme);
+    expect(await a.store.startReplay(acmeReplay)).toBe(true);
+    a.store.stepForward();
+    await settle();
+    a.store.pause();
+    await settle();
+    rememberNothing();
+    return a.store.useTrading.getState().session!.id;
+  }
+
+  /** The Resume button of the session the Trade screen offers, once it is there. */
+  const resumeButton = () =>
+    vi.waitFor(
+      () => {
+        const b = [...document.querySelectorAll<HTMLButtonElement>('.unfinished-list button')].find((x) => x.textContent === 'Resume');
+        expect(b).toBeDefined();
+        return b!;
+      },
+      { timeout: 5000 },
+    );
+
+  it.each([
+    ['in a new tab', null],
+    // The start screen shows as soon as the app has read that the session this tab remembers is gone.
+    ['in a tab whose own session has ended', 'replay_gone'],
+  ] as const)('resumes a replay of imported data pressed before that data has loaded, %s, once it has', async (_, remembered) => {
+    const id = await leaveImported();
+    if (remembered) sessionStorage.setItem('stock-replay-tab-session', remembered);
+    const loaded = hold('datasets');
+    const app = await openApp();
+    (await resumeButton()).click();
+    await vi.waitFor(() => expect(app.screen()).toContain('Loading market data'), { timeout: 5000 });
+    await settle();
+    expect(app.screen()).toContain('Loading market data');
+    loaded();
+    await vi.waitFor(() => expect(app.store.useTrading.getState().session?.id).toBe(id), { timeout: 5000 });
+    expect(app.store.useTrading.getState().error).toBeNull();
+    expect(app.screens.join(' ')).not.toContain('No CSV data');
+    app.close();
+  }, 20_000);
+
+  it('says there is no imported data, and waits no longer, when reading it fails', async () => {
+    await leaveImported();
+    const loaded = hold('datasets');
+    const app = await openApp();
+    (await resumeButton()).click();
+    // Storage gives an error instead of the data.
+    db.stores.set('datasets', {
+      values: () => {
+        throw new Error('The storage is broken');
+      },
+    } as never);
+    loaded();
+    await vi.waitFor(() => expect(app.store.useTrading.getState().error).toBe('No CSV data imported yet. Import a file in Data & Settings. Then resume the session.'), { timeout: 5000 });
+    expect(app.store.useTrading.getState()).toMatchObject({ session: null, loading: false });
+    await vi.waitFor(() => expect(app.screen()).toContain('ACME · 2024-03-12'), { timeout: 5000 });
+    app.close();
+  }, 20_000);
+
+  it('starts a replay of imported data asked for before that data has loaded, once it has', async () => {
+    await (await import('./dataRegistry')).saveCsvDataset(acme);
+    const loaded = hold('datasets');
+    const app = await openApp();
+    const started = app.store.startReplay(acmeReplay);
+    await settle();
+    expect(app.store.useTrading.getState().error).toBeNull();
+    loaded();
+    expect(await started).toBe(true);
+    expect(app.store.useTrading.getState().session?.symbols).toEqual(['ACME']);
+    app.close();
+  }, 20_000);
+
+  it('says in the new replay form that imported data is still loading, then starts on it once it has', async () => {
+    await (await import('./dataRegistry')).saveCsvDataset(acme);
+    (await import('./settingsStore')).useSettings.getState().updateReplay({ providerId: 'csv', symbol: 'ACME', date: '2024-03-12', startTime: '10:00', endTime: '11:00', multiDay: false, blind: false, timeframe: '1m', includeWatchlist: false });
+    const loaded = hold('datasets');
+    const app = await openApp();
+    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Start a historical replay')!.click();
+    const warning = () => document.querySelector('.modal .alert.warn, [role="dialog"] .alert.warn')?.textContent ?? null;
+    await vi.waitFor(() => expect(warning()).toBe('Your imported data is still loading.'), { timeout: 5000 });
+    expect(document.body.textContent).not.toContain('No CSV data');
+    loaded();
+    await vi.waitFor(() => expect(warning()).toBeNull(), { timeout: 5000 });
+    expect(document.querySelector('#setup-symbols option')?.getAttribute('value')).toBe('ACME');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Available data: 2024-03-12 to 2024-03-12'), { timeout: 5000 });
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Start replay')!.click();
+    await vi.waitFor(() => expect(app.store.useTrading.getState().session?.symbols).toEqual(['ACME']), { timeout: 5000 });
+    app.close();
+  }, 20_000);
+
   it('has nothing to pick up on the next reload once a session it could not carry on is discarded in it', async () => {
     const id = await leaveRunning();
     const kv = db.stores.get('kv')!;

@@ -170,3 +170,33 @@ describe('the backtest page', () => {
     expect(flatten.getAttribute('aria-describedby')).toBeNull();
   });
 });
+
+describe('the backtest page on imported data', () => {
+  it('says the data is still loading while the app reads it, and can run on it once it is in', async () => {
+    // A page of its own, its settings kept apart from the tests above.
+    vi.resetModules();
+    const { useSettings } = await import('../state/settingsStore');
+    useSettings.getState().updateReplay({ providerId: 'csv', symbol: 'ACME' });
+    const registry = await import('../state/dataRegistry');
+    const { idb } = await import('../services/idb');
+    let read!: (list: unknown[]) => void;
+    vi.spyOn(idb, 'all').mockImplementation(() => new Promise((r) => (read = r)) as never);
+    const loaded = registry.loadCsvDatasets();
+    try {
+      await open();
+      const run = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Run backtest')!;
+      expect(document.body.textContent).toContain('Your imported data is still loading.');
+      expect(run().disabled).toBe(true);
+      const bars = Array.from({ length: 30 }, (_, i) => ({ time: 1_710_250_200 + i * 60, open: 10, high: 10.1, low: 9.9, close: 10, volume: 1000 }));
+      await act(async () => {
+        read([{ symbol: 'ACME', name: 'ACME', baseTimeframe: '1m', importedAt: 1, fileName: 'a.csv', bars }]);
+        await loaded;
+      });
+      expect(document.body.textContent).not.toContain('still loading');
+      expect(document.body.textContent).not.toContain('No CSV data');
+      expect(run().disabled).toBe(false);
+    } finally {
+      localStorage.clear();
+    }
+  });
+});

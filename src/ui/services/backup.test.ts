@@ -666,6 +666,56 @@ describe('a hand-edited or foreign backup', () => {
     expect(await shown(createElement(ChallengesPage, { onStart: () => undefined }))).not.toContain(STOPPED);
   });
 
+  it('shows the journal, before and after a reload, with blind entries whose session id is a name every object has', async () => {
+    const names = ['constructor', '__proto__', 'toString'];
+    const a = await app();
+    const { backup, skipped } = a.parseBackup(JSON.stringify([entry('j1'), ...names.map((n) => entry(`blind-${n}`, { sessionId: n, blind: true }))]));
+    expect(skipped).toBe(0);
+    expect(await a.restoreBackup(backup, { settings: false })).toMatchObject({ journalAdded: 4 });
+    // One of those sessions is saved to carry on, so its date stays hidden; the others have ended.
+    (await import('../state/liveBlind')).setSavedBlind('__proto__', '2025-01-14');
+    for (const reload of [false, true]) {
+      if (reload) await app();
+      const { JournalPage } = await import('../pages/JournalPage');
+      const page = await shown(createElement(JournalPage, { focusId: 'j1' }));
+      expect(page).not.toContain(STOPPED);
+      expect(page.match(/Day 2 09:40/g)).toHaveLength(1);
+      expect(page.match(/2025-01-15 09:40/g)?.length).toBeGreaterThanOrEqual(3);
+      for (const n of names) expect(await shown(createElement(JournalPage, { focusId: `blind-${n}` }))).not.toContain(STOPPED);
+    }
+  });
+
+  it('keeps chart snapshots and drawings filed under a name every object has, through a backup and a restore', async () => {
+    const names = ['constructor', '__proto__', 'toString'];
+    const a = await app();
+    const line = { id: 'd1', type: 'hline' as const, points: [{ time: dataset.bars[0].time, price: 1.5 }], color: '#4f8cff' };
+    for (const n of names) {
+      await a.useJournal.getState().add(entry(`j-${n}`, { snapshotKey: n }));
+      saveShot(n, `data:image/png;base64,${n}`);
+      a.drawings.mergeDrawings(n, [line]);
+    }
+    const { backup } = await a.createBackup({ snapshots: true, datasets: false, holdBack: () => false });
+    const read = a.parseBackup(JSON.stringify(backup)).backup;
+    for (const b of [backup, read]) {
+      expect(Object.keys(b.snapshots).sort()).toEqual([...names].sort());
+      expect(Object.keys(b.drawings).sort()).toEqual([...names].sort());
+    }
+
+    clearSiteData();
+    const b = await app();
+    expect(await b.restoreBackup(read, { settings: false })).toMatchObject({ journalAdded: 3, drawingsAdded: 3 });
+    for (const n of names) {
+      expect(db.stores.get('snapshots')?.get(n)).toBe(`data:image/png;base64,${n}`);
+      expect(JSON.parse(localStorage.getItem(`stock-replay-drawings:${n}`)!)).toEqual([line]);
+    }
+
+    // Restored without their snapshots: the entries come in, and no snapshot with them.
+    clearSiteData();
+    const c = await app();
+    expect(await c.restoreBackup({ ...read, snapshots: {} }, { settings: false })).toMatchObject({ journalAdded: 3, snapshotsAdded: 0 });
+    expect(db.stores.get('snapshots')?.size ?? 0).toBe(0);
+  });
+
   it('leaves out an attempt stored before such files were checked, and takes a good copy of it from a later restore', async () => {
     db.stores.set('challenges', new Map<string, unknown>([['a1', attempt('a1', { detail: { a: 1 } })], ['a2', attempt('a2')]]));
     const a = await app();

@@ -17,7 +17,10 @@ const BEAT_MS = 20_000;
 /** Longer than the slowest a background tab's timers run (about once a minute). */
 const TTL_MS = 150_000;
 
-/** Session id → its start date (YYYY-MM-DD). */
+/**
+ * Session id → its start date (YYYY-MM-DD). Read and written as the object's own keys (Object.hasOwn):
+ * a journal entry restored from a file can name any session, "constructor" or "__proto__" included.
+ */
 export type LiveBlind = Record<string, string>;
 
 type Listing = Record<string, { start: string; beat: number }>;
@@ -68,18 +71,17 @@ let mine: { id: string; start: string } | null = null;
 /** The sessions tabs list as running, without those whose tab stopped renewing them. */
 function running(listing = read()): LiveBlind {
   const now = Date.now();
-  const sessions: LiveBlind = {};
-  for (const [id, e] of Object.entries(listing)) {
-    if (e && typeof e.start === 'string' && typeof e.beat === 'number' && now - e.beat < TTL_MS) sessions[id] = e.start;
-  }
-  return sessions;
+  return Object.fromEntries(
+    Object.entries(listing)
+      .filter(([, e]) => e && typeof e.start === 'string' && typeof e.beat === 'number' && now - e.beat < TTL_MS)
+      .map(([id, e]) => [id, e.start]),
+  );
 }
 
 function refresh(listing = read()): void {
-  const sessions: LiveBlind = { ...readSaved(), ...running(listing) };
-  if (mine) sessions[mine.id] = mine.start;
+  const sessions: LiveBlind = { ...readSaved(), ...running(listing), ...(mine ? { [mine.id]: mine.start } : {}) };
   const cur = useLiveBlind.getState().sessions;
-  const same = Object.keys(sessions).length === Object.keys(cur).length && Object.entries(sessions).every(([id, s]) => cur[id] === s);
+  const same = Object.keys(sessions).length === Object.keys(cur).length && Object.entries(sessions).every(([id, s]) => Object.hasOwn(cur, id) && cur[id] === s);
   if (!same) useLiveBlind.setState({ sessions });
 }
 
@@ -93,14 +95,14 @@ function beat(): void {
     delete listing[id];
     changed = true;
   }
-  if (mine) listing[mine.id] = { start: mine.start, beat: now };
-  if (mine || changed) write(listing);
-  refresh(listing);
+  const next = mine ? { ...listing, [mine.id]: { start: mine.start, beat: now } } : listing;
+  if (mine || changed) write(next);
+  refresh(next);
 }
 
 function unlist(id: string): void {
   const listing = read();
-  if (!(id in listing)) return;
+  if (!Object.hasOwn(listing, id)) return;
   delete listing[id];
   write(listing);
 }
@@ -116,10 +118,10 @@ export function setLiveBlind(session: { id: string; start: string } | null): voi
 /** Lists saved session `id` as a blind one whose date is still hidden (`start`: its start date), or takes it off (null). */
 export function setSavedBlind(id: string, start: string | null): void {
   const saved = readSaved();
-  if ((saved[id] ?? null) === start) return;
-  if (start === null) delete saved[id];
-  else saved[id] = start;
-  writeSaved(saved);
+  if ((Object.hasOwn(saved, id) ? saved[id] : null) === start) return;
+  delete saved[id];
+  // Spread, not `saved[id] = …`, which stores nothing for an id of "__proto__".
+  writeSaved(start === null ? saved : { ...saved, [id]: start });
   refresh();
 }
 
@@ -138,9 +140,9 @@ export async function reconcileSavedBlind(kept: () => Promise<{ id: string; star
   const ids = new Set(all.map((k) => k.id));
   const saved = readSaved();
   const live = running();
-  for (const id of Object.keys(before)) if (!ids.has(id) && !(id in live)) delete saved[id];
-  for (const k of all) if (k.start !== null && k.older && !(k.id in before)) saved[k.id] = k.start;
-  writeSaved(saved);
+  for (const id of Object.keys(before)) if (!ids.has(id) && !Object.hasOwn(live, id)) delete saved[id];
+  const older = all.flatMap((k) => (k.start !== null && k.older && !Object.hasOwn(before, k.id) ? [[k.id, k.start] as const] : []));
+  writeSaved({ ...saved, ...Object.fromEntries(older) });
   refresh();
 }
 

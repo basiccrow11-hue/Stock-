@@ -23,9 +23,16 @@ export class CsvDataProvider implements HistoricalDataProvider {
   readonly source = 'HISTORICAL' as const;
   readonly requiresCredentials = false;
   private datasets = new Map<string, CsvDataset>();
+  /** While the datasets are first read from storage, none is known to be missing. */
+  private loading = false;
 
   setDatasets(list: CsvDataset[]): void {
     this.datasets = new Map(list.map((d) => [d.symbol.toUpperCase(), d]));
+  }
+
+  /** Says the datasets are being read from storage (true), or have been or could not be (false). */
+  setLoading(loading: boolean): void {
+    this.loading = loading;
   }
 
   upsert(d: CsvDataset): void {
@@ -41,7 +48,8 @@ export class CsvDataProvider implements HistoricalDataProvider {
   }
 
   unavailableReason(): string | null {
-    return this.datasets.size ? null : 'No CSV data imported yet. Import a file in Data & Settings.';
+    if (this.datasets.size) return null;
+    return this.loading ? 'Your imported data is still loading.' : 'No CSV data imported yet. Import a file in Data & Settings.';
   }
 
   async listSymbols(): Promise<SymbolInfo[]> {

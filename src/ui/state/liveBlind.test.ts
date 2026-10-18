@@ -99,3 +99,29 @@ describe('blind sessions saved to carry on later', () => {
     expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual(listed);
   });
 });
+
+describe('a session whose id is a name every object has', () => {
+  it('is listed, brought in line as the app opens and taken off like any other', async () => {
+    localStorage.setItem(KEY, `{"__proto__":{"start":"2025-01-15","beat":${Date.now()}}}`);
+    localStorage.setItem(SAVED, JSON.stringify({ constructor: '2020-01-02' }));
+    const { reconcileSavedBlind, setSavedBlind, useLiveBlind } = await import('./liveBlind');
+    const listed = () => Object.entries(useLiveBlind.getState().sessions).sort();
+    expect(listed()).toEqual([
+      ['__proto__', '2025-01-15'],
+      ['constructor', '2020-01-02'],
+    ]);
+    // One saved is no longer kept, and one an older version saved is.
+    await reconcileSavedBlind(async () => [{ id: 'toString', start: '2023-06-01', older: true }]);
+    expect(listed()).toEqual([
+      ['__proto__', '2025-01-15'],
+      ['toString', '2023-06-01'],
+    ]);
+    setSavedBlind('valueOf', '2024-03-12');
+    setSavedBlind('toString', null);
+    expect(listed()).toEqual([
+      ['__proto__', '2025-01-15'],
+      ['valueOf', '2024-03-12'],
+    ]);
+    expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual({ valueOf: '2024-03-12' });
+  });
+});

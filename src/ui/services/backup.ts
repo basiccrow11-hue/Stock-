@@ -66,12 +66,13 @@ export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; 
   const all = await stored<JournalEntry>('journal', () => useJournal.getState().entries);
   const journal = all.filter((e) => !o.holdBack(e));
   const heldSessions = new Set(all.filter((e) => o.holdBack(e)).map((e) => e.sessionId)).size;
-  const snapshots: Record<string, string> = {};
+  // Collected as entries: `snapshots[key] = …` would store nothing for a key of "__proto__".
+  const shots: [string, string][] = [];
   if (o.snapshots) {
     for (const e of journal) {
       if (!e.snapshotKey) continue;
       const shot = await idb.get<string>('snapshots', e.snapshotKey).catch(() => undefined);
-      if (typeof shot === 'string') snapshots[e.snapshotKey] = shot;
+      if (typeof shot === 'string') shots.push([e.snapshotKey, shot]);
     }
   }
   const challenges = await stored<ChallengeAttempt>('challenges', () => useChallenges.getState().attempts);
@@ -89,7 +90,7 @@ export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; 
     version: BACKUP_VERSION,
     createdAt: Date.now(),
     journal,
-    snapshots,
+    snapshots: Object.fromEntries(shots),
     challenges,
     streak: readStreak(),
     settings,
@@ -201,14 +202,14 @@ export function parseBackup(text: string): BackupContents {
     (v: unknown): T | null =>
       ok(v) ? v : null;
   const journal = keep(raw.journal, checked(validEntry));
-  const snapshots: Record<string, string> = {};
-  if (isObj(raw.snapshots)) for (const [k, v] of Object.entries(raw.snapshots)) if (isStr(v) && v.startsWith('data:image/')) snapshots[k] = v;
-  const drawings: Record<string, Drawing[]> = {};
+  // Built from entries, so a key of "__proto__" is kept as any other (`snapshots[k] = …` would store nothing).
+  const snapshots: Record<string, string> = isObj(raw.snapshots) ? Object.fromEntries(Object.entries(raw.snapshots).filter((kv): kv is [string, string] => isStr(kv[1]) && kv[1].startsWith('data:image/'))) : {};
+  const drawings: [string, Drawing[]][] = [];
   if (isObj(raw.drawings)) {
     for (const [sym, list] of Object.entries(raw.drawings)) {
       // A drawing whose colour is not one is kept, in the default colour (readDrawing).
       const good = keep(list, readDrawing);
-      if (sym && good.length) drawings[sym] = good;
+      if (sym && good.length) drawings.push([sym, good]);
     }
   }
   // Only settings the app can use (savedSettings): a hand-edited file can break nothing.
@@ -222,7 +223,7 @@ export function parseBackup(text: string): BackupContents {
     challenges: keep(raw.challenges, checked(validAttempt)),
     streak: sanitizeStreak(raw.streak),
     settings: Object.keys(settings).length ? settings : null,
-    drawings,
+    drawings: Object.fromEntries(drawings),
     ...(raw.datasets !== undefined ? { datasets: keep(raw.datasets, checked(validDataset)) } : {}),
   };
   return { backup, skipped };

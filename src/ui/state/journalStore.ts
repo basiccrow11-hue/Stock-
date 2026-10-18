@@ -49,6 +49,9 @@ function readDrafts(): Record<string, Draft> {
   }
 }
 
+/** Entry `id`'s draft: only one of its own, as an entry restored from a file can have any id ("constructor"). */
+const draftOf = (drafts: Record<string, Draft>, id: string): Draft | undefined => (Object.hasOwn(drafts, id) ? drafts[id] : undefined);
+
 function writeDrafts(drafts: Record<string, Draft>): void {
   try {
     if (Object.keys(drafts).length) localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
@@ -93,7 +96,7 @@ function applyDraft(cur: JournalEntry, d: Draft | undefined, today: string): Jou
  */
 function settleDraft(id: string, stored: JournalEntry | undefined, wrote: string[], dropStale: boolean): void {
   const drafts = readDrafts();
-  const d = drafts[id];
+  const d = draftOf(drafts, id);
   if (!d) return;
   if (stored) {
     for (const [k, c] of draftFields(d)) {
@@ -214,15 +217,15 @@ export const useJournal = create<JournalStore>()((set, get) => ({
     if (!keys.length && !('tag' in retag)) return;
     // Recorded before the write starts, so a tab closed mid-write loses nothing.
     const drafts = readDrafts();
-    const draft: Draft = drafts[id] ?? { notes: {} };
+    const draft: Draft = draftOf(drafts, id) ?? { notes: {} };
     for (const k of keys) draft.notes[k] = [draft.notes[k]?.[0] ?? entry.notes[k], edits[k]!];
     if (tag !== undefined && 'tag' in retag) draft.tag = [draft.tag?.[0] ?? entry.tag, tag];
-    drafts[id] = draft;
-    writeDrafts(drafts);
+    // Spread, not `drafts[id] = …`, which stores nothing for an id of "__proto__".
+    writeDrafts({ ...drafts, [id]: draft });
     const today = dayKey(new Date());
     const saved = await write(id, entry, { ...entry, ...retag, notes: { ...entry.notes, ...edits } }, (stored) => {
       // Another tab's edits cut off by its closing travel with this write.
-      const cur = applyDraft(stored, readDrafts()[id], today) ?? stored;
+      const cur = applyDraft(stored, draftOf(readDrafts(), id), today) ?? stored;
       const merged = { ...cur.notes, ...edits };
       // The first note written on a trade marks the day it was reviewed (the practice panel counts
       // them): clearing the notes and writing them again the same day is still the same review.
@@ -270,7 +273,8 @@ export const useJournal = create<JournalStore>()((set, get) => ({
       const here = !!stored && get().entries.some((x) => x.id === e.id);
       // The snapshot first, so an entry is never stored without it. One this browser has is kept;
       // one it lacks is added to an entry already here too, if it is that entry's snapshot.
-      const shot = e.snapshotKey && snapshots[e.snapshotKey];
+      // Only a snapshot of its own: an entry's snapshotKey can be any text in a file ("constructor").
+      const shot = e.snapshotKey && Object.hasOwn(snapshots, e.snapshotKey) && snapshots[e.snapshotKey];
       if (shot && (!stored || stored.snapshotKey === e.snapshotKey)) {
         const put = await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => (cur ? undefined : shot));
         if (put && here) shots++;

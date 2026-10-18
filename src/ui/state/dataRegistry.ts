@@ -39,11 +39,31 @@ export function sessionStamped(d: CsvDataset): CsvDataset {
   return bars.length === d.bars.length && bars.every((b, i) => b.time === d.bars[i].time) ? d : { ...d, bars };
 }
 
-export async function loadCsvDatasets(): Promise<CsvDataset[]> {
+/** The first read of the imported datasets (loadCsvDatasets), as the app opens; null until it starts. */
+let firstLoad: Promise<CsvDataset[]> | null = null;
+
+/**
+ * Settles once the imported datasets have first been read from storage (at once if that has not
+ * started): until then the CSV provider has none, though some may be imported.
+ */
+export function csvDatasetsLoaded(): Promise<unknown> {
+  return firstLoad ?? Promise.resolve();
+}
+
+/** Reads the imported datasets from storage and shows them. Meanwhile the first read says the data is still loading. */
+export function loadCsvDatasets(): Promise<CsvDataset[]> {
+  if (firstLoad) return readCsvDatasets();
+  csvProvider.setLoading(true);
+  firstLoad = readCsvDatasets();
+  return firstLoad;
+}
+
+async function readCsvDatasets(): Promise<CsvDataset[]> {
   try {
     const stored = await idb.all<CsvDataset>('datasets');
     const list = stored.map(sessionStamped);
     csvProvider.setDatasets(list);
+    csvProvider.setLoading(false);
     datasetsChanged();
     // Saved back that way, so storage (which a backup reads) keeps no midnight stamps. In one
     // transaction each, so a dataset another tab has just saved is never replaced.
@@ -56,6 +76,9 @@ export async function loadCsvDatasets(): Promise<CsvDataset[]> {
         .catch(() => undefined);
     return list;
   } catch {
+    // None could be read: the CSV provider says there is none.
+    csvProvider.setLoading(false);
+    datasetsChanged();
     return [];
   }
 }
