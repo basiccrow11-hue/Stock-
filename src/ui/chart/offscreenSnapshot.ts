@@ -67,9 +67,13 @@ export async function offscreenSnapshot(scene: ChartScene): Promise<string | nul
   const { timeframe, baseTimeframe, blind } = scene;
   const shift = blind ? blindChartShift(blind.sessionId) : 0;
   const ct = (t: number) => toChartTime(t, shift);
-  // Markers sit on the candle holding their time: at the data's own bar size, the bar holding it.
+  // Markers sit on the candle of the last bar at or before their time, as on screen (candleStarts): at
+  // the data's own bar size, that bar.
   const own = ownCandles(timeframe, baseTimeframe);
-  const candleStart = (t: number) => (own ? (scene.bars[lastIndexAtOrBefore(scene.bars, t, (b) => b.time)]?.time ?? t) : bucketFor(t, timeframe).start);
+  const candleStart = (t: number) => {
+    const start = scene.bars[lastIndexAtOrBefore(scene.bars, t, (b) => b.time)]?.time ?? t;
+    return own ? start : bucketFor(start, timeframe).start;
+  };
   // Shown from a little before the entry to the close. The chart is handed only those candles; the
   // earlier ones count for the indicators, which are worked out on every candle as on screen.
   const all = withHistory(aggregateBars(scene.bars, timeframe, baseTimeframe), scene.history, timeframe).candles;

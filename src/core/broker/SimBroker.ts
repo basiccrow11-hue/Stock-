@@ -1118,13 +1118,15 @@ export class SimBroker {
    * spread of the session the last price is from. Returns the closing orders.
    */
   closeOut(now = this.s.clock): Order[] {
-    // That session is the one the last bar closed in, not the clock's, which an order placed since may
-    // have moved on (to a new day before its first bar, say).
-    const closedAt = (symbol: string) => {
+    // That session is the one the last bar closed in (an hourly bar from 09:00 closes in the regular
+    // session), not the clock's, which an order placed since may have moved on (to a new day before its
+    // first bar, say).
+    const extended = (symbol: string) => {
       const bar = this.s.lastBar[symbol];
-      return bar ? bar.time + (this.s.lastBarSeconds?.[symbol] ?? 60) : this.s.clock;
+      if (!bar) return this.symbolSession(symbol) !== 'regular';
+      return marketSession(bar.time + (this.s.lastBarSeconds?.[symbol] ?? 60) - 1) !== 'regular';
     };
-    const ext = new Map(Object.keys(this.s.positions).map((symbol) => [symbol, this.symbolSession(symbol, closedAt(symbol)) !== 'regular']));
+    const ext = new Map(Object.keys(this.s.positions).map((symbol) => [symbol, extended(symbol)]));
     this.syncClock(now);
     const time = this.s.clock;
     for (const o of this.workingOrders()) this.cancel(o.id, 'Session ended');

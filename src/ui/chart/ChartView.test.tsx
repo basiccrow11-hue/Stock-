@@ -2,6 +2,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { Bar } from '../../core/types';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, regularCloseMinute } from '../../core/time';
 
 /**
  * A stand-in for lightweight-charts (jsdom has no canvas). It keeps every series' points and models
@@ -77,6 +79,8 @@ const lw = vi.hoisted(() => {
 
   class Series {
     points: Point[] = [];
+    /** The markers last set on it (lw.markers: those last set on any series). */
+    markers: { time: number; text?: string }[] = [];
     removed = false;
     constructor(private chart: Chart) {}
     setData(d: Point[]) {
@@ -205,7 +209,7 @@ vi.mock('lightweight-charts', async (original) => {
       lw.charts.push(c);
       return c;
     },
-    createSeriesMarkers: () => lw.lenient({ setMarkers: (m: { time: number }[]) => (lw.markers = m) }),
+    createSeriesMarkers: (series: { markers: unknown }) => lw.lenient({ setMarkers: (m: { time: number }[]) => (series.markers = lw.markers = m) }),
     createTextWatermark: () => lw.lenient({}),
   };
 });
@@ -385,7 +389,7 @@ describe('the chart during a long replay', () => {
     expect(main.points.map((p) => p.time)).toEqual(all.slice(start));
     for (const s of chart.series) expect(s.points.length).toBe(main.points.length);
     expect(atEdges()).toEqual(shownEdges);
-    expect(lw.markers.map((m) => m.time)).toEqual([toChartTime(store.candleStartFor('AAPL', sold.time, '1m'))]);
+    expect(lw.markers.map((m) => m.time)).toEqual([toChartTime(store.candleStarts('AAPL', '1m')(sold.time))]);
 
     // Still far back from the newest, play holds candles back again, and a button offers the way back.
     const newestButton = () => host.querySelector<HTMLButtonElement>('.chart-newest');
@@ -625,19 +629,18 @@ describe('the chart during fast play with the pointer on it', () => {
 describe('fill markers and journal pictures', () => {
   /**
    * A replay of 1-minute bars on a chart of `timeframe`, with snapshots on, and the chart on screen; on a
-   * symbol with no drawings, as jsdom never loads the image a picture draws them from.
+   * symbol with no drawings, as jsdom never loads the image a picture draws them from. The demo's NVDA,
+   * with extended hours, unless `data` names other bars.
    */
-  async function begin(timeframe: '1m' | '5m') {
+  async function begin(timeframe: '1m' | '5m' | '1h', data = { providerId: 'demo', symbol: 'NVDA', date: '2025-01-06', endDate: '2025-01-17' }) {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');
     const { useJournal } = await import('../state/journalStore');
     const { ChartView, toChartTime } = await import('./ChartView');
     useSettings.getState().update({ learningMode: false, autoSnapshot: true });
+    const { symbol } = data;
     const ok = await store.startReplay({
-      providerId: 'demo',
-      symbol: 'NVDA',
-      date: '2025-01-06',
-      endDate: '2025-01-17',
+      ...data,
       startTime: '09:30',
       endTime: '16:00',
       startingBalance: 100_000,
@@ -651,7 +654,7 @@ describe('fill markers and journal pictures', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const r = createRoot(host);
-    await act(async () => r.render(createElement(ChartView, { symbol: 'NVDA', timeframe })));
+    await act(async () => r.render(createElement(ChartView, { symbol, timeframe })));
     const chart = lw.charts.at(-1)!;
     // Laid out (jsdom lays nothing out), and the markers on the chart whenever a picture is taken of it.
     const el = host.querySelector<HTMLElement>('.chart-canvas')!;
@@ -659,7 +662,7 @@ describe('fill markers and journal pictures', () => {
     const shots: number[][] = [];
     Object.assign(chart, {
       takeScreenshot: () => {
-        shots.push(lw.markers.map((m) => m.time));
+        shots.push(chart.series[0].markers.map((m) => m.time));
         const canvas = document.createElement('canvas');
         canvas.toDataURL = () => 'data:image/jpeg;base64,AA==';
         return canvas;
@@ -674,7 +677,7 @@ describe('fill markers and journal pictures', () => {
       /** The chart time of the candle holding the newest fill, and that fill. */
       lastFill: () => {
         const f = store.useTrading.getState().fills.at(-1)!;
-        return { fill: f, candle: toChartTime(store.candleStartFor('NVDA', f.time, timeframe)) };
+        return { fill: f, candle: toChartTime(store.candleStarts(symbol, timeframe)(f.time)) };
       },
       mine: () => useJournal.getState().entries.filter((e) => e.sessionId === sessionId),
       end: async () => {
@@ -685,30 +688,146 @@ describe('fill markers and journal pictures', () => {
     };
   }
 
-  it('marks a fill on a candle that has not formed yet, and the exit is in the picture taken from the screen', async () => {
+  /** Unix time of `hhmm` ET on `date`. */
+  const et = (date: string, hhmm: string) => exchangeTimeToUnix(date, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3)));
+  /**
+   * The times of the chart's fill markers (`fills`) or all its markers, each checked to be on a candle
+   * the chart holds: lightweight-charts moves any other onto a neighbour.
+   */
+  const marked = (chart: (typeof lw.charts)[number], fills = false) => {
+    const { points, markers } = chart.series[0];
+    const candles = new Set(points.map((p) => p.time));
+    for (const m of markers) expect(candles).toContain(m.time);
+    return markers.filter((m) => !fills || /^(BUY|SELL) /.test(m.text ?? '')).map((m) => m.time);
+  };
+
+  it("marks a fill at a candle's end on the newest candle until the next one forms, and the exit is in the picture taken from the screen", async () => {
     const { store, chart, shots, lastFill, mine, end } = await begin('5m');
     const main = chart.series[0];
     // Three candles on, the clock is at the end of the newest candle: a market order fills at the start
-    // of the next, which has no bars yet. The chart puts its marker on the newest candle until it forms.
+    // of the next, which has no bars yet. Its marker is on the newest candle, the one it came after.
     for (let i = 0; i < 3; i++) act(() => store.stepCandle());
     act(() => void expect(store.submitOrder({ symbol: 'NVDA', action: 'buy', type: 'market', quantity: 100 }).ok).toBe(true));
     const buy = lastFill();
     expect(buy.fill.side).toBe('buy');
-    expect(buy.candle).toBeGreaterThan(main.points.at(-1)!.time);
-    expect(lw.markers.map((m) => m.time)).toEqual([buy.candle]);
+    expect(buy.candle).toBe(main.points.at(-1)!.time);
+    expect(marked(chart)).toEqual([buy.candle]);
 
+    // Once the next candle has formed, from bars at and after the fill's time, the marker is on it.
     // Closed at the next boundary, the trade's picture is the chart on screen, with its exit marker.
     for (let i = 0; i < 2; i++) act(() => store.stepCandle());
     act(() => void expect(store.closePosition('NVDA').ok).toBe(true));
     const sell = lastFill();
     expect(sell.fill.side).toBe('sell');
-    expect(sell.candle).toBeGreaterThan(main.points.at(-1)!.time);
-    expect(shots).toEqual([[buy.candle, sell.candle]]);
+    expect(sell.candle).toBe(main.points.at(-1)!.time);
+    expect(shots).toEqual([[buy.candle + 5 * 60, sell.candle]]);
     await vi.waitFor(() => expect(mine()).toHaveLength(1));
     expect(mine()[0].snapshotKey).toBeDefined();
     expect(mine()[0].snapshotOffscreen).toBeUndefined();
     expect(offscreen.drawn).toEqual([]);
     await end();
+  });
+
+  it('keeps a fill on the candle it came after when the next candle forms later or never: at the close, before a gap', async () => {
+    const { csvProvider } = await import('../state/dataRegistry');
+    const { toChartTime } = await import('./ChartView');
+    const ct = (date: string, hhmm: string) => toChartTime(et(date, hhmm));
+    // GAPPY trades in the regular session only, and not at all on January 6 from 14:30 to 15:34.
+    const bars: Bar[] = [];
+    for (const d of ['2025-01-02', '2025-01-03', '2025-01-06', '2025-01-07']) {
+      for (let m = 9 * 60 + 30; m < 16 * 60; m++) {
+        if (d === '2025-01-06' && m >= 14 * 60 + 30 && m < 15 * 60 + 35) continue;
+        const p = 50 + Math.sin(m / 7);
+        bars.push({ time: exchangeTimeToUnix(d, m), open: p, high: p + 0.05, low: p - 0.05, close: p + 0.01, volume: 10_000 });
+      }
+    }
+    csvProvider.upsert({ symbol: 'GAPPY', name: 'GAPPY', baseTimeframe: '1m', bars, importedAt: 0, fileName: 'GAPPY.csv' });
+    try {
+      for (const [timeframe, beforeGap, atClose] of [
+        ['5m', '14:25', '15:55'],
+        ['1h', '13:30', '15:30'],
+      ] as const) {
+        const { store, chart, shots, mine, end } = await begin(timeframe, { providerId: 'csv', symbol: 'GAPPY', date: '2025-01-06', endDate: '2025-01-07' });
+        const main = chart.series[0];
+        const buy = () => act(() => void expect(store.submitOrder({ symbol: 'GAPPY', action: 'buy', type: 'market', quantity: 100 }).ok).toBe(true));
+        // Bought at 14:30 as the gap begins: the candle from 14:30 never forms, so the marker stays on
+        // the one before, also once the candles after the gap have formed.
+        act(() => store.jumpTo(et('2025-01-06', '14:30')));
+        buy();
+        expect(store.useTrading.getState().fills.at(-1)!.time).toBe(et('2025-01-06', '14:30'));
+        expect(marked(chart)).toEqual([ct('2025-01-06', beforeGap)]);
+        act(() => store.jumpTo(et('2025-01-06', '15:40')));
+        expect(main.points.at(-1)!.time).toBeGreaterThan(ct('2025-01-06', '15:00'));
+        expect(marked(chart)).toEqual([ct('2025-01-06', beforeGap)]);
+        // Sold at 16:00, after the day's last bar, and bought again: on the last candle, in the picture
+        // taken from the screen too, and still there once the next morning's candles have formed.
+        act(() => store.jumpTo(et('2025-01-06', '16:00')));
+        act(() => void expect(store.closePosition('GAPPY').ok).toBe(true));
+        buy();
+        const expected = [ct('2025-01-06', beforeGap), ct('2025-01-06', atClose), ct('2025-01-06', atClose)];
+        expect(marked(chart)).toEqual(expected);
+        expect(shots).toEqual([expected.slice(0, 2)]);
+        for (let i = 0; i < 3; i++) act(() => store.stepForward());
+        expect(main.points.at(-1)!.time).toBe(ct('2025-01-07', '09:30'));
+        expect(marked(chart)).toEqual(expected);
+        await vi.waitFor(() => expect(mine()).toHaveLength(1));
+        await end();
+      }
+    } finally {
+      csvProvider.remove('GAPPY');
+    }
+  });
+
+  it("keeps an after-hours fill at 20:00 on the day's last candle, before and after the next pre-market forms", async () => {
+    const { toChartTime } = await import('./ChartView');
+    const ct = (date: string, hhmm: string) => toChartTime(et(date, hhmm));
+    for (const [timeframe, atEnd, nextOpen] of [
+      ['5m', '19:55', '04:00'],
+      ['1h', '19:30', '03:30'],
+    ] as const) {
+      const { store, chart, end } = await begin(timeframe);
+      const main = chart.series[0];
+      act(() => store.jumpTo(et('2025-01-06', '20:00')));
+      const limitPrice = Math.round(store.lastPrice('NVDA')! * 101) / 100;
+      act(() => void expect(store.submitOrder({ symbol: 'NVDA', action: 'buy', type: 'limit', limitPrice, quantity: 100, extendedHours: true }).ok).toBe(true));
+      expect(store.useTrading.getState().fills.at(-1)!.time).toBe(et('2025-01-06', '20:00'));
+      expect(marked(chart)).toEqual([ct('2025-01-06', atEnd)]);
+      for (let i = 0; i < 3; i++) act(() => store.stepForward());
+      expect(main.points.at(-1)!.time).toBe(ct('2025-01-07', nextOpen));
+      expect(marked(chart)).toEqual([ct('2025-01-06', atEnd)]);
+      await end();
+    }
+  });
+
+  it("keeps a simulated-market fill at the close on the session's last candle, also once the next session has begun", async () => {
+    const store = await import('../state/tradingStore');
+    const { ChartView, toChartTime } = await import('./ChartView');
+    expect(await store.startSim({ config: { seed: 5, eventFrequency: 3 }, startingBalance: 100_000, speed: 1 })).toBe(true);
+    const symbol = store.useTrading.getState().activeSymbol;
+    // Stepped a minute at a time to the close.
+    const now = () => store.useTrading.getState().now;
+    const atClose = () => exchangeMinuteOfDay(now()) === regularCloseMinute(exchangeDate(now()));
+    for (let i = 0; i < 400 && !atClose(); i++) store.stepForward();
+    expect(atClose()).toBe(true);
+    const close = now();
+    store.setTimeframe('5m');
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const r = createRoot(host);
+    await act(async () => r.render(createElement(ChartView, { symbol, timeframe: '5m' })));
+    const chart = lw.charts.at(-1)!;
+    const main = chart.series[0];
+    act(() => void expect(store.submitOrder({ symbol, action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true));
+    expect(store.useTrading.getState().fills.at(-1)!.time).toBe(close);
+    // Its headlines are marked too, each on a candle.
+    expect(marked(chart).length).toBeGreaterThan(1);
+    expect(marked(chart, true)).toEqual([toChartTime(close - 5 * 60)]);
+    act(() => store.stepForward());
+    expect(main.points.at(-1)!.time).toBe(toChartTime(exchangeTimeToUnix(exchangeDate(now()), 9 * 60 + 30)));
+    expect(marked(chart, true)).toEqual([toChartTime(close - 5 * 60)]);
+    act(() => r.unmount());
+    store.setTimeframe('1m');
+    await store.endSession();
   });
 
   it('draws the picture off screen when the chart on screen is scrolled back from the close', async () => {

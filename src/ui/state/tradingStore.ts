@@ -7,6 +7,7 @@
  */
 import { create } from 'zustand';
 import { bucketFor, ownCandles } from '../../core/data/aggregate';
+import { lastIndexAtOrBefore } from '../../core/util/math';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
 import { ReplaySession, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
@@ -263,13 +264,25 @@ export function getBaseTimeframe(symbol: string): Timeframe {
 }
 
 /**
- * Start of the candle holding time `t` on a `timeframe` chart of `symbol`: at the data's own bar
- * size, the revealed bar holding it (bars need not sit on the 09:30 grid), else its bucket.
+ * Where a `timeframe` chart of `symbol` puts what happened at time `t` (a fill, a headline): the start
+ * of the candle holding the last bar shown at or before `t`, at the data's own bar size that bar (bars
+ * need not sit on the 09:30 grid). So a fill at a candle's end whose next candle has not formed, or
+ * never forms (at the close, before a gap in the data), stays on the candle it came after, and no bar
+ * still to come moves it. One lookup serves every time asked about (the simulated market's bars are
+ * copied once).
  */
-export function candleStartFor(symbol: string, t: UnixSeconds, timeframe: Timeframe): UnixSeconds {
+export function candleStarts(symbol: string, timeframe: Timeframe): (t: UnixSeconds) => UnixSeconds {
   const e = eng.replay?.engineFor(symbol);
-  if (e && ownCandles(timeframe, e.baseTimeframe)) return e.barStartAtOrBefore(t) ?? t;
-  return bucketFor(t, timeframe).start;
+  if (e) {
+    const own = ownCandles(timeframe, e.baseTimeframe);
+    return (t) => {
+      const start = e.barStartAtOrBefore(t) ?? t;
+      return own ? start : bucketFor(start, timeframe).start;
+    };
+  }
+  // The simulated market's minute bars so far.
+  const bars = eng.stream?.getHistory(symbol) ?? [];
+  return (t) => bucketFor(bars[lastIndexAtOrBefore(bars, t, (b) => b.time)]?.time ?? t, timeframe).start;
 }
 
 export function getSimEventsFor(symbol: string): SimEvent[] {

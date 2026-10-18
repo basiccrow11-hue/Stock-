@@ -86,4 +86,49 @@ describe('a journal snapshot drawn off screen', () => {
     expect(markers.map((m) => m.time)).toEqual([at(250), at(255), at(260)].map((t) => toChartTime(t)));
     expect(markers.map((m) => m.text)).toEqual(['BUY 100 @ 102.50', 'SIM NEWS: News at 255', 'SELL 100 @ 102.60']);
   });
+
+  it('puts a fill or headline whose own candle never formed on the candle of the last bar before it, as on screen', async () => {
+    const { offscreenSnapshot } = await import('./offscreenSnapshot');
+    const et = (date: string, hhmm: string, seconds = 0) => exchangeTimeToUnix(date, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3))) + seconds;
+    /** 1-minute bars on `date` from `from` up to `to`. */
+    const minutes = (date: string, from: string, to: string): Bar[] => {
+      const out: Bar[] = [];
+      for (let t = et(date, from); t < et(date, to); t += 60) out.push({ time: t, open: 100, high: 100.5, low: 99.5, close: 100.2, volume: 1000 });
+      return out;
+    };
+    const at = (time: number, side: 'buy' | 'sell'): Fill => ({ ...fill(0, side), id: `f${time}${side}`, time });
+    const D1 = '2025-03-10';
+    const D2 = '2025-03-11';
+    // The regular session only, with no bars from 14:30 to 15:34 on the first day: bought as the gap
+    // begins, sold at the close after the last bar and bought again there, sold the next morning.
+    // A headline comes in the gap.
+    const rth = {
+      bars: [...minutes(D1, '09:30', '14:30'), ...minutes(D1, '15:35', '16:00'), ...minutes(D2, '09:30', '09:45')],
+      fills: [at(et(D1, '14:30'), 'buy'), at(et(D1, '16:00'), 'sell'), at(et(D1, '16:00'), 'buy'), at(et(D2, '09:40', 30), 'sell')],
+      news: [{ ...news(0), time: et(D1, '14:47') }],
+      entryTime: et(D1, '16:00'),
+    };
+    // Extended hours: bought at 20:00 after the last after-hours bar, sold in the next pre-market.
+    const ext = {
+      bars: [...minutes(D1, '09:30', '20:00'), ...minutes(D2, '04:00', '04:10')],
+      fills: [at(et(D1, '20:00'), 'buy'), at(et(D2, '04:05', 30), 'sell')],
+      news: [],
+      entryTime: et(D1, '20:00'),
+    };
+    const cases = [
+      { timeframe: '5m', scene: rth, want: [[D1, '14:25'], [D1, '14:25'], [D1, '15:55'], [D1, '15:55'], [D2, '09:40']] },
+      { timeframe: '1h', scene: rth, want: [[D1, '13:30'], [D1, '13:30'], [D1, '15:30'], [D1, '15:30'], [D2, '09:30']] },
+      { timeframe: '5m', scene: ext, want: [[D1, '19:55'], [D2, '04:05']] },
+      { timeframe: '1h', scene: ext, want: [[D1, '19:30'], [D2, '03:30']] },
+    ] as const;
+    for (const { timeframe, scene, want } of cases) {
+      handed.series.length = 0;
+      handed.markers.length = 0;
+      await offscreenSnapshot({ symbol: 'MSFT', timeframe, baseTimeframe: '1m', ...scene, fills: [...scene.fills], news: [...scene.news], bars: [...scene.bars], source: 'DEMO', blind: null });
+      const candles = handed.series[0].map((c) => c.time);
+      const markers = handed.markers[0].map((m) => m.time);
+      expect(markers).toEqual(want.map(([d, hhmm]) => toChartTime(et(d, hhmm))));
+      for (const m of markers) expect(candles).toContain(m);
+    }
+  });
 });

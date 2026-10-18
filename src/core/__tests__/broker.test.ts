@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SimBroker } from '../broker/SimBroker';
 import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import { bar, et } from './helpers';
+import { nextTradingDay, prevTradingDay } from '../time';
 import { equityBeforeEntry, riskBasis } from '../analytics/stats';
 import { CHALLENGES } from '../challenges/challenges';
 import { DEFAULT_TRADING_RULES } from '../learning/review';
@@ -97,27 +98,37 @@ describe('ending a session', () => {
 
   it('closes at the spread of the last price’s session however the clock moved since', () => {
     const cfg = { spread: { mode: 'cents' as const, value: 0.04, minimum: 0, extendedHoursMultiplier: 4 } };
-    /** Long 10 bought the day before, the last bar starting at `hhmm` on D and lasting `seconds`, ended the next morning. */
-    const exit = (hhmm: string, seconds: number, placeFirst: boolean) => {
+    /** Long 10 bought the day before, the last bar starting at `hhmm` on `day` and lasting `seconds`, ended the next morning. */
+    const exit = (hhmm: string, seconds: number, placeFirst: boolean, day = D) => {
       const broker = new SimBroker({ startingBalance: 100_000, config: { ...ZERO_COST_CONFIG, ...cfg }, idPrefix: 't' });
-      broker.onBar(S, bar(et('2025-01-14', '15:58'), 100, 100, 100, 100));
+      broker.onBar(S, bar(et(prevTradingDay(day), '15:58'), 100, 100, 100, 100));
       broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
-      broker.onBar(S, bar(et(D, hhmm), 100, 100.5, 99.5, 100.2), seconds);
+      broker.onBar(S, bar(et(day, hhmm), 100, 100.5, 99.5, 100.2), seconds);
       // An order placed the next morning, before the stock has traded, moves the broker's clock on.
       if (placeFirst) {
-        broker.syncClock(et('2025-01-16', '09:00'));
+        broker.syncClock(et(nextTradingDay(day), '09:00'));
         expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 90, quantity: 10, tif: 'gtc' }).ok).toBe(true);
       }
-      broker.closeOut(et('2025-01-16', '09:45'));
+      broker.closeOut(et(nextTradingDay(day), '09:45'));
       return broker.state.fills.at(-1)!;
     };
     for (const placeFirst of [false, true]) {
-      // The 15:59 bar's close is a regular-hours price, and so is a daily bar's.
+      // The 15:59 bar's close is a regular-hours price, and so is a daily bar's, on an early close too.
       expect(exit('15:59', 60, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
       expect(exit('09:30', 6.5 * 3600, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
-      // An after-hours bar's is not, nor is that of an hourly bar from 15:30, which closed at 16:30.
+      expect(exit('09:30', 3.5 * 3600, placeFirst, '2024-12-24')).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      // So is that of a bar that opened in the pre-market and closed in the session: an hourly bar from
+      // 09:00, a 4-hour one from 08:00.
+      expect(exit('09:00', 3600, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      expect(exit('08:00', 4 * 3600, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      expect(exit('12:00', 4 * 3600, placeFirst)).toMatchObject({ price: 100.18, spreadCost: 0.2 });
+      // An after-hours bar's is not, nor is that of an hourly bar from 15:30, which closed at 16:30, or of
+      // a bar that closed at the open.
       expect(exit('16:05', 60, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
       expect(exit('15:30', 3600, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
+      expect(exit('12:30', 3600, placeFirst, '2024-12-24')).toMatchObject({ price: 100.12, spreadCost: 0.8 });
+      expect(exit('09:29', 60, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
+      expect(exit('04:00', 4 * 3600, placeFirst)).toMatchObject({ price: 100.12, spreadCost: 0.8 });
     }
   });
 });

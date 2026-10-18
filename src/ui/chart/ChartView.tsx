@@ -39,7 +39,7 @@ import type { ChartHistory } from '../../core/replay/ReplaySession';
 import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
-import { candleStartFor, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
+import { candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
 import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { ChartLegend, type LegendEntry, type LegendModel, type LegendSource } from './ChartLegend';
@@ -1009,14 +1009,14 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   useEffect(() => {
     const m = markersRef.current;
     if (!m) return;
-    // Those outside the candles handed to the chart are left out (see chartMarkers): before the oldest,
-    // and while newer candles are held back, after the newest. Otherwise a fill on a candle that has not
-    // formed yet (an order filled at a candle's end on a chart coarser than the data) goes on the newest.
+    // Each on the candle of the last bar shown at or before it (candleStarts), so never on one that has
+    // not formed. Those outside the candles handed to the chart are left out (see chartMarkers): before
+    // the oldest, and while newer candles are held back, after the newest.
     const shown = shownCandles();
     const oldest = shown[0]?.time ?? Infinity;
     const newest = heldRef.current === null ? Infinity : (shown[shown.length - 1]?.time ?? -Infinity);
     const own = fills.filter((f) => f.symbol === symbol);
-    m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), (t) => candleStartFor(symbol, t, timeframe), oldest, newest, ct, pal));
+    m.setMarkers(chartMarkers(own, getSimEventsFor(symbol), candleStarts(symbol, timeframe), oldest, newest, ct, pal));
   }, [fills, symbol, timeframe, simEventCount, seriesVersion, windowVersion, shift, pal.markerBuy, pal.markerSell, pal.markerUp, pal.markerDown]);
 
   // ---------------------------------------------------------------- price lines: position + orders
