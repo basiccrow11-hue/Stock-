@@ -311,7 +311,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     }
     return found;
   };
-  /** Where an order that fired with no room left in the bar starting at `noRoom` first filled, at `filled`: the next bar's open, or a later one's. */
+  /** Which bar's open an order that fired with no room left in the bar starting at `noRoom` first filled at, at `filled`: the next bar's, or a later one's. */
   const openAfter = (noRoom: number, filled: number) => {
     const a = barAt(noRoom);
     const b = barAt(filled);
@@ -612,6 +612,9 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     // It fired with no room left under its bar's volume cap, so none of it filled on that bar.
     const noRoom = main!.order.noRoomBar;
     const noneThere = first !== undefined && noRoom !== undefined;
+    // Where the first of them filled: at the open of a bar that began after it fired, or, for one placed
+    // partway into a bar (paused mid-bar), on that bar's prices after it was placed.
+    const firstAt = (px: number) => (first.at === 'open' ? `${openAfter(noRoom!, first.time)}, ${formatTick(px)}` : `${formatTick(px)} when they could next trade`);
     if (!pastStop && (stopParts.length > 1 || noneThere) && (exitPx - stopAt) * dir > 0) {
       const Stop = `${theStop[0].toUpperCase()}${theStop.slice(1)} at ${formatTick(stopAt)}`;
       const after = `That helped this time; had price kept going, ${noneThere ? 'they' : 'the rest'} would have filled further past the stop. For a position this large against the stock's volume, a stop does not fix the exit price.`;
@@ -619,7 +622,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         tone: 'neutral',
         title: noneThere ? 'Your stop fired, and it filled after price came back' : 'Your stop fired, and the rest filled after price came back',
         detail: noneThere
-          ? `${Stop} fired on a bar whose volume cap (Data & Settings) left no room for it, so none of its ${main!.qty} shares could ${long ? 'sell' : 'be bought back'} there. A stop that has fired is a market order, so ${stopParts.length > 1 ? `they ${long ? 'sold' : 'were bought back'} over later bars as price came back, the first ${first.quantity} at ${openAfter(noRoom!, first.time)}, ${formatTick(first.price)}, for an average of ${formatTick(exitPx)}` : `they ${long ? 'sold' : 'were bought back'} at ${openAfter(noRoom!, first.time)}, ${formatTick(exitPx)}, after price had come back`}. ${after}`
+          ? `${Stop} fired on a bar whose volume cap (Data & Settings) left no room for it, so none of its ${main!.qty} shares could ${long ? 'sell' : 'be bought back'} there. A stop that has fired is a market order, so ${stopParts.length > 1 ? `they ${long ? 'sold' : 'were bought back'} over later bars as price came back, the first ${first.quantity} at ${firstAt(first.price)}, for an average of ${formatTick(exitPx)}` : `they ${long ? 'sold' : 'were bought back'} at ${firstAt(exitPx)}, after price had come back`}. ${after}`
           : `${Stop} fired, but the volume cap (Data & Settings) let only ${first.quantity} of its ${main!.qty} shares ${long ? 'sell' : 'be bought back'} on the bar it fired, at ${formatTick(first.price)}. A stop that has fired is a market order, so the rest ${long ? 'sold' : 'was bought back'} over the next bars as price came back, for an average of ${formatTick(exitPx)}. ${after}`,
       });
     }

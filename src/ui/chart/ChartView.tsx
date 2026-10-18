@@ -440,11 +440,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }, [blind, timeframe, shift]);
 
   // A blind session's times are moved on the chart (and back when it ends): every point is re-sent.
+  // With every time changed the library cannot keep the view on its candles, so it is put back as far
+  // from the newest candle as it was (a scroll position, which the library applies on its next frame).
   const shownShift = useRef(shift);
   useEffect(() => {
     if (shownShift.current === shift) return;
     shownShift.current = shift;
+    const range = chartRef.current?.timeScale().getVisibleLogicalRange();
+    const fromNewest = range ? windowStartRef.current + range.to - (candlesRef.current.length - 1) : null;
     fullRedraw();
+    if (fromNewest !== null) chartRef.current?.timeScale().scrollToPosition(fromNewest, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shift]);
 
@@ -693,15 +698,18 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /**
    * Hands the chart the candles held back from it, keeping the view on the candles it shows; or, when
    * the newest one it had is on screen (the user went to the end), moving on to the newest, as the chart
-   * does when play adds a candle while the newest is on screen.
+   * does when play adds a candle while the newest is on screen. The library applies the range set here
+   * on its next frame, by logical index: a caller about to hand over candles from another start
+   * (drawCandles) passes `keepRange` false, as the range would then land on other candles. The library
+   * keeps the view on its candles as the held ones are added anyway.
    */
-  function catchUp(): void {
+  function catchUp(keepRange = true): void {
     if (heldRef.current === null) return;
     const range = chartRef.current?.timeScale().getVisibleLogicalRange();
     const atEnd = !!range && Math.ceil(range.to) >= chartCount() - 1;
     heldRef.current = null;
     setWindowData();
-    if (range && !atEnd) chartRef.current?.timeScale().setVisibleLogicalRange(range);
+    if (keepRange && range && !atEnd) chartRef.current?.timeScale().setVisibleLogicalRange(range);
     syncWindowVersion();
     setGeometryVersion((v) => v + 1);
   }
@@ -870,8 +878,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // counted from the newest candle: the window keeps as many candles as reach back to the oldest on screen.
     const key = `${symbol}|${timeframe}|${useTrading.getState().session?.id ?? ''}`;
     const same = key === windowKeyRef.current;
-    // With candles held back the chart counts from an older newest one: hand them over first.
-    if (same) catchUp();
+    // With candles held back the chart counts from an older newest one: hand them over first, with no
+    // range set for the next frame, which would come after the candles below and put the view on others.
+    if (same) catchUp(false);
     const range = chartRef.current?.timeScale().getVisibleLogicalRange();
     const onScreen = range ? chartCount() - Math.max(0, Math.floor(range.from)) + WINDOW_MARGIN : 0;
     const shown = same ? Math.max(WINDOW, onScreen) : WINDOW;

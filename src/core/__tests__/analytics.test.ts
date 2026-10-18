@@ -476,6 +476,49 @@ describe('learning review', () => {
       }
     });
 
+    it('says a stop placed through the market mid-bar with no room left filled when it could next trade, not at the next bar’s open', () => {
+      // 5-minute bars, each filling at most a quarter of its volume. A limit add uses up the 10:05 bar's
+      // room; with the replay paused at 10:12, a stop placed through the market fires at once with none
+      // left there, and fills two minutes into the 10:10 bar, which opened at 99.00 (101.00 for a short).
+      const run = (long: boolean, thinNext: boolean) => {
+        const p = (x: number) => (long ? x : 200 - x);
+        const b5 = (hhmm: string, o: number, h: number, l: number, c: number, v: number) =>
+          long ? bar(et('2025-01-15', hhmm), o, h, l, c, v) : bar(et('2025-01-15', hhmm), p(o), p(l), p(h), p(c), v);
+        const bars = [
+          ...['09:50', '09:55', '10:00'].map((t) => b5(t, 100, 100, 100, 100, 400)),
+          b5('10:05', 100, 100, 99, 99, 400),
+          b5('10:10', 99, 101.5, 99, 100, thinNext ? 400 : 1000),
+          ...['10:15', '10:20', '10:25'].map((t) => b5(t, 100, 100, 100, 100, 1000)),
+        ];
+        const engine = new ReplayEngine({ symbol: 'T', start: et('2025-01-15', '10:00'), end: et('2025-01-15', '10:30'), baseTimeframe: '5m' }, bars);
+        const s = new ReplaySession(engine, { symbol: 'T', date: '2025-01-15', startTime: '10:00', endTime: '10:30', startingBalance: 100_000, lookbackDays: 1 }, { ...ZERO_COST_CONFIG, maxParticipation: 0.25 }, 'n', 'HISTORICAL');
+        s.step();
+        const entry = long ? 'buy' : 'short';
+        expect(s.submit({ symbol: 'T', action: entry, type: 'market', quantity: 100 }).order!.filledQty).toBe(100);
+        s.submit({ symbol: 'T', action: entry, type: 'limit', limitPrice: p(99.2), quantity: 100, tif: 'gtc' });
+        s.step();
+        s.advance(120);
+        const stop = s.submit({ symbol: 'T', action: long ? 'sell' : 'cover', type: 'stop', stopPrice: p(99.4), quantity: 200, tif: 'gtc' }).order!;
+        expect([stop.triggered, stop.noRoomBar, stop.placedThrough]).toEqual([true, et('2025-01-15', '10:05'), true]);
+        while (!s.finished) s.step();
+        const st = s.broker.state;
+        const exits = st.fills.filter((f) => f.orderId === stop.id);
+        expect(exits[0]).toMatchObject({ time: et('2025-01-15', '10:12'), price: p(99.5), at: 'bar' });
+        const review = reviewTrade({ trip: st.roundTrips[0], fills: st.fills, orders: st.orders, revealedBars: s.engine.visibleBaseBars(), timeframe: '5m', baseTimeframe: '5m', equityCurve: st.equityCurve, startingBalance: 100_000, allTrips: st.roundTrips, rules: DEFAULT_TRADING_RULES });
+        return review.findings.find((f) => f.title === 'Your stop fired, and it filled after price came back')?.detail ?? '';
+      };
+      for (const long of [true, false]) {
+        const [sold, px] = long ? ['sold', '99.50'] : ['were bought back', '100.50'];
+        const one = run(long, false);
+        expect(one).toContain(`A stop that has fired is a market order, so they ${sold} at ${px} when they could next trade, after price had come back.`);
+        expect(one).not.toContain("bar's open");
+        // In parts: the first 100 two minutes into the 10:10 bar, the rest at the 10:15 open.
+        const parts = run(long, true);
+        expect(parts).toContain(`so they ${sold} over later bars as price came back, the first 100 at ${px} when they could next trade, for an average of ${long ? '99.75' : '100.25'}.`);
+        expect(parts).not.toContain("bar's open");
+      }
+    });
+
     it('measures risk from the order price when a gap fills the entry past its own stop', () => {
       const b = new SimBroker({ startingBalance: 100_000, config: ZERO_COST_CONFIG });
       const bars = [bar(et('2025-01-15', '15:59'), 101, 101.2, 100.8, 101)];
