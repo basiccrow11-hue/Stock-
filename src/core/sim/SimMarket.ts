@@ -323,6 +323,12 @@ export interface SimTickUpdate {
 /** Volatility multiplier for each regime; their mean square over a regime's typical time in each is about 1. */
 const REGIME_VOL: Record<StockRegime, number> = { range: 0.9, uptrend: 1.05, downtrend: 1.05, breakout: 1.8 };
 
+/** A SimMarket's whole state as plain data (SimMarket.snapshot), to carry it on later. */
+export interface SimMarketSnapshot {
+  fields: Record<string, unknown>;
+  rng: { state: number; spare: number | null };
+}
+
 export class SimMarket {
   readonly profiles: SimStockProfile[];
   config: SimConfig;
@@ -384,6 +390,29 @@ export class SimMarket {
       const target = exchangeTimeToUnix(opts.startDate && isTradingDay(opts.startDate) ? opts.startDate : nextTradingDay(opts.startDate), REGULAR_OPEN);
       while (this.clock < target) this.step(false);
     }
+  }
+
+  /**
+   * The market's whole state as plain data (a copy), so it can be saved and carried on later: the
+   * market restored from it moves on tick for tick as this one would have.
+   */
+  snapshot(): SimMarketSnapshot {
+    const { rng, ...fields } = this as unknown as { rng: Rng } & Record<string, unknown>;
+    return { fields: structuredClone(fields), rng: rng.snapshot() };
+  }
+
+  /** The market a snapshot was taken of, carrying on from that moment. Throws for one this version of the market cannot carry on. */
+  static restore(snap: SimMarketSnapshot): SimMarket {
+    // Every field the market has must be there: one written before a field was added cannot go on.
+    const want = Object.keys(new SimMarket({ startDate: '2024-01-02', warmupSessions: 0 })).filter((k) => k !== 'rng');
+    const have = snap?.fields && typeof snap.fields === 'object' ? Object.keys(snap.fields) : [];
+    if (want.length !== have.length || want.some((k) => !have.includes(k)) || typeof snap.rng?.state !== 'number') {
+      throw new Error('This simulated market was saved by another version of the app and cannot be carried on.');
+    }
+    const m = Object.create(SimMarket.prototype) as SimMarket;
+    Object.assign(m, structuredClone(snap.fields));
+    m.rng = Rng.restore(snap.rng);
+    return m;
   }
 
   symbols(): SymbolInfo[] {

@@ -5,7 +5,7 @@
  * rather than in the components that failed. The boundary around the whole app is the last resort.
  */
 import { Component, createElement, createRef, lazy, useId, type ComponentProps, type ComponentType, type ReactNode, type RefObject } from 'react';
-import { pause, useTrading } from '../state/tradingStore';
+import { pause, sessionUnsaved, useTrading } from '../state/tradingStore';
 import { useCredentials } from '../state/credentials';
 import { Modal, isShown } from './common';
 
@@ -189,10 +189,9 @@ function Fallback({ what, layout, className, hidden, error, paused, messageRef, 
         ? `Your ${session} is still held in memory${paused ? ', paused' : ''}: Try again draws the app again without ending it. If it keeps failing, reload the app.`
         : 'Try again to draw the app again. If it keeps failing, reload the app.'
       : `The rest of the app still works${mode ? `, and ${state}` : ''}. Try again to draw it again. If it keeps failing, reload the app.`;
-  // Sessions are kept only in memory (tradingStore): a reload starts the app with none.
-  const note = `${mode ? `Reloading ends your ${session}: sessions are not restored after a reload. It keeps` : 'Reloading keeps'} your journal, settings, imported data and drawings.${
-    keys ? ' API keys you entered have to be entered again (or unlocked, if you saved them).' : ''
-  }`;
+  // The running session is saved as it goes (savedSessions), and a reload carries it on, unless this browser could not save it.
+  const reloads = !mode ? 'Reloading keeps' : sessionUnsaved() ? `Reloading ends your ${session}: it could not be saved in this browser. It keeps` : `Reloading brings your ${session} back where it was, paused, and keeps`;
+  const note = `${reloads} your journal, settings, imported data and drawings.${keys ? ' API keys you entered have to be entered again (or unlocked, if you saved them).' : ''}`;
   const compact = layout === 'panel' || layout === 'bar';
   const btn = compact ? 'btn sm' : 'btn';
   const reload = (

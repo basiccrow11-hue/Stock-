@@ -23,7 +23,7 @@ import { useChallenges } from "./state/challengeStore";
 import { useCredentials } from "./state/credentials";
 import { loadCsvDatasets } from "./state/dataRegistry";
 import { dismissCelebration, openStreakPanel, startPracticeTracker } from "./state/streakStore";
-import { closeReview, useTrading } from "./state/tradingStore";
+import { closeReview, resumeAfterReload, useTrading } from "./state/tradingStore";
 
 export function App() {
   const [view, setView] = useState<View>("trade");
@@ -40,10 +40,12 @@ export function App() {
   }, [view]);
 
   useEffect(() => {
-    void useJournal.getState().load();
+    const journal = useJournal.getState().load();
     void useChallenges.getState().load();
-    void loadCsvDatasets();
+    const datasets = loadCsvDatasets();
     void useCredentials.getState().checkServer();
+    // A reload carries on the session this tab was running, once the journal and imported data are in.
+    void Promise.all([journal, datasets]).then(() => resumeAfterReload());
   }, []);
 
   // "Theme and all colours…" in the chart toolbar: open settings at the Appearance card, which

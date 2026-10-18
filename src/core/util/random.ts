@@ -61,6 +61,19 @@ export class Rng {
   getState(): number {
     return this.state;
   }
+
+  /** Everything the next draws depend on, to carry on later from the same point (restore). */
+  snapshot(): { state: number; spare: number | null } {
+    return { state: this.state, spare: this.spare };
+  }
+
+  /** A generator that draws what the one `snapshot` was taken of would have drawn next. */
+  static restore(s: { state: number; spare: number | null }): Rng {
+    const r = new Rng(1);
+    r.state = s.state >>> 0;
+    r.spare = s.spare;
+    return r;
+  }
 }
 
 /** Stable 32-bit hash of a string (FNV-1a), used to derive seeds. */

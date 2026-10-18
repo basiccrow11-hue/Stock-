@@ -38,6 +38,7 @@ export class ReplayEngine {
   #cursor: number;
   #now: UnixSeconds;
   readonly #firstSessionIndex: number;
+  #fingerprint: number | null = null;
 
   constructor(window: ReplayWindow, bars: readonly Bar[]) {
     this.symbol = window.symbol;
@@ -59,6 +60,34 @@ export class ReplayEngine {
     if (this.#firstSessionIndex >= this.#bars.length) {
       throw new Error('No data between the selected start and end times.');
     }
+  }
+
+  /**
+   * A 32-bit hash of the bars this replay holds, to tell whether a later load gave it the same data
+   * (a saved session carries on only on the data it was played on). It tells nothing about the bars.
+   */
+  fingerprint(): number {
+    if (this.#fingerprint === null) {
+      const f = new Float64Array(1);
+      const u = new Uint32Array(f.buffer);
+      let h = 0x811c9dc5;
+      const mix = (x: number) => {
+        f[0] = x;
+        h = Math.imul(h ^ u[0], 0x01000193);
+        h = Math.imul(h ^ u[1], 0x01000193);
+      };
+      mix(this.#bars.length);
+      for (const b of this.#bars) {
+        mix(b.time);
+        mix(b.open);
+        mix(b.high);
+        mix(b.low);
+        mix(b.close);
+        mix(b.volume);
+      }
+      this.#fingerprint = h >>> 0;
+    }
+    return this.#fingerprint;
   }
 
   /** Simulated wall-clock time. */

@@ -6,6 +6,7 @@ import { IndicatorMenu } from './IndicatorMenu';
 import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
 import { EmptyState, useFocusRescue } from './common';
+import { UnfinishedSessions } from './UnfinishedSessions';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
 
@@ -71,6 +72,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
             ) : (
               <div className="stack" style={{ alignItems: 'center', width: '100%', maxWidth: 520, textAlign: 'center' }}>
                 {error && <div className="alert error">{error}</div>}
+                <UnfinishedSessions />
                 <h2>Practice trading when the market is closed</h2>
                 <p className="muted">
                   Pick an old trading day and replay it bar by bar without seeing what comes next, or trade a continuously running fictional market.

@@ -1081,3 +1081,93 @@ describe('Demo data for long requests', () => {
     expect(bars).toEqual(new DemoDataProvider(new Date('2026-10-08T12:00:00Z')).getBarsSync(req));
   });
 });
+
+describe('saving a replay and carrying it on later', () => {
+  const p = new DemoDataProvider(new Date('2026-10-08T12:00:00Z'));
+  const setup = { ...setupFor(), symbol: 'SPY', extraSymbols: ['AAPL'], lookbackDays: 1 };
+  /** `p` with its bars changed by `edit`. */
+  const providerWith = (edit: (symbol: string, bars: Bar[]) => Bar[]): HistoricalDataProvider => ({
+    id: 'edited',
+    name: 'Edited',
+    source: 'DEMO',
+    requiresCredentials: false,
+    unavailableReason: () => null,
+    listSymbols: () => p.listSymbols(),
+    baseTimeframe: () => p.baseTimeframe(),
+    availableRange: (s) => p.availableRange(s),
+    getBars: async (req, signal) => edit(req.symbol, await p.getBars(req, signal)),
+  });
+
+  /** A session with trades on both symbols, a settings change, a rewind and an order working. */
+  async function played(): Promise<ReplaySession> {
+    const { session: s } = await ReplaySession.load(p, setup, ZERO_COST_CONFIG, 'r');
+    s.jumpTo(et(D, '09:40'));
+    for (const sym of ['SPY', 'AAPL']) {
+      const px = s.broker.markPrice(sym)!;
+      expect(s.submit({ symbol: sym, action: 'buy', type: 'market', quantity: 10, stopLoss: px * 0.998, takeProfit: px * 1.002 }).ok).toBe(true);
+    }
+    s.jumpTo(et(D, '10:30'));
+    s.setConfig({ ...DEFAULT_EXECUTION_CONFIG });
+    s.jumpTo(et(D, '11:00'));
+    s.stepBack();
+    const px = s.broker.markPrice('SPY')!;
+    expect(s.submit({ symbol: 'SPY', action: 'buy', type: 'limit', quantity: 20, limitPrice: px * 0.999 }).ok).toBe(true);
+    s.stepCandle('5m', 'AAPL');
+    return s;
+  }
+
+  it('carries on exactly where it was, forward and back through its undo history', async () => {
+    const a = await played();
+    const saved = structuredClone(a.save()); // as storage keeps it
+    const b = await ReplaySession.resume(p, saved, 'r');
+    expect(b.symbols).toEqual(['SPY', 'AAPL']);
+    expect(b.now).toBe(a.now);
+    expect(b.rewinds).toBe(1);
+    expect(b.broker.state).toEqual(a.broker.state);
+    expect(b.broker.cfg).toEqual(DEFAULT_EXECUTION_CONFIG);
+    for (const sym of a.symbols) {
+      expect(b.engineFor(sym)!.visibleBaseBars()).toEqual(a.engineFor(sym)!.visibleBaseBars());
+      expect(b.engineFor(sym)!.nextBarTime()).toBe(a.engineFor(sym)!.nextBarTime());
+    }
+    a.jumpTo(et(D, '12:00'));
+    b.jumpTo(et(D, '12:00'));
+    expect(account(b)).toEqual(account(a));
+    // Back past the settings change, which the bars before it were not traded under, then to the start.
+    expect(b.undoneBy(et(D, '10:20'))).toEqual(a.undoneBy(et(D, '10:20')));
+    a.jumpTo(et(D, '10:20'));
+    b.jumpTo(et(D, '10:20'));
+    expect(account(b)).toEqual(account(a));
+    a.jumpTo(et(D, '13:00'));
+    b.jumpTo(et(D, '13:00'));
+    expect(account(b)).toEqual(account(a));
+    a.restart();
+    b.restart();
+    expect(account(b)).toEqual(account(a));
+    expect(b.broker.state.orders).toHaveLength(0);
+  });
+
+  it('is a copy of the moment it was taken', async () => {
+    const a = await played();
+    const saved = a.save();
+    const at = a.now;
+    a.jumpTo(et(D, '12:00'));
+    expect(saved.nows).toEqual([at, at]);
+    const b = await ReplaySession.resume(p, saved, 'r');
+    expect(b.now).toBe(at);
+    expect(b.engine.lastBar()!.time).toBeLessThan(at);
+  });
+
+  it('will not carry on over data that has changed or a symbol that no longer loads', async () => {
+    const saved = (await played()).save();
+    // One bar inside the replay changed (the session had not reached it yet).
+    const changed = providerWith((sym, bars) => (sym === 'AAPL' ? bars.map((b) => (b.time === et(D, '14:00') ? { ...b, close: b.close + 0.01 } : b)) : bars));
+    await expect(ReplaySession.resume(changed, saved, 'r')).rejects.toThrow('The AAPL data is not what this session was played on any more');
+    const gone = providerWith((sym, bars) => {
+      if (sym === 'AAPL') throw new Error('No AAPL data');
+      return bars;
+    });
+    await expect(ReplaySession.resume(gone, saved, 'r')).rejects.toThrow('AAPL skipped: No AAPL data');
+    await expect(ReplaySession.resume(p, { ...saved, cursors: [] }, 'r')).rejects.toThrow('could not be read');
+    await expect(ReplaySession.resume(p, { ...saved, cursors: [saved.cursors[0] + 1, saved.cursors[1]] }, 'r')).rejects.toThrow('does not match its data');
+  });
+});

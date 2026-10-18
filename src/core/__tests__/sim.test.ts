@@ -405,3 +405,48 @@ describe('the equity curve in the simulated market', () => {
     expect(broker.state.equityCurve.map((p) => p.equity)).toEqual(atMinuteEnd);
   });
 });
+
+describe('saving the simulated market and carrying it on later', () => {
+  it('carries on tick for tick from a saved copy, through the close, the night and the next open', () => {
+    const a = new SimMarket({ startDate: '2024-03-12', config: { seed: 42, eventFrequency: 3 } });
+    a.advance(3 * 3600);
+    let spares = 0;
+    // A few moments, so at least one falls between the two numbers a normal draw makes.
+    for (let i = 0; i < 4; i++) {
+      a.advance(7);
+      const snap = structuredClone(a.snapshot()); // as storage keeps it
+      if (snap.rng.spare !== null) spares++;
+      const b = SimMarket.restore(snap);
+      expect(b.clock).toBe(a.clock);
+      if (i < 3) {
+        expect(b.advance(600)).toEqual(a.advance(600));
+        continue;
+      }
+      expect(b.advance(9 * 3600)).toEqual(a.advance(9 * 3600));
+      expect(exchangeDate(b.clock)).toBe('2024-03-13');
+      expect(b.clock).toBe(a.clock);
+      for (const p of SIM_STOCKS) expect(b.history(p.symbol)).toEqual(a.history(p.symbol));
+      expect(b.events).toEqual(a.events);
+      expect([b.marketRegime, b.dayCharacter, b.dayDirection]).toEqual([a.marketRegime, a.dayCharacter, a.dayDirection]);
+    }
+    expect(spares).toBeGreaterThan(0);
+  });
+
+  it('keeps the moment it was taken while the market moves on', () => {
+    const a = new SimMarket({ startDate: '2024-03-12', config: { seed: 5 } });
+    const snap = a.snapshot();
+    const at = a.clock;
+    const before = a.history('SIMX').length;
+    a.advance(1800);
+    const b = SimMarket.restore(snap);
+    expect(b.clock).toBe(at);
+    expect(b.history('SIMX')).toHaveLength(before);
+  });
+
+  it('refuses a saved market that lacks part of its state', () => {
+    const snap = new SimMarket({ startDate: '2024-03-12', config: { seed: 5 }, warmupSessions: 0 }).snapshot();
+    delete snap.fields.marketH;
+    expect(() => SimMarket.restore(snap)).toThrow('another version of the app');
+    expect(() => SimMarket.restore({ fields: {}, rng: { state: 1, spare: null } })).toThrow('another version of the app');
+  });
+});

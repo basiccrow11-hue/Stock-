@@ -169,7 +169,7 @@ describe('error boundaries', () => {
     expect(moduleRetryUrl('Failed to fetch dynamically imported module: /x.js', 1)).toBeNull();
   });
 
-  it('say a reload ends the running session, and keep the session when a panel fails', async () => {
+  it('say a reload brings the running session back, and keep the session when a panel fails', async () => {
     quiet();
     const store = await import('../state/tradingStore');
     await store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 1 });
@@ -182,7 +182,7 @@ describe('error boundaries', () => {
     expect(fallback.textContent).toContain('The watchlist stopped because of an error');
     expect(fallback.textContent).toContain('The rest of the app still works, and your simulated market session carries on.');
     expect(fallback.textContent).toContain(
-      'Reloading ends your simulated market session: sessions are not restored after a reload. It keeps your journal, settings, imported data and drawings.',
+      'Reloading brings your simulated market session back where it was, paused, and keeps your journal, settings, imported data and drawings.',
     );
     expect(button('Reload the app').getAttribute('aria-describedby')).toBe(fallback.querySelector('p.small.muted')!.id);
     // The rest of the terminal and the top bar are drawn, and the session is the same one.

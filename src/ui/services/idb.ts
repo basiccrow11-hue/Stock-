@@ -1,6 +1,7 @@
 /**
  * Minimal promise-based IndexedDB key-value store. Used for data that is too large for
- * localStorage: imported CSV datasets, journal entries, chart snapshots, encrypted credentials.
+ * localStorage: imported CSV datasets, journal entries, chart snapshots, encrypted credentials and
+ * unfinished sessions (savedSessions).
  * Every call degrades gracefully (rejects with a clear error) if IndexedDB is unavailable.
  */
 const DB_NAME = 'stock-replay';
@@ -75,6 +76,10 @@ export const idb = {
   },
   all<T>(store: StoreName): Promise<T[]> {
     return tx<T[]>(store, 'readonly', (s) => s.getAll() as IDBRequest<T[]>);
+  },
+  /** Every value whose key starts with `prefix`. */
+  withPrefix<T>(store: StoreName, prefix: string): Promise<T[]> {
+    return tx<T[]>(store, 'readonly', (s) => s.getAll(IDBKeyRange.bound(prefix, `${prefix}\uffff`)) as IDBRequest<T[]>);
   },
   clear(store: StoreName): Promise<undefined> {
     return tx(store, 'readwrite', (s) => s.clear() as IDBRequest<undefined>);

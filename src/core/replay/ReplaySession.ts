@@ -18,7 +18,7 @@ import { TIMEFRAMES, type Bar, type OrderRequest, type Timeframe, type UnixSecon
 import type { BarRequest, HistoricalDataProvider } from '../data/provider';
 import { aggregateBars } from '../data/aggregate';
 import type { ExecutionConfig } from '../broker/config';
-import { SimBroker, type BrokerCheckpoint, type SubmitResult } from '../broker/SimBroker';
+import { SimBroker, type BrokerCheckpoint, type BrokerState, type SubmitResult } from '../broker/SimBroker';
 import { ReplayEngine, barEndTime } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
@@ -125,13 +125,31 @@ export interface RevealedBar {
   bar: Bar;
 }
 
-interface Checkpoint {
+export interface Checkpoint {
   /** Bars revealed by each engine (engine order) when it was taken. */
   cursors: number[];
   /** Their sum. */
   revealed: number;
   broker: BrokerCheckpoint;
   /** The execution settings the bars after it were processed with. */
+  config: ExecutionConfig;
+}
+
+/** A replay session's state as plain data (ReplaySession.save), to carry it on later (ReplaySession.resume). */
+export interface SavedReplay {
+  /** The setup it was loaded with, its symbol and dates as loaded. */
+  setup: ReplaySetup;
+  /** The symbols it loaded, primary first. */
+  symbols: string[];
+  /** Each symbol's data (ReplayEngine.fingerprint), to tell the same data is loaded again. */
+  data: number[];
+  /** Each symbol's clock and bars revealed. */
+  nows: UnixSeconds[];
+  cursors: number[];
+  rewinds: number;
+  broker: BrokerState;
+  /** The undo history, oldest first. Checkpoints never change once taken: these are the session's own. */
+  checkpoints: Checkpoint[];
   config: ExecutionConfig;
 }
 
@@ -221,6 +239,59 @@ export class ReplaySession {
     session.provider = provider;
     session.histories = histories;
     return { session, warnings };
+  }
+
+  /**
+   * The session's state as plain data, as it is now, to save and carry on later (resume): each symbol's
+   * clock, the account with its undo history, and what tells that the same data is loaded again. The
+   * account is a copy; the checkpoints and settings, which never change once made, are the session's
+   * own, so a long undo history is stored a checkpoint at a time rather than copied whole each time.
+   */
+  save(): SavedReplay {
+    const engines = [...this.engines.values()];
+    return {
+      setup: structuredClone(this.setup),
+      symbols: this.symbols,
+      data: engines.map((e) => e.fingerprint()),
+      nows: engines.map((e) => e.now),
+      cursors: this.cursors(),
+      rewinds: this.rewinds,
+      broker: this.broker.getState(),
+      checkpoints: this.checkpoints.slice(),
+      config: this.broker.cfg,
+    };
+  }
+
+  /**
+   * Carries on a session saved with save(): loads the same data again from `provider` and puts each
+   * symbol's clock, the account and its undo history back as they were, bars revealed as far as they
+   * had been and no further. Its checkpoints become the session's. Throws, with a message for the
+   * user, when it cannot carry on exactly: the data is not what the session was played on any more
+   * (imported again, or changed by its source), or a symbol no longer loads.
+   */
+  static async resume(provider: HistoricalDataProvider, saved: SavedReplay, sessionId: string, signal?: AbortSignal): Promise<ReplaySession> {
+    const n = Array.isArray(saved?.symbols) ? saved.symbols.length : 0;
+    const lists = [saved?.data, saved?.nows, saved?.cursors];
+    if (!n || lists.some((l) => !Array.isArray(l) || l.length !== n) || !Array.isArray(saved.checkpoints) || !saved.checkpoints.length || !saved.broker || !saved.config) {
+      throw new Error('This saved session could not be read.');
+    }
+    // The broker trades under the settings the session last had (later bars are processed with them).
+    const { session, warnings } = await ReplaySession.load(provider, { ...saved.setup, extraSymbols: saved.symbols.slice(1) }, saved.config, sessionId, signal);
+    const engines = [...session.engines.values()];
+    for (const [k, sym] of saved.symbols.entries()) {
+      const e = engines[k];
+      if (e?.symbol !== sym) throw new Error(warnings.find((w) => w.startsWith(sym)) ?? `${sym} could not be loaded.`);
+      if (e.fingerprint() !== saved.data[k]) {
+        throw new Error(`The ${sym} data is not what this session was played on any more (it was imported again, or its source changed it), so the session cannot carry on.`);
+      }
+      // The clock moves as Play would move it, revealing only bars that had ended by then.
+      e.advanceTo(saved.nows[k]);
+      if (e.revealedCount !== saved.cursors[k] || e.now !== saved.nows[k]) throw new Error('This saved session does not match its data, so it cannot carry on.');
+    }
+    session.broker.restore(saved.broker);
+    session.checkpoints = saved.checkpoints.slice();
+    session.rewinds = saved.rewinds;
+    return session;
   }
 
   /** Trading days before the start the history reaches back. */

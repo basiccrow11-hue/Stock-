@@ -285,7 +285,12 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; padding-left: 6px; padding-right: 6px; }
 /* While a price is being picked, every click goes to the chart, even over a drawing. */
 .chart-wrap.picking .drawing-layer, .chart-wrap.picking .drawing-layer * { pointer-events: none; }
-.chart-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 5; background: var(--panel); padding: 16px; }
+.chart-empty { position: absolute; inset: 0; display: flex; z-index: 5; background: var(--panel); padding: 16px; overflow: auto; }
+/* Centred, and scrolled rather than cut off at the top when taller than the chart. */
+.chart-empty > * { margin: auto; }
+.unfinished-list { width: 100%; text-align: left; }
+.unfinished-list ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.unfinished { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--border); }
 
 /* ---------- replay controls ---------- */
 .replay-bar { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }

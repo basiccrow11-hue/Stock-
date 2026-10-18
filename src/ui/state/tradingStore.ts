@@ -12,11 +12,27 @@ import { ReplaySession, type ChartHistory, type ReplaySetup } from '../../core/r
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import { isDriven, type StreamingDataProvider, type StreamUpdate, type Unsubscribe } from '../../core/data/provider';
-import type { SimConfig, SimEvent } from '../../core/sim/SimMarket';
+import { SimMarket, type SimConfig, type SimEvent } from '../../core/sim/SimMarket';
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
 import { reviewTrade, type TradeReview, type TradingRules } from '../../core/learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeDefinition } from '../../core/challenges/challenges';
 import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
+import {
+  SAVED_SESSION_VERSION,
+  MAX_SAVED_SESSIONS,
+  claimSession,
+  deleteSession,
+  listSessions,
+  notePosition,
+  readPosition,
+  readSession,
+  releaseSession,
+  rememberTabSession,
+  tabSession,
+  writeSession,
+  type SavedSession,
+  type SessionSummary,
+} from '../services/savedSessions';
 import { getProvider } from './dataRegistry';
 import { getSettings, useSettings } from './settingsStore';
 import { useJournal, saveSnapshot } from './journalStore';
@@ -115,6 +131,12 @@ interface Engines {
   stream: StreamingDataProvider<SimEvent> | null;
   /** The streaming session's broker. */
   simBroker: SimBroker | null;
+  /** Where a replay's data comes from, to load it again when the session is carried on later. */
+  providerId: string | null;
+  /** The simulated market behind the stream, kept to save it (savedSessions); trading goes through the stream. */
+  market: SimMarket | null;
+  /** When the session was last saved whole (performance.now()). */
+  savedAt: number;
   /** Ends the session's subscription to the stream. */
   unsubscribe: Unsubscribe | null;
   /** Per symbol, every minute bar stream updates have touched since the chart last heard, in its latest state (oldest first). */
@@ -144,6 +166,9 @@ const eng: Engines = {
   replay: null,
   stream: null,
   simBroker: null,
+  providerId: null,
+  market: null,
+  savedAt: 0,
   unsubscribe: null,
   streamTouched: new Map(),
   processedTrips: new Set(),
@@ -363,6 +388,7 @@ function publish(force = false): void {
     version: st.version,
   });
   announceConflicts(st.orders);
+  notePositionNow();
   // A blind replay that has run to its end gives its date back: clock, chart, journal and exports.
   const meta = useTrading.getState().session;
   const revealed = finished && !!meta?.blind;
@@ -534,6 +560,8 @@ function processClosedTrips(ended = false): Promise<void> {
         }
       }
       settleWatchedReviews();
+      // What was written is saved with the session, so carrying it on does not write it again.
+      if (useTrading.getState().session?.id === session.id) saveSession();
     })
     .catch((e) => console.error('Journal update failed', e));
   return journaling;
@@ -679,6 +707,7 @@ function loop(): void {
   const dt = Math.min(1, (nowMs - eng.lastTick) / 1000); // cap to avoid huge jumps after a stall
   eng.lastTick = nowMs;
   if (!s.playing) return;
+  if (nowMs - eng.savedAt > SAVE_EVERY_MS) saveSession();
   if (eng.replay) {
     const revealed = eng.replay.advance(dt * s.speed);
     afterChange(revealed);
@@ -762,6 +791,137 @@ function stopTimer(): void {
   eng.timer = null;
 }
 
+// ------------------------------------------------------------------ saving the session (savedSessions)
+
+/** How often a playing session is saved whole; where its clock has got to is noted on every publish. */
+const SAVE_EVERY_MS = 30_000;
+
+/** Saves and deletions, one after another, so an older one never lands after a newer one. */
+let saving: Promise<void> = Promise.resolve();
+/** Sessions that could not be saved, told once each. */
+const saveFailedTold = new Set<string>();
+
+function view(s = useTrading.getState()): SavedSession['view'] {
+  return { activeSymbol: s.activeSymbol, timeframe: s.timeframe, speed: s.speed };
+}
+
+/** The running session as a record to save, copied now; null when none is running. */
+function sessionRecord(): SavedSession | null {
+  const s = useTrading.getState();
+  const meta = s.session;
+  const b = broker();
+  if (!meta || !b) return null;
+  let replay: SavedSession['replay'];
+  let sim: SavedSession['sim'];
+  if (eng.replay && eng.providerId) replay = { providerId: eng.providerId, state: eng.replay.save() };
+  else if (eng.market && eng.simBroker) sim = { market: eng.market.snapshot(), broker: eng.simBroker.getState(), config: structuredClone(eng.simBroker.cfg) };
+  else return null;
+  const st = b.state;
+  const active = useChallenges.getState().active;
+  return {
+    version: SAVED_SESSION_VERSION,
+    summary: {
+      id: meta.id,
+      savedAt: Date.now(),
+      meta,
+      now: eng.replay ? eng.replay.now : eng.stream!.clock,
+      closedTrades: st.roundTrips.filter((t) => t.closed).length,
+      openPositions: b.openPositions().length,
+      equity: b.account().equity,
+      startingBalance: st.startingBalance,
+      finished: eng.replay?.finished ?? false,
+    },
+    view: view(s),
+    warnings: s.warnings,
+    replay,
+    sim,
+    journaledTrips: [...eng.journaledTrips],
+    watching: [...eng.watching].map(([id, w]) => [id, structuredClone(w)]),
+    challenge: active?.sessionId === meta.id ? structuredClone(active) : null,
+  };
+}
+
+/** Saves the running session whole, in the background. */
+function saveSession(): void {
+  const rec = sessionRecord();
+  if (!rec) return;
+  eng.savedAt = performance.now();
+  notePositionNow();
+  const id = rec.summary.id;
+  saving = saving
+    .then(() => writeSession(rec))
+    .catch((e) => {
+      if (saveFailedTold.has(id)) return;
+      saveFailedTold.add(id);
+      console.warn('Session not saved', e);
+      toast('warning', 'This session cannot be saved in this browser (its storage is blocked or full), so reloading the page or closing the tab would lose it.', 10_000);
+    });
+}
+
+/** Whether the running session could not be saved in this browser (so a reload would lose it). */
+export function sessionUnsaved(): boolean {
+  const id = useTrading.getState().session?.id;
+  return !!id && saveFailedTold.has(id);
+}
+
+/** Notes where the running session's clock has got to, and what it shows, for carrying it on from there. */
+function notePositionNow(): void {
+  const s = useTrading.getState();
+  if (!s.session || !broker()) return;
+  notePosition(s.session.id, { now: eng.replay ? eng.replay.now : (eng.stream?.clock ?? 0), rewinds: eng.replay?.rewinds ?? 0, view: view(s) });
+}
+
+/** A session started or carried on in this tab: this tab holds it, a reload carries it on, and it is saved. */
+async function adoptSession(id: string): Promise<void> {
+  rememberTabSession(id);
+  saveSession();
+  await claimSession(id);
+  // Only the latest few unfinished sessions are kept, this one among them.
+  try {
+    for (const old of (await listSessions()).slice(MAX_SAVED_SESSIONS - 1)) await discardSession(old.id);
+  } catch {
+    /* storage unavailable: nothing is kept anyway */
+  }
+}
+
+/** The session ended: nothing is kept of it to carry on. */
+function forgetSession(id: string): void {
+  releaseSession(id);
+  if (tabSession() === id) rememberTabSession(null);
+  saving = saving.then(() => deleteSession(id)).catch(() => undefined);
+}
+
+if (typeof document !== 'undefined') {
+  // A tab going to the background may be closed or discarded without another word.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveSession();
+  });
+}
+
+/** Unfinished sessions this browser kept that no tab is running, newest first. */
+export async function unfinishedSessions(): Promise<SessionSummary[]> {
+  const running = useTrading.getState().session?.id;
+  return (await listSessions()).filter((s) => s.id !== running);
+}
+
+/**
+ * Lets go of an unfinished session without carrying it on: its closed trades stay in the journal, its
+ * open positions go without a journal entry (they never closed), and a challenge attempt under way is
+ * kept in the history as abandoned. False when another tab is running it.
+ */
+export async function discardSession(id: string): Promise<boolean> {
+  if (useTrading.getState().session?.id === id || !(await claimSession(id))) return false;
+  try {
+    const rec = await readSession(id).catch(() => null);
+    if (rec?.challenge) await useChallenges.getState().importAttempts([{ ...rec.challenge, endedAt: Date.now() }]);
+    saving = saving.then(() => deleteSession(id)).catch(() => undefined);
+    await saving;
+  } finally {
+    releaseSession(id);
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------ public actions
 
 function resetEngines(): void {
@@ -770,9 +930,11 @@ function resetEngines(): void {
   settleWatchedReviews(true);
   eng.watching = new Map();
   eng.replay = null;
+  eng.providerId = null;
   eng.unsubscribe?.();
   eng.unsubscribe = null;
   eng.stream = null;
+  eng.market = null;
   eng.simBroker = null;
   eng.streamTouched = new Map();
   eng.processedTrips = new Set();
@@ -808,12 +970,14 @@ export function sessionEndNotice(): string | null {
 async function endCurrent(): Promise<void> {
   pause();
   const b = broker();
-  if (b && useTrading.getState().session && b.openPositions().length > 0) {
+  const id = useTrading.getState().session?.id;
+  if (b && id && b.openPositions().length > 0) {
     b.closeOut();
     publish(true);
   }
   await processClosedTrips(true);
   if (useChallenges.getState().active) await useChallenges.getState().finishActive();
+  if (id) forgetSession(id);
 }
 
 /**
@@ -848,6 +1012,7 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
   // Blind mode hides the date, and a skipped symbol's message can carry it (ours or the vendor's).
   const warnings = setup.blind ? loaded.warnings.map(withoutDates) : loaded.warnings;
   eng.replay = session;
+  eng.providerId = setup.providerId;
   const meta: SessionMeta = {
     id,
     mode: 'replay',
@@ -876,6 +1041,7 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
   }
   emitChart({ type: 'reset' });
   publish(true);
+  void adoptSession(id);
   for (const w of warnings) toast('warning', w, 6000);
   return true;
 }
@@ -889,9 +1055,11 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
   resetEngines();
   const today = new Date().toISOString().slice(0, 10);
   const startDate = isTradingDay(today) ? today : nextTradingDay(today);
-  const stream: StreamingDataProvider<SimEvent> = SimulationDataProvider.create(startDate, opts.config);
+  const provider = SimulationDataProvider.create(startDate, opts.config);
+  const stream: StreamingDataProvider<SimEvent> = provider;
   const id = newId('sim');
   eng.stream = stream;
+  eng.market = provider.market;
   eng.simBroker = new SimBroker({ startingBalance: opts.startingBalance, config: getSettings().execution, idPrefix: id, source: 'SIMULATED' });
   // Prime marks with the warm-up history.
   for (const symbol of stream.symbols) {
@@ -925,6 +1093,7 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
   }
   emitChart({ type: 'reset' });
   publish(true);
+  void adoptSession(id);
   return true;
 }
 
@@ -939,6 +1108,124 @@ export async function endSession(): Promise<void> {
   emitChart({ type: 'reset' });
 }
 
+/** The session a resumeSession call under way is carrying on. */
+let resuming: string | null = null;
+
+/** Furthest a simulated market is moved on to where its clock had got to after its last whole save. */
+const SIM_CATCH_UP_LIMIT = 7 * 86_400;
+
+/**
+ * Carries on an unfinished session (savedSessions) where it was, paused, once it has loaded: ends the
+ * running session first (endCurrent), as starting one does. A replay loads its data again and carries on
+ * only if it is the same data; then, from the last whole save, the clock goes on to where it had got to,
+ * as Play took it there, so no bar seen is hidden again. False when it cannot (the reason is in the
+ * store's error) or a newer start or end took its place.
+ */
+export async function resumeSession(id: string): Promise<boolean> {
+  if (useTrading.getState().session?.id === id) return true;
+  // Pressed twice: the first is under way (and holds the session).
+  if (resuming === id) return false;
+  const seq = ++loadSeq;
+  resuming = id;
+  pause();
+  useTrading.setState({ loading: true, error: null });
+  const stop = (message?: string): false => {
+    if (resuming === id) resuming = null;
+    releaseSession(id);
+    if (message && seq === loadSeq) useTrading.setState({ loading: false, error: message });
+    return false;
+  };
+  if (!(await claimSession(id))) return stop('This session is open in another tab: carry it on there.');
+  const rec = await readSession(id).catch(() => null);
+  if (!rec) return stop('This saved session could not be read.');
+  const meta = rec.summary.meta;
+  let replay: ReplaySession | null = null;
+  let stream: SimulationDataProvider | null = null;
+  let simBroker: SimBroker | null = null;
+  const pos = readPosition(id);
+  try {
+    if (rec.replay) {
+      const provider = getProvider(rec.replay.providerId);
+      const reason = provider.unavailableReason();
+      if (reason) throw new Error(`${reason} Then resume the session.`);
+      replay = await ReplaySession.resume(provider, rec.replay.state, id);
+      if (pos && pos.now !== replay.now) replay.jumpTo(pos.now);
+      if (pos) replay.rewinds = Math.max(replay.rewinds, pos.rewinds);
+    } else if (rec.sim) {
+      const market = SimMarket.restore(rec.sim.market);
+      const b = new SimBroker({ startingBalance: rec.sim.broker.startingBalance, config: rec.sim.config, state: rec.sim.broker });
+      const sim = new SimulationDataProvider(market);
+      const off = sim.subscribe(sim.symbols, (u) => b.onBar(u.symbol, u.tick, sim.tickSeconds));
+      if (pos) while (sim.clock < Math.min(pos.now, rec.summary.now + SIM_CATCH_UP_LIMIT)) sim.advance(sim.tickSeconds);
+      off();
+      stream = sim;
+      simBroker = b;
+    } else throw new Error('This saved session could not be read.');
+    if (!useJournal.getState().loaded) await useJournal.getState().load();
+  } catch (e) {
+    if (seq !== loadSeq || (e as Error).name === 'AbortError') return stop();
+    const message = (e as Error).message;
+    return stop(meta.blind ? withoutDates(message) : message);
+  }
+  if (seq !== loadSeq) return stop();
+  const b = (replay?.broker ?? simBroker)!;
+  // Journal entries of trades this account no longer has closed (written after its last save, by a
+  // page that went before saving again) are undone, as a rewind would undo them.
+  const closed = new Set(b.state.roundTrips.filter((t) => t.closed).map((t) => t.id));
+  await useJournal.getState().removeWhere((e) => e.sessionId === id && !closed.has(e.trip.id));
+  if (seq !== loadSeq) return stop();
+  await endCurrent();
+  if (seq !== loadSeq) return stop();
+  resetEngines();
+  eng.replay = replay;
+  eng.providerId = rec.replay?.providerId ?? null;
+  if (stream && simBroker) {
+    eng.stream = stream;
+    eng.market = stream.market;
+    eng.simBroker = simBroker;
+    eng.unsubscribe = stream.subscribe(stream.symbols, onStreamUpdate);
+    eng.newsSeen = stream.events().length;
+  }
+  // Trades already in the journal (or deleted from it) are not journaled again; others closed are, now.
+  const written = useJournal.getState().entries.filter((e) => e.sessionId === id);
+  eng.journaledTrips = new Set([...rec.journaledTrips, ...written.map((e) => e.trip.id)].filter((t) => closed.has(t)));
+  eng.processedTrips = new Set(eng.journaledTrips);
+  eng.watching = new Map(rec.watching.filter(([entryId]) => written.some((e) => e.id === entryId)));
+  eng.noticedConflicts = new Set(b.state.orders.filter((o) => o.conflict).map((o) => o.id));
+  const symbols = replay ? replay.symbols : [...stream!.symbols];
+  const shown = pos?.view ?? rec.view;
+  useTrading.setState({
+    ...EMPTY,
+    session: meta,
+    warnings: rec.warnings,
+    activeSymbol: symbols.includes(shown.activeSymbol) ? shown.activeSymbol : symbols[0],
+    timeframe: TIMEFRAMES.includes(shown.timeframe) && !(stream && shown.timeframe === '1D') ? shown.timeframe : '1m',
+    speed: (replay ? REPLAY_SPEEDS : SIM_SPEEDS).includes(shown.speed) ? shown.speed : replay ? 60 : 1,
+  });
+  if (rec.challenge) useChallenges.getState().start(rec.challenge);
+  emitChart({ type: 'reset' });
+  publish(true);
+  resuming = null;
+  void adoptSession(id);
+  void processClosedTrips();
+  toast('info', 'Session restored where you left off. It is paused: press Play to continue.', 6000);
+  return true;
+}
+
+/** After a reload: carries on the session this tab was running, if it was kept and no other tab has it. */
+export async function resumeAfterReload(): Promise<boolean> {
+  const id = tabSession();
+  const s = useTrading.getState();
+  if (!id || s.session || s.loading) return false;
+  const kept = await listSessions().catch(() => []);
+  if (!kept.some((k) => k.id === id)) {
+    // Ended, or running in a tab this one was duplicated from.
+    rememberTabSession(null);
+    return false;
+  }
+  return resumeSession(id);
+}
+
 export function play(): void {
   const s = useTrading.getState();
   if (!s.session || s.finished) return;
@@ -947,8 +1234,10 @@ export function play(): void {
 }
 
 export function pause(): void {
+  const was = useTrading.getState().playing;
   useTrading.setState({ playing: false });
   stopTimer();
+  if (was) saveSession();
 }
 
 export function togglePlay(): void {
@@ -958,11 +1247,13 @@ export function togglePlay(): void {
 
 export function setSpeed(speed: number): void {
   useTrading.setState({ speed });
+  notePositionNow();
 }
 
 export function setTimeframe(tf: Timeframe): void {
   useTrading.setState({ timeframe: tf });
   emitChart({ type: 'reset' });
+  notePositionNow();
 }
 
 export function setActiveSymbol(symbol: string): void {
@@ -1015,6 +1306,7 @@ async function afterRewind(): Promise<void> {
   eng.noticedConflicts = new Set([...eng.noticedConflicts].filter((id) => conflicts.has(id)));
   emitChart({ type: 'reset' });
   publish(true);
+  saveSession();
 }
 
 export function stepBack(): void {
@@ -1041,6 +1333,7 @@ export function jumpTo(time: UnixSeconds): void {
     // The reset redraws every revealed bar, so they are not sent to the chart a second time.
     if (revealed.length) emitChart({ type: 'reset' });
     publish(true);
+    saveSession();
     void processClosedTrips();
   }
 }
@@ -1057,6 +1350,7 @@ export function submitOrder(req: OrderRequest): SubmitResult {
   if (!b) return { ok: false, error: 'Start a replay or the simulated market first.', warnings: [] };
   const r = eng.replay ? eng.replay.submit(req) : simBrokerNow()!.submit(req);
   publish(true);
+  saveSession();
   void processClosedTrips();
   return r;
 }
@@ -1065,6 +1359,7 @@ export function cancelOrder(id: string): void {
   if (eng.replay) eng.replay.cancel(id);
   else broker()?.cancel(id);
   publish(true);
+  saveSession();
 }
 
 export function cancelAllOrders(): void {
@@ -1075,11 +1370,13 @@ export function cancelAllOrders(): void {
     else b.cancel(o.id);
   }
   publish(true);
+  saveSession();
 }
 
 export function modifyOrder(id: string, changes: { limitPrice?: number; stopPrice?: number; quantity?: number }): { ok: boolean; error?: string } {
   const r = eng.replay ? eng.replay.modify(id, changes) : simBrokerNow()?.modify(id, changes) ?? { ok: false, error: 'No session' };
   publish(true);
+  saveSession();
   void processClosedTrips();
   return r;
 }
@@ -1089,6 +1386,7 @@ export function closePosition(symbol: string): SubmitResult {
   if (!b) return { ok: false, error: 'No session', warnings: [] };
   const r = eng.replay ? eng.replay.closePosition(symbol) : simBrokerNow()!.closePosition(symbol);
   publish(true);
+  saveSession();
   void processClosedTrips();
   return r;
 }
@@ -1098,6 +1396,7 @@ function applyExecutionConfig(): void {
   const cfg = getSettings().execution;
   if (eng.replay) eng.replay.setConfig(cfg);
   else if (eng.simBroker) eng.simBroker.cfg = cfg;
+  saveSession();
 }
 // The running session trades under the current execution settings, however they changed (the
 // settings page, a reset, another tab).
