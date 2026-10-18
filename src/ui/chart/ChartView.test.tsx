@@ -9,7 +9,8 @@ import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, regularCloseMinu
  * A stand-in for lightweight-charts (jsdom has no canvas). It keeps every series' points and models
  * the time scale the way the library does: the visible range is counted from the newest point (the
  * right offset) and so is kept when the data changes, except that while the newest point is off
- * screen, points added on the right leave the view on the candles it showed. A range or scroll
+ * screen, points added on the right leave the view on the candles it showed (unless more are added
+ * than its right edge is from the oldest point, as the library clamps it then). A range or scroll
  * position the app sets is applied on the chart's next frame, as the library draws it, not at once;
  * the user's own drag or zoom (scrollTo) moves the view at once.
  */
@@ -55,6 +56,7 @@ const lw = vi.hoisted(() => {
         if ('range' in q) this.scrollTo(q.range);
         else {
           this.rightOffset = q.offset;
+          this.correct();
           this.fire();
         }
       }
@@ -63,7 +65,13 @@ const lw = vi.hoisted(() => {
     scrollTo(r: Range) {
       this.span = r.to - r.from;
       this.rightOffset = r.to - (this.points.length - 1);
+      this.correct();
       this.fire();
+    }
+    /** The library keeps two points (or the one there is) on screen, however far the view is moved. */
+    private correct() {
+      const k = Math.min(2, this.points.length);
+      if (k) this.rightOffset = Math.min(Math.max(this.rightOffset, k - this.points.length), this.span + 1 - k);
     }
     options() {
       return { rightOffset: 8 };
@@ -76,9 +84,12 @@ const lw = vi.hoisted(() => {
       if (r && next.length) {
         const newestShown = Math.floor(r.from) <= oldBase && oldBase <= Math.ceil(r.to);
         const addedRight = newBase > oldBase && !(this.points[0] > next[0]);
-        if (addedRight && !newestShown) this.rightOffset -= newBase - oldBase;
+        // The library keeps its view at least two points in from its oldest as it compensates, counted on the
+        // old points: more points added than the right edge is from the oldest leave it on other ones.
+        if (addedRight && !newestShown) this.rightOffset = Math.max(this.rightOffset - (newBase - oldBase), 1 - oldBase);
       }
       this.points = next;
+      this.correct();
       this.fire();
     }
     private fire() {
@@ -408,7 +419,8 @@ describe('the chart during a long replay', () => {
     expect(lw.markers).toEqual([]);
 
     // Scrolled to within 500 candles of the newest it holds, the chart takes the rest once the view
-    // rests with no button down on it, and the view stays on its candles.
+    // rests with no button down on it, and the view stays on its candles (more were held back than the
+    // view is from the oldest, so the library moves it, and the range set for its next frame puts it back).
     const held = main.points.length;
     act(() => ts.scrollTo({ from: held - 300, to: held - 200 }));
     const shownEdges = atEdges();
@@ -417,6 +429,7 @@ describe('the chart during a long replay', () => {
     expect(main.points.length).toBe(held);
     act(() => void window.dispatchEvent(new MouseEvent('pointerup')));
     await act(() => new Promise((r) => setTimeout(r, 300)));
+    nextFrame();
     all = chartTimes();
     expect(main.points.map((p) => p.time)).toEqual(all.slice(start));
     for (const s of chart.series) expect(s.points.length).toBe(main.points.length);
@@ -1062,6 +1075,82 @@ describe('the view when the chart is redrawn', () => {
     await store.endSession();
   }, 60_000);
 
+  it('stays on its candles through a jump that adds thousands of candles, and as far from the newest through a step back, with many candles held back or none and one series or several', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings, DEFAULT_INDICATORS } = await import('../state/settingsStore');
+    const { toChartTime } = await import('./ChartView');
+    const frame = controlFrames();
+    const indicators = useSettings.getState().indicators;
+    const newest = () => store.getBaseBars('AMZN').at(-1)!.time;
+    /** Every candle's chart time, oldest first. */
+    const times = () => store.getBaseBars('AMZN').map((b): number => toChartTime(b.time));
+    // Trading days loaded before the start, how far back the view's right edge is (null: on the newest), how
+    // many candles play then adds (held back from the chart), whether the chart has volume and indicators too
+    // or only its candles, and how many hours the jump goes forward (or a step back).
+    const variants: [number, number | null, number, boolean, number | 'step back'][] = [
+      [5, 1000, 0, true, 72],
+      [5, 1000, 150, true, 72],
+      [5, 50, 0, true, 72],
+      [5, 1000, 0, false, 72],
+      [5, 1000, 150, false, 72],
+      // The chart holds every candle, and more are held back than the view's right edge is from the oldest.
+      [1, 1000, 350, true, 72],
+      [1, 1000, 350, true, 'step back'],
+      [5, null, 0, true, 72],
+      // A short jump: the library keeps the view by itself, with no scroll position to draw.
+      [5, 1000, 0, true, 3],
+    ];
+    for (const [lookbackDays, back, held, several, action] of variants) {
+      const hours = action === 'step back' ? 0 : action;
+      const what = `${lookbackDays} days, ${back ?? 'newest'}${held ? `, ${held} held` : ''}${several ? '' : ', one series'}, ${action === 'step back' ? action : `${hours} h`}`;
+      useSettings.getState().update({ learningMode: false, autoSnapshot: false, indicators: DEFAULT_INDICATORS.map((i) => ({ ...i, enabled: several && i.enabled })) });
+      const ok = await store.startReplay({
+        providerId: 'demo',
+        symbol: 'AMZN',
+        date: '2025-02-03',
+        endDate: '2025-02-14',
+        startTime: '09:30',
+        endTime: '16:00',
+        startingBalance: 100_000,
+        lookbackDays,
+        timeframe: '1m',
+        speed: 1,
+        blind: false,
+      });
+      expect(ok).toBe(true);
+      const a = await mount('AMZN');
+      await frame();
+      const main = a.chart.series[0];
+      expect(a.chart.series.length > 1, what).toBe(several);
+      const n = main.points.length;
+      if (back !== null) act(() => a.chart.ts.scrollTo({ from: n - back - 100, to: n - back }));
+      for (let i = 0; i < held; i++) act(() => store.stepForward());
+      expect(main.points.length, what).toBe(n);
+      await frame();
+      const before = edges(a);
+      const count = store.getBaseBars('AMZN').length;
+      // How far back from the newest candle the view's right edge is.
+      const fromNewest = times().length - 1 - times().indexOf(before[1]!);
+
+      await act(async () => (action === 'step back' ? store.stepBack() : store.jumpTo(store.useTrading.getState().now + hours * 3600)));
+      if (hours > 24) expect(store.getBaseBars('AMZN').length - count, what).toBeGreaterThan(2_000);
+      await vi.waitFor(() => expect(main.points.at(-1)!.time).toBe(toChartTime(newest())));
+      if (hours && hours < 24) expect((a.chart.ts as unknown as { queued: unknown[] }).queued, what).toEqual([]);
+      await frame();
+      await frame();
+      if (action === 'step back') expect(edges(a)[1], what).toBe(times()[times().length - 1 - fromNewest]);
+      else if (back !== null) expect(edges(a), what).toEqual(before);
+      else {
+        // The chart is handed no more candles than a chart opened now.
+        expect(a.chart.ts.rightOffset, what).toBe(8);
+        expect(main.points.length, what).toBe(2_000);
+      }
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+    useSettings.getState().update({ indicators });
+  }, 60_000);
+
   it('stays on its candles when a blind replay reaches its end and shows its real dates, with candles held back or not', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');
@@ -1200,6 +1289,95 @@ describe('the view when the chart is redrawn', () => {
       act(() => a.root.unmount());
       await store.endSession();
     }
+  }, 60_000);
+
+  it("keeps the moment at the right edge on a symbol whose history is still loading once it arrives, unless the view was moved meanwhile", async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const { demoProvider } = await import('../state/dataRegistry');
+    const { ChartView, fromChartTime } = await import('./ChartView');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    // MSFT's history (30-minute bars) comes when the test lets it, or fails then.
+    const getCoarseBars = demoProvider.getCoarseBars.bind(demoProvider);
+    let arrive = () => undefined as void;
+    let fails = false;
+    const coarse = vi.spyOn(demoProvider, 'getCoarseBars').mockImplementation(async (req, tf, signal) => {
+      if (req.symbol !== 'MSFT') return getCoarseBars(req, tf, signal);
+      const arrived = new Promise<void>((r) => (arrive = r));
+      const bars = await getCoarseBars(req, tf, signal);
+      await arrived;
+      if (fails) throw new Error('No connection');
+      return bars;
+    });
+    type Meanwhile = (c: { a: Shown; show: (symbol: string) => Promise<void>; right: () => number; moment: number }) => unknown;
+    /** How many candles the view is across, whether the history fails, what happens while it loads, and whether the view is then on the moment it had on AMZN. */
+    const variants: [string, number, boolean, Meanwhile, boolean][] = [
+      ['nothing', 60, false, () => undefined, true],
+      // Back on AMZN, the view not moved since, it is on the moment again, and so is MSFT once its history is in.
+      ['AMZN and back', 60, false, async ({ show, right, moment }) => (await show('AMZN'), expect(right()).toBe(moment), await show('MSFT')), true],
+      ['a drag', 60, false, ({ a }) => act(() => (a.chart.canvas.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, buttons: 1, bubbles: true })), a.chart.ts.scrollTo({ from: -57, to: 3 }), window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 })))), false],
+      ['a wheel', 60, false, ({ a }) => act(() => (a.chart.canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true })), a.chart.ts.scrollTo({ from: -86, to: 4 }))), false],
+      // Three candles across: the view starts at MSFT's first candles, and » goes to the newest.
+      ['»', 3, false, ({ a }) => act(() => a.host.querySelector<HTMLButtonElement>('.chart-newest')!.click()), false],
+      ['nothing, but the history fails', 60, true, () => undefined, false],
+    ];
+    for (const [what, width, failing, meanwhile, kept] of variants) {
+      fails = failing;
+      const ok = await store.startReplay({
+        providerId: 'demo',
+        symbol: 'AMZN',
+        extraSymbols: ['MSFT'],
+        date: '2025-02-03',
+        endDate: '2025-02-14',
+        startTime: '09:30',
+        endTime: '16:00',
+        startingBalance: 100_000,
+        lookbackDays: 5,
+        timeframe: '1m',
+        speed: 1,
+        blind: false,
+      });
+      expect(ok).toBe(true);
+      const a = await mount('AMZN');
+      const main = () => a.chart.series[0];
+      const show = async (symbol: string) => {
+        act(() => {
+          store.setActiveSymbol(symbol);
+          store.setTimeframe('1D');
+          a.root.render(createElement(ChartView, { symbol, timeframe: '1D' }));
+        });
+        await frame();
+      };
+      /** The real time of the candle at the view's right edge, or of the newest one when that is on screen. */
+      const right = () => fromChartTime(main().points[Math.min(main().points.length - 1, Math.floor(a.chart.ts.getVisibleLogicalRange()!.to))].time);
+      // A daily chart of AMZN, scrolled back into its history (two hundred days before the replay's few).
+      await show('AMZN');
+      await vi.waitFor(() => expect(main().points.length).toBeGreaterThan(150));
+      const n = main().points.length;
+      act(() => a.chart.ts.scrollTo({ from: n - 100 - width, to: n - 100 }));
+      const moment = right();
+
+      // MSFT has only the replay's few days until its history is in: the view shows them meanwhile.
+      await show('MSFT');
+      expect(main().points.length, what).toBeLessThan(10);
+      expect(right(), what).not.toBe(moment);
+      await meanwhile({ a, show, right, moment });
+      await frame();
+      const before = { right: right(), span: a.chart.ts.span };
+      act(() => arrive());
+      if (failing) await vi.waitFor(() => expect(a.host.textContent).toContain('Earlier history did not load'));
+      else await vi.waitFor(() => expect(main().points.length).toBeGreaterThan(150));
+      await frame();
+      await frame();
+      // Else it is left as it was: the history only adds candles before the ones on screen.
+      if (kept) expect(right(), what).toBe(moment);
+      else expect({ right: right(), span: a.chart.ts.span }, what).toEqual(before);
+      store.setTimeframe('1m');
+      act(() => a.root.unmount());
+      await store.endSession();
+    }
+    coarse.mockRestore();
   }, 60_000);
 
   it('opens a new session on its newest candle however far back the last one was scrolled, and play moves it on', async () => {

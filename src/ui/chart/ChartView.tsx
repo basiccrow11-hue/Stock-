@@ -97,6 +97,11 @@ function scrollToPosition(chart: IChartApi, position: number): void {
   requestAnimationFrame(() => scrollsWaiting.set(chart, (scrollsWaiting.get(chart) ?? 1) - 1));
 }
 
+/** Whether `a` and `b` are the same chart: the same symbol, timeframe and session. */
+function sameChart(a: DrawnChart, b: DrawnChart): boolean {
+  return a.symbol === b.symbol && a.timeframe === b.timeframe && a.session === b.session;
+}
+
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
 const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px)';
 
@@ -163,6 +168,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const heldRef = useRef<number | null>(null);
   /** The chart the window was sized on (symbol, timeframe, session): redrawing that chart keeps the size. */
   const windowKeyRef = useRef<DrawnChart | null>(null);
+  /**
+   * The moment (a real time) to put at the right edge of a chart once its history has arrived: the one at the
+   * right edge of the chart shown before it, which lies in that history (rightEdgeOn). Forgotten when the user
+   * moves the view or another chart is drawn.
+   */
+  const pendingEdgeRef = useRef<{ chart: DrawnChart; time: number } | null>(null);
   /** What the replay has from before its loaded bars, for the legend's note. */
   const historyRef = useRef<ChartHistory | null>(null);
   /** How many of candlesRef's candles, at its start, were built from that history. */
@@ -315,7 +326,15 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       else if (!down.delete(id)) return;
       if (!down.size && heldRef.current !== null) catchUpSoon();
     };
-    const onDown = (e: PointerEvent) => void down.add(e.pointerId);
+    // The user moving the view (a drag, a pinch, the wheel) drops a moment waiting for the history (pendingEdgeRef).
+    const onDown = (e: PointerEvent) => {
+      down.add(e.pointerId);
+      pendingEdgeRef.current = null;
+    };
+    const onWheel = () => {
+      pendingEdgeRef.current = null;
+      bumpSoon();
+    };
     const onUp = (e: PointerEvent) => release(e.pointerId);
     const onBlur = () => release(null);
     const onMove = (e: PointerEvent) => {
@@ -327,7 +346,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', bumpSoon);
     el.addEventListener('dblclick', bumpSoon);
-    el.addEventListener('wheel', bumpSoon, { passive: true });
+    el.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
     window.addEventListener('blur', onBlur);
@@ -384,7 +403,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', bumpSoon);
       el.removeEventListener('dblclick', bumpSoon);
-      el.removeEventListener('wheel', bumpSoon);
+      el.removeEventListener('wheel', onWheel);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
       window.removeEventListener('blur', onBlur);
@@ -757,6 +776,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
   /** Scrolls to the newest candle, with the usual room after it, keeping the zoom. */
   function toNewest(): void {
+    pendingEdgeRef.current = null;
     catchUp();
     const chart = chartRef.current;
     if (chart) scrollToPosition(chart, chart.timeScale().options().rightOffset);
@@ -902,61 +922,113 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   /**
-   * Where the view's right edge goes on `next`, the candles of another chart than `drawn` (another symbol,
-   * timeframe or `session`), as an index in it; null for the newest candle. Left to itself, the library would
+   * Where the view's right edge goes on `next`, the candles of `chart`, another chart than `drawn` (another symbol,
+   * timeframe or session), as an index in it; null for the newest candle. Left to itself, the library would
    * keep the old chart's place counted in candles from the newest, which on these candles is another day. A
    * new session opens on its newest candle. Another symbol or timeframe of the same session keeps the
    * moment at the right edge, the candle holding the last bar of the one there, unless the view was on the
-   * newest candle or within one of it.
+   * newest candle or within one of it; or the moment `drawn` was still waiting to be put on (pendingEdgeRef).
    */
-  function rightEdgeOn(next: Bar[], drawn: DrawnChart, session: string, range: LogicalRange | null): number | null {
+  function rightEdgeOn(next: Bar[], drawn: DrawnChart, chart: DrawnChart, range: LogicalRange | null, history: ChartHistory | null): number | null {
     const candles = candlesRef.current;
-    if (!range || drawn.session !== session) return null;
-    const i = windowStartRef.current + Math.max(0, Math.min(Math.round(range.to), chartCount() - 1));
-    if (i >= candles.length - 2) return null;
-    // Candle times are real times, also in a blind session (only the chart's are moved). The bars are the
-    // ones of the symbol now shown: on another symbol, the last of its bars in a candle at that time.
-    const base = baseRef.current;
-    const k = lastIndexAtOrBefore(base, candles[i].time, (b) => candleFor(b.time, drawn.timeframe, baseTfRef.current).start);
-    const t = k >= 0 ? base[k].time : candles[i].time;
-    const j = lastIndexAtOrBefore(next, candleFor(t, timeframe, baseTfRef.current).start, (c) => c.time);
-    // A moment before this chart's first candle: the view starts at that candle.
+    const pending = pendingEdgeRef.current;
+    pendingEdgeRef.current = null;
+    if (!range || drawn.session !== chart.session) return null;
+    let t: number;
+    if (pending && sameChart(pending.chart, drawn)) t = pending.time;
+    else {
+      const i = windowStartRef.current + Math.max(0, Math.min(Math.round(range.to), chartCount() - 1));
+      if (i >= candles.length - 2) return null;
+      // Candle times are real times, also in a blind session (only the chart's are moved). The bars are the
+      // ones of the symbol now shown: on another symbol, the last of its bars in a candle at that time.
+      const base = baseRef.current;
+      const k = lastIndexAtOrBefore(base, candles[i].time, (b) => candleFor(b.time, drawn.timeframe, baseTfRef.current).start);
+      t = k >= 0 ? base[k].time : candles[i].time;
+    }
+    const j = candleAt(next, t);
+    // A moment before this chart's first candle: the view starts at that candle. On a chart of 30 minutes or
+    // more the moment may lie in the history still loading: the view is put on it once that is in (pendingEdgeOn).
+    if (j < 0 && history?.status === 'loading' && history.wanted) pendingEdgeRef.current = { chart, time: t };
     const edge = j >= 0 ? j : Math.min(next.length - 1, Math.round(range.to - range.from));
     return edge >= next.length - 1 ? null : edge;
+  }
+
+  /**
+   * Where the view's right edge goes on `next`, the candles of `chart` redrawn, once the history it was waiting
+   * for (pendingEdgeRef) is in: the candle holding that moment. Undefined, leaving the view where it is, while the
+   * history loads, when it failed or begins later, and when the chart waits for nothing.
+   */
+  function pendingEdgeOn(next: Bar[], chart: DrawnChart, history: ChartHistory | null): number | undefined {
+    const pending = pendingEdgeRef.current;
+    if (!pending || history?.status === 'loading') return undefined;
+    pendingEdgeRef.current = null;
+    const j = sameChart(pending.chart, chart) ? candleAt(next, pending.time) : -1;
+    return j >= 0 && j < next.length - 1 ? j : undefined;
+  }
+
+  /** Index in `candles`, this chart's, of the candle holding real time `t`; -1 when it is before the first. */
+  function candleAt(candles: Bar[], t: number): number {
+    return lastIndexAtOrBefore(candles, candleFor(t, timeframe, baseTfRef.current).start, (c) => c.time);
   }
 
   /** Put the history's candles before `candles` (those of the revealed bars) and hand the chart the newest. */
   function drawCandles(candles: Bar[], history: ChartHistory | null): void {
     historyRef.current = history;
     const merged = withHistory(candles, history, timeframe);
-    // Redrawing the same chart (new bars after a jump, history arriving) keeps the view where it is,
-    // counted from the newest candle: the window keeps as many candles as reach back to the oldest on screen.
     const drawn = windowKeyRef.current;
     const chart: DrawnChart = { symbol, timeframe, session: useTrading.getState().session?.id ?? '' };
-    const same = !!drawn && drawn.symbol === chart.symbol && drawn.timeframe === chart.timeframe && drawn.session === chart.session;
+    const same = !!drawn && sameChart(drawn, chart);
+    // The same chart's view before anything changes: its right edge as an index among the candles (those held
+    // back included), and whether the newest candle the chart holds is off it.
+    const old = candlesRef.current;
+    const view = same ? (chartRef.current?.timeScale().getVisibleLogicalRange() ?? null) : null;
+    const right = view ? windowStartRef.current + view.to : 0;
+    const off = !!view && Math.ceil(view.to) < chartCount() - 1;
     // With candles held back the chart counts from an older newest one: hand them over first, with no
     // range set for the next frame, which would come after the candles below and put the view on others.
     if (same) catchUp(false);
     const range = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
-    // Another chart is put in place (rightEdgeOn); the first one drawn opens on the newest candle by itself.
-    // Its window reaches back to a margin before its view, which keeps its width in candles.
-    const edge = drawn && !same ? rightEdgeOn(merged.candles, drawn, chart.session, range) : null;
+    // Where the view's right edge goes (null: on the newest candle) when it is put in place: on another chart
+    // (rightEdgeOn), and on this one once the history it waited for is in (pendingEdgeOn). Its window reaches
+    // back to a margin before the view, which keeps its width in candles. The first chart drawn opens on the
+    // newest candle by itself.
+    const edge = !drawn ? undefined : same ? pendingEdgeOn(merged.candles, chart, history) : rightEdgeOn(merged.candles, drawn, chart, range, history);
     let onScreen = 0;
-    if (range && same) onScreen = chartCount() - Math.max(0, Math.floor(range.from));
-    else if (range) onScreen = merged.candles.length - (edge ?? merged.candles.length - 1) + Math.ceil(range.to - range.from);
+    let oldest = Infinity;
+    if (range && edge !== undefined) onScreen = merged.candles.length - (edge ?? merged.candles.length - 1) + Math.ceil(range.to - range.from);
+    else if (view) {
+      // Redrawing the same chart otherwise (a jump, a step back, a restart, history arriving), the library keeps
+      // the view as far from the newest candle as it was, so the window keeps as many candles as reach back to
+      // the oldest on screen. When candles are added after the newest one it held while that one is off the
+      // view, it keeps the view on its candles instead, as long as the oldest candle it holds stays the same:
+      // the window then starts at that candle again, however many candles a jump adds.
+      onScreen = old.length - windowStartRef.current - Math.max(0, Math.floor(view.from));
+      if (off) oldest = lastIndexAtOrBefore(merged.candles, old[windowStartRef.current].time, (c) => c.time);
+    }
     const shown = Math.max(WINDOW, onScreen + WINDOW_MARGIN);
     windowKeyRef.current = chart;
     candlesRef.current = merged.candles;
     historyCountRef.current = merged.fromHistory;
-    windowStartRef.current = Math.max(0, candlesRef.current.length - shown);
+    windowStartRef.current = Math.max(0, Math.min(oldest, candlesRef.current.length - shown));
     heldRef.current = null;
     hoverRef.current = null;
     computeIndicators(0);
     setWindowData();
     const api = chartRef.current;
-    if (drawn && !same && api) {
+    if (edge !== undefined && api) {
       // A position counted from the newest candle, which the library applies on its next frame.
       scrollToPosition(api, edge === null ? api.timeScale().options().rightOffset : edge - (candlesRef.current.length - 1));
+    } else if (view && api) {
+      // The library keeps the view on its candles when candles are added after the newest one while that one is
+      // off the view, and else as far from the newest candle as it was. Only, it never leaves the view's right
+      // edge closer to the oldest candle it holds than the number of candles added: after a long jump, or with
+      // many candles held back, the view is put back there.
+      const next = candlesRef.current;
+      const k = Math.max(0, Math.floor(right));
+      const added = off && next.length > 0 && next[next.length - 1].time > old[old.length - 1].time;
+      const position = added ? lastIndexAtOrBefore(next, old[k].time, (c) => c.time) + right - k - (next.length - 1) : right - (old.length - 1);
+      const now = api.timeScale().getVisibleLogicalRange();
+      if (now && Math.abs(windowStartRef.current + now.to - (next.length - 1) - position) > 0.001) scrollToPosition(api, position);
     }
     syncLastDirection();
     syncPercentBase();
