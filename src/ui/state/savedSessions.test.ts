@@ -79,6 +79,22 @@ Object.defineProperty(navigator, 'locks', {
   },
 });
 
+/**
+ * Timers that repeat (liveBlind's heartbeat), kept to stop once the test is over: its pages are gone
+ * then, and a page left from an earlier test would otherwise list its blind session again on its next
+ * beat, in the middle of a later test (on a busy machine this file takes longer than a beat).
+ */
+const repeating = vi.hoisted(() => {
+  const handles = new Set<ReturnType<typeof setInterval>>();
+  const real = globalThis.setInterval;
+  globalThis.setInterval = ((...a: Parameters<typeof setInterval>) => {
+    const h = real(...a);
+    handles.add(h);
+    return h;
+  }) as typeof setInterval;
+  return handles;
+});
+
 const settle = () => new Promise((r) => setTimeout(r, 120));
 
 /** The app's modules as a page sees them when it opens: after a reload, what the browser kept. */
@@ -123,6 +139,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  for (const h of repeating) clearInterval(h);
+  repeating.clear();
 });
 
 describe('carrying a replay on after a reload', () => {
