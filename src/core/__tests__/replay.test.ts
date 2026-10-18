@@ -496,8 +496,9 @@ describe('ReplaySession: undo is exact', () => {
       const before = state(s);
       if (back === 'step back') s.stepBack();
       else s.jumpTo(target);
-      // The account as it was once the orders were placed at the start.
+      // The account as it was once the orders were placed at the start, and the log says the start.
       expect(s.now, name).toBe(s.start);
+      expect(s.broker.state.events.at(-1)!.message, name).toBe(`Rewound to ${formatExchangeTime(s.start)} ET. Results after a rewind are not blind.`);
       expect(account(s), name).toEqual(account(atStart()));
       expect(s.broker.workingOrders().length, name).toBeGreaterThan(0);
       // And the confirmation said what went.

@@ -687,8 +687,9 @@ export class ReplaySession {
       if (restart) this.broker.logInfo('Back to the start: orders and trades cleared.');
       return;
     }
-    // No date: the log's time column already gives the day, and hides it in blind mode.
-    this.broker.logInfo(`Rewound to ${formatExchangeTime(time)} ET. Results after a rewind are not blind.`);
+    // No date: the log's time column already gives the day, and hides it in blind mode. A time before
+    // the start is given as the start, where the clock now is.
+    this.broker.logInfo(`Rewound to ${formatExchangeTime(Math.max(time, this.start))} ET. Results after a rewind are not blind.`);
     this.rewinds += 1;
   }
 

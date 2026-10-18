@@ -56,7 +56,7 @@ export function BackupCard() {
     try {
       const { backup, heldBack } = await createBackup({ snapshots, datasets: withData && imported > 0, holdBack });
       download(backupFileName(backup), JSON.stringify(backup), 'application/json');
-      const held = heldBack ? ` ${plural(heldBack, 'trade')} from the blind session in progress ${heldBack === 1 ? 'is' : 'are'} left out until it ends.` : '';
+      const held = heldBack ? ` ${plural(heldBack, 'trade')} ${heldBack === 1 ? 'is' : 'are'} left out until ${heldBack === 1 ? 'its' : 'their'} blind session ends.` : '';
       toast('success', `Backup saved with ${plural(backup.journal.length, 'trade')}.${held}`);
     } catch (e) {
       toast('error', `The backup could not be made: ${(e as Error).message}`);
