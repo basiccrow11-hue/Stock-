@@ -1730,8 +1730,26 @@ describe('a first stop or target placed after entry, at or past the average entr
     through.next(49.95, 50, 49.9, 49.95);
     const b = through.result();
     expect([b.trip.closed, b.trip.avgExit, b.review.rMultiple]).toEqual([true, 49.95, null]);
-    expect(b.text).toContain('Stop filled past its price: Your stop at 50.00 was already past the market when you placed or changed it, so it filled at once at 49.95, 0.05 past its price.');
+    // The risk finding says where it filled; the dollar finding does not say it again, nor call it a cost.
+    expect(b.text).toContain('Risk not measurable: Your stop at 50.00, placed 1m after you entered, was at your average entry and already past the market: it filled at once at 49.95 and closed the trade there');
+    expect(b.text).not.toContain('Stop filled past its price');
     expect(b.text).not.toContain('which cost');
+  });
+
+  it('still says where a breakeven stop filled when it was moved past the market later, which the risk finding does not cover', () => {
+    const s = setup();
+    s.next(50, 50, 50, 50);
+    s.broker.submit({ symbol: 'X', action: 'buy', type: 'market', quantity: 100, tif: 'day' });
+    s.next(50, 50.2, 50, 50.1);
+    expect(s.broker.submit({ symbol: 'X', action: 'sell', type: 'stop', stopPrice: 50, quantity: 100, tif: 'day' }).ok).toBe(true);
+    s.next(50.1, 50.1, 50.02, 50.02);
+    const stop = s.broker.state.orders.find((o) => o.type === 'stop')!;
+    expect(s.broker.modify(stop.id, { stopPrice: 50.05 }).ok).toBe(true);
+    s.next(50.02, 50.03, 50.01, 50.02);
+    const { trip: t, review, text } = s.result();
+    expect([t.closed, t.avgExit, review.rMultiple]).toEqual([true, 50.02, null]);
+    expect(text).toContain('Risk not measurable: Your stop at 50.00, placed 1m after you entered, was at your average entry');
+    expect(text).toContain('Stop filled past its price: Your stop at 50.05 was already past the market when you placed or changed it, so it filled at once at 50.02, 0.03 past its price.');
   });
 
   it('says a stop placed late, or moved, past the market filled at once there, and does not judge it against what it allowed', () => {
@@ -1843,7 +1861,8 @@ describe('a first stop or target placed after entry, at or past the average entr
       const where = stop === 50 ? 'at your average entry' : 'past your average entry of 50.00';
       expect(text).toContain(`Risk not measurable: Your stop at ${stop.toFixed(2)}, placed 1m after you entered, was ${where} and already past the market: it ${how}${worse.toFixed(2)}${nbo ? ',' : ''} and closed the trade there, so the trade's risk cannot be measured in R.`);
       expect(text).not.toMatch(/locked in a gain|risked nothing|risked at most/);
-      expect(text).toContain(`Stop filled past its price: Your stop at ${stop.toFixed(2)} was already past the market when you placed or changed it, so it ${how}${worse.toFixed(2)}, `);
+      // Said once: the dollar finding does not repeat where it filled.
+      expect(text).not.toContain('Stop filled past its price');
     }
   });
 

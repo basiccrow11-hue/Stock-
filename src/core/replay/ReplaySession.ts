@@ -415,9 +415,12 @@ export class ReplaySession {
     return this.advanceAll(this.nextRevealTime() ?? this.end);
   }
 
-  /** Reveal one full candle of `timeframe` on `symbol` (default: primary); others follow the clock. */
+  /** Reveal one full candle of `timeframe` on `symbol` (default: primary); others follow the clock. A symbol with no bar left steps as Step does. */
   stepCandle(timeframe: Timeframe, symbol = this.symbol): RevealedBar[] {
     const e = this.engineFor(symbol) ?? this.engine;
+    // A symbol whose data has ended has no candle to complete: the replay moves on as Step does,
+    // rather than taking every other symbol to the end with it.
+    if (e.nextBarTime() === null) return this.step();
     const own = e.stepCandle(timeframe).map((bar) => ({ symbol: e.symbol, bar }));
     const rest: RevealedBar[] = [];
     for (const other of this.engines.values()) {

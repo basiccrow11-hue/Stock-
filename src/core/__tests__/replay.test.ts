@@ -750,6 +750,23 @@ describe('Demo data provider', () => {
   });
 });
 
+describe('Step one candle on a symbol whose data has ended', () => {
+  it('moves the replay on as Step does, not to the end', () => {
+    const flat = (n: number, px: number) => Array.from({ length: n }, () => [px, px, px, px] as [number, number, number, number]);
+    const D2 = '2025-01-15';
+    const day = { start: et(D2, '09:30'), end: et(D2, '16:00'), baseTimeframe: '1m' as const };
+    const long = new ReplayEngine({ symbol: 'SPY', ...day }, minuteBars(D2, '09:30', flat(390, 100)));
+    const short = new ReplayEngine({ symbol: 'AAPL', ...day }, minuteBars(D2, '09:30', flat(30, 50)));
+    const s = new ReplaySession([long, short], { symbol: 'SPY', date: D2, startTime: '09:30', endTime: '16:00', startingBalance: 100_000, lookbackDays: 1 }, ZERO_COST_CONFIG, 'c', 'HISTORICAL');
+    s.jumpTo(et(D2, '10:05'));
+    expect(s.engineFor('AAPL')!.nextBarTime()).toBeNull();
+    const revealed = s.stepCandle('5m', 'AAPL');
+    expect(revealed.map((r) => [r.symbol, r.bar.time])).toEqual([['SPY', et(D2, '10:05')]]);
+    expect(formatExchangeTime(s.now)).toBe(formatExchangeTime(et(D2, '10:06')));
+    expect(s.finished).toBe(false);
+  });
+});
+
 describe('Play through quiet stretches', () => {
   const flat = (n: number, px: number) => Array.from({ length: n }, () => [px, px, px, px] as [number, number, number, number]);
   /** Regular-hours 1m bars: Jan 14 whole, Jan 15 to 11:00, a halt of `halt` minutes, then trading again. */

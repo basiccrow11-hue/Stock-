@@ -484,6 +484,8 @@ export function reviewTrade(input: ReviewInput): TradeReview {
    * average (a breakeven stop) or past it (locking in a gain), or it was placed with a loss to cap and
    * shares added after it took the average to it or past it.
    */
+  // Set once 'Risk not measurable' has said where a stop placed past the market filled, so the dollar finding below does not say it again.
+  let placedFillSaid = false;
   const laterStopPastAverage = (S: number, placedAt: number): string => {
     const sign = long ? 1 : -1;
     const placed = formatDuration(placedAt - trip.entryTime);
@@ -492,6 +494,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
     // Placed already past the market, it closed the trade (or most of it) at once rather than waiting at its price.
     const how = main && main.order.createdAt === placedAt && main.order.stopPrice === S ? placedPast() : undefined;
     if (how) {
+      placedFillSaid = true;
       const closed = parts.length > 1 ? `${main!.qty} of your ${trip.exitQtyTotal} shares` : 'the trade';
       return `Your stop at ${formatTick(S)}, placed ${placed} after you entered, was ${atAverage ? 'at your average entry' : `past your average entry of ${formatTick(trip.avgEntry)}`} and already past the market: it ${filledThrough(how, main!.price)}${how === 'once' ? '' : ','} and closed ${closed} there, ${end}`;
     }
@@ -692,7 +695,7 @@ export function reviewTrade(input: ReviewInput): TradeReview {
         }`,
       });
     }
-  } else if (exitReason === 'stop_loss' && riskPerShare === null && stopAt !== undefined && exitPx !== undefined && stopSlip(stopAt, exitPx).slipped) {
+  } else if (exitReason === 'stop_loss' && riskPerShare === null && !placedFillSaid && stopAt !== undefined && exitPx !== undefined && stopSlip(stopAt, exitPx).slipped) {
     // With no R to measure it in (a breakeven stop, say), what the fill past the stop cost is said in dollars.
     const { past } = stopSlip(stopAt, exitPx);
     findings.push({
