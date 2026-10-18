@@ -19,11 +19,20 @@ export function getProvider(id: string): HistoricalDataProvider {
   return HISTORICAL_PROVIDERS.find((p) => p.id === id) ?? demoProvider;
 }
 
+/** Called whenever the imported datasets change (loaded, saved, deleted), so screens listing them can refresh. */
+const datasetListeners = new Set<() => void>();
+export function onCsvDatasetsChanged(fn: () => void): () => void {
+  datasetListeners.add(fn);
+  return () => datasetListeners.delete(fn);
+}
+const datasetsChanged = () => datasetListeners.forEach((fn) => fn());
+
 export async function loadCsvDatasets(): Promise<CsvDataset[]> {
   try {
     // Daily files imported before bars were filed under their session day may carry midnight stamps.
     const list = (await idb.all<CsvDataset>('datasets')).map((d) => (d.baseTimeframe === '1D' ? { ...d, bars: sessionStampDailyBars(d.bars).bars } : d));
     csvProvider.setDatasets(list);
+    datasetsChanged();
     return list;
   } catch {
     return [];
@@ -32,10 +41,12 @@ export async function loadCsvDatasets(): Promise<CsvDataset[]> {
 
 export async function saveCsvDataset(d: CsvDataset): Promise<void> {
   csvProvider.upsert(d);
+  datasetsChanged();
   await idb.set('datasets', d.symbol.toUpperCase(), d);
 }
 
 export async function deleteCsvDataset(symbol: string): Promise<void> {
   csvProvider.remove(symbol);
+  datasetsChanged();
   await idb.delete('datasets', symbol.toUpperCase());
 }

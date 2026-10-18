@@ -7,15 +7,7 @@ import { pnlClass, signedMoney } from '../services/format';
 import { useDateHidden, useEntryTime } from '../components/useEntryTime';
 import { takeFocusRequest } from '../services/focusRequest';
 import type { JournalEntry } from '../../core/journal';
-
-function download(name: string, text: string, type: string) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+import { download } from '../services/download';
 
 function toCsv(entries: JournalEntry[]): string {
   const cols = ['symbol', 'direction', 'source', 'mode', 'entryTime', 'exitTime', 'quantity', 'avgEntry', 'avgExit', 'stopLoss', 'takeProfit', 'pnl', 'returnPct', 'rMultiple', 'holdingSeconds', 'commission', 'tag', 'rewound', 'why', 'setup', 'good', 'bad', 'change', 'other'];

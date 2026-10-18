@@ -1,8 +1,8 @@
-/** Data sources, CSV import, API keys, execution assumptions, risk and trading rules. */
+/** Data sources, CSV import, API keys, execution assumptions, risk and trading rules, backup and restore. */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
-import { csvProvider, deleteCsvDataset, saveCsvDataset } from '../state/dataRegistry';
+import { csvProvider, deleteCsvDataset, onCsvDatasetsChanged, saveCsvDataset } from '../state/dataRegistry';
 import { combineBars, parseCsv, tickerFromFileName, type CsvParseResult } from '../../core/data/csv';
 import type { CsvDataset } from '../../core/data/csvProvider';
 import { deleteEncrypted, hasEncrypted, loadEncrypted, saveEncrypted } from '../services/secureStore';
@@ -11,6 +11,7 @@ import { toast } from '../state/toasts';
 import { dateTime } from '../services/format';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
 import { AppearanceCard } from '../components/Appearance';
+import { BackupCard } from '../components/BackupCard';
 
 /** NumberField handler for a setting that always has a number: an emptied box changes nothing. */
 function num(set: (v: number) => void) {
@@ -31,6 +32,7 @@ export function SettingsPage() {
         <ExecutionCard />
         <RiskCard />
         <GeneralCard />
+        <BackupCard />
       </div>
     </div>
   );
@@ -67,6 +69,8 @@ function DataSourcesCard() {
 
 function CsvImportCard() {
   const [datasets, setDatasets] = useState<CsvDataset[]>(csvProvider.list());
+  // Also loaded at start-up and restored from a backup, after this card may have mounted.
+  useEffect(() => onCsvDatasetsChanged(() => setDatasets(csvProvider.list())), []);
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [symbol, setSymbol] = useState('');
   // The ticker last filled in from a file name: replaced when another file is chosen, unless it was typed over.

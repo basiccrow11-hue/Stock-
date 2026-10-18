@@ -10,6 +10,7 @@ import {
   MAX_FREEZES,
   dayKey,
   emptyStreak,
+  mergeStreak,
   recordActivity,
   sanitizeStreak,
   setGoal,
@@ -140,6 +141,18 @@ export function dismissCelebration(): void {
   const d = { ...load(), celebrate: null };
   save(d);
   useStreak.setState({ data: d });
+}
+
+/** The stored streak record (for a backup). */
+export function readStreak(): StreakData {
+  return load();
+}
+
+/** Merge a backup's streak record into this one (see mergeStreak), then settle missed days. */
+export function restoreStreak(other: unknown): void {
+  flushTracker?.();
+  save(mergeStreak(load(), sanitizeStreak(other)));
+  settleNow();
 }
 
 /** Spend freezes for missed days and roll the calendar over (on load and at midnight). */

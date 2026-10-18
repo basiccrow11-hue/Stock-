@@ -47,6 +47,37 @@ function save(symbol: string, drawings: Drawing[]): void {
   }
 }
 
+const PREFIX = key('');
+
+/** Every symbol's saved drawings (for a backup). */
+export function allDrawings(): Record<string, Drawing[]> {
+  const out: Record<string, Drawing[]> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(PREFIX) && k.length > PREFIX.length) {
+        const list = load(k.slice(PREFIX.length));
+        if (Array.isArray(list) && list.length) out[k.slice(PREFIX.length)] = list;
+      }
+    }
+  } catch {
+    /* storage blocked: nothing saved to back up */
+  }
+  return out;
+}
+
+/** Add a backup's drawings for `symbol` that are not saved already (by id). Returns how many were added. */
+export function mergeDrawings(symbol: string, list: Drawing[]): number {
+  const have = load(symbol);
+  const ids = new Set(have.map((d) => d.id));
+  const fresh = list.filter((d) => !ids.has(d.id));
+  if (!fresh.length) return 0;
+  const next = [...have, ...fresh];
+  save(symbol, next);
+  if (useDrawings.getState().symbol === symbol) useDrawings.setState({ drawings: next });
+  return fresh.length;
+}
+
 interface DrawingStore {
   symbol: string;
   tool: DrawingTool;

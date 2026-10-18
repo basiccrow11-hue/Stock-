@@ -26,6 +26,8 @@ interface ChallengeStore {
   start: (a: ChallengeAttempt) => void;
   updateActive: (result: ChallengeResult) => void;
   finishActive: () => Promise<void>;
+  /** Add finished attempts this history does not have yet (a restored backup). Resolves with how many were added. */
+  importAttempts: (list: ChallengeAttempt[]) => Promise<number>;
 }
 
 export const useChallenges = create<ChallengeStore>()((set, get) => ({
@@ -53,5 +55,14 @@ export const useChallenges = create<ChallengeStore>()((set, get) => ({
     const done = { ...a, endedAt: Date.now() };
     set({ active: null, attempts: [done, ...get().attempts.filter((x) => x.id !== done.id)] });
     await idb.set('challenges', done.id, done).catch(() => undefined);
+  },
+  importAttempts: async (list) => {
+    const added: ChallengeAttempt[] = [];
+    for (const a of list) if (await idb.modify<ChallengeAttempt>('challenges', a.id, (cur) => (cur ? undefined : a))) added.push(a);
+    if (added.length) {
+      const ids = new Set(added.map((a) => a.id));
+      set({ attempts: [...get().attempts.filter((a) => !ids.has(a.id)), ...added].sort((a, b) => b.startedAt - a.startedAt) });
+    }
+    return added.length;
   },
 }));

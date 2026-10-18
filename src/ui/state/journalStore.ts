@@ -169,6 +169,11 @@ interface JournalStore {
   updateReview: (id: string, review: TradeReview) => Promise<void>;
   /** Mark one of your own rules followed or broken on a trade (null clears the mark). */
   updateRuleCheck: (id: string, rule: string, followed: boolean | null) => Promise<void>;
+  /**
+   * Add entries the journal does not have yet (a restored backup), with their snapshots. An entry
+   * already stored under the same id, in this tab or another, is left as it is. Resolves with the ids added.
+   */
+  importEntries: (entries: JournalEntry[], snapshots: Record<string, string>) => Promise<string[]>;
 }
 
 export const useJournal = create<JournalStore>()((set, get) => ({
@@ -251,6 +256,23 @@ export const useJournal = create<JournalStore>()((set, get) => ({
       return { ...e, ruleChecks: checks };
     };
     await write(id, entry, mark(entry), mark);
+  },
+  importEntries: async (list, snapshots) => {
+    const added: JournalEntry[] = [];
+    for (const e of list) {
+      // Checked and written in one transaction, so an entry another tab has just saved is never replaced.
+      const wrote = await idb.modify<JournalEntry>('journal', e.id, (cur) => (cur ? undefined : e));
+      if (!wrote) continue;
+      const shot = e.snapshotKey && snapshots[e.snapshotKey];
+      if (shot) await idb.modify<string>('snapshots', e.snapshotKey!, (cur) => cur ?? shot);
+      added.push(e);
+      announce(e.id);
+    }
+    if (added.length) {
+      const ids = new Set(added.map((e) => e.id));
+      set({ entries: [...get().entries.filter((e) => !ids.has(e.id)), ...added].sort(byExit) });
+    }
+    return added.map((e) => e.id);
   },
 }));
 

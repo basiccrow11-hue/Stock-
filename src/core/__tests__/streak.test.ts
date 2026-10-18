@@ -6,6 +6,7 @@ import {
   dayKey,
   dayNumber,
   emptyStreak,
+  mergeStreak,
   pendingCelebration,
   recordActivity,
   sanitizeStreak,
@@ -340,5 +341,42 @@ describe('presentation', () => {
     const m = streakMessage(streakStatus(later, '2026-10-06'));
     expect(m.title).toBe('Fresh start');
     expect(m.body).toContain('ran 2 days');
+  });
+});
+
+describe('restoring a backup of the streak', () => {
+  it('keeps every practised day from both, and the streak they make together', () => {
+    // The backup has Oct 1-5; this browser, after site data was cleared, Oct 6-7.
+    const backup = practise(emptyStreak(), run('2026-10-01', 5));
+    const here = practise(emptyStreak(), run('2026-10-06', 2));
+    const merged = mergeStreak(here, backup);
+    expect(Object.keys(merged.days).sort()).toEqual(run('2026-10-01', 7));
+    expect(streakStatus(merged, '2026-10-07').current).toBe(7);
+    expect(merged.best).toBe(7);
+  });
+
+  it('takes the larger time on a day both have, and a goal met in either', () => {
+    const a = recordActivity(emptyStreak(), '2026-10-01', { activeSeconds: 120 }).data;
+    const b = recordActivity(emptyStreak(), '2026-10-01', { activeSeconds: GOAL, tradesClosed: 2 }).data;
+    const merged = mergeStreak(a, b);
+    expect(merged.days['2026-10-01']).toEqual({ activeSeconds: GOAL, tradesClosed: 2, done: true });
+    expect(mergeStreak(b, a).days['2026-10-01']).toEqual({ activeSeconds: GOAL, tradesClosed: 2, done: true });
+  });
+
+  it('keeps this browser’s goal and celebration, takes the backup’s goal into a browser with no practice yet', () => {
+    const backup = setGoal(practise(emptyStreak(), ['2026-10-01']), '2026-10-01', 30).data;
+    const here = setGoal(practise(emptyStreak(), ['2026-10-02']), '2026-10-02', 15).data;
+    expect(mergeStreak(here, backup).goalMinutes).toBe(15);
+    expect(mergeStreak(emptyStreak(), backup).goalMinutes).toBe(30);
+  });
+
+  it('drops a freeze on a day whose goal the other record met, and never banks more than allowed', () => {
+    const backup = { ...practise(emptyStreak(), ['2026-10-01', '2026-10-03']), frozen: ['2026-10-02'], freezes: 1 };
+    const here = { ...practise(emptyStreak(), ['2026-10-02']), freezes: 2 };
+    const merged = mergeStreak(here, backup);
+    expect(merged.frozen).toEqual([]);
+    expect(merged.freezes).toBe(2);
+    expect(merged.best).toBe(3);
+    expect(sanitizeStreak(merged)).toEqual(merged);
   });
 });
