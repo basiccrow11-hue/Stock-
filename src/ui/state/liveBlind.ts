@@ -4,10 +4,15 @@
  * Each tab lists its running blind session (with its start date, for the "Day N" labels) in
  * localStorage and renews it on a heartbeat; it removes it when the session ends or the tab closes.
  * The listing of a tab that died without saying so lapses after a couple of minutes.
+ *
+ * A blind session saved to carry on later (savedSessions) has not ended when no tab runs it, so its
+ * date stays hidden then too. The trading store lists those apart, with no heartbeat, from when it
+ * saves one until the session ends, is let go or gives its date back.
  */
 import { create } from 'zustand';
 
 const KEY = 'stock-replay-live-blind';
+const SAVED_KEY = 'stock-replay-saved-blind';
 const BEAT_MS = 20_000;
 /** Longer than the slowest a background tab's timers run (about once a minute). */
 const TTL_MS = 150_000;
@@ -35,7 +40,26 @@ function write(listing: Listing): void {
   }
 }
 
-/** Blind sessions running in any tab, this one included. */
+function readSaved(): LiveBlind {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(SAVED_KEY) ?? '{}');
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    return Object.fromEntries(Object.entries(v).filter(([, start]) => typeof start === 'string')) as LiveBlind;
+  } catch {
+    return {};
+  }
+}
+
+function writeSaved(saved: LiveBlind): void {
+  try {
+    if (Object.keys(saved).length) localStorage.setItem(SAVED_KEY, JSON.stringify(saved));
+    else localStorage.removeItem(SAVED_KEY);
+  } catch {
+    // Storage unavailable: the session's dates show once no tab runs it.
+  }
+}
+
+/** Blind sessions whose date is still hidden: running in any tab, this one included, or saved to carry on later. */
 export const useLiveBlind = create<{ sessions: LiveBlind }>(() => ({ sessions: {} }));
 
 /** This tab's running blind session. */
@@ -43,7 +67,7 @@ let mine: { id: string; start: string } | null = null;
 
 function refresh(listing = read()): void {
   const now = Date.now();
-  const sessions: LiveBlind = {};
+  const sessions: LiveBlind = readSaved();
   for (const [id, e] of Object.entries(listing)) {
     if (e && typeof e.start === 'string' && typeof e.beat === 'number' && now - e.beat < TTL_MS) sessions[id] = e.start;
   }
@@ -83,12 +107,43 @@ export function setLiveBlind(session: { id: string; start: string } | null): voi
   beat();
 }
 
+/** Lists saved session `id` as a blind one whose date is still hidden (`start`: its start date), or takes it off (null). */
+export function setSavedBlind(id: string, start: string | null): void {
+  const saved = readSaved();
+  if ((saved[id] ?? null) === start) return;
+  if (start === null) delete saved[id];
+  else saved[id] = start;
+  writeSaved(saved);
+  refresh();
+}
+
+/**
+ * Brings the saved listing in line with the sessions kept, once as the app opens. `kept` reads every
+ * one, with when it was last saved and, for a blind one whose date is still hidden, its start date.
+ * A session listed but no longer kept goes; one kept but not listed (saved before this listing
+ * existed) is added.
+ */
+export async function reconcileSavedBlind(kept: () => Promise<{ id: string; savedAt: number; start: string | null }[]>): Promise<void> {
+  // Read first: a session listed while `kept` is read is not taken for one no longer kept.
+  const before = readSaved();
+  const since = Date.now();
+  const all = await kept();
+  const ids = new Set(all.map((k) => k.id));
+  const saved = readSaved();
+  for (const id of Object.keys(before)) if (!ids.has(id)) delete saved[id];
+  // One saved since was listed, or taken off, by the tab that saved it.
+  for (const k of all) if (k.start !== null && !(k.id in before) && k.savedAt < since) saved[k.id] = k.start;
+  writeSaved(saved);
+  refresh();
+}
+
 if (typeof window !== 'undefined') {
   setInterval(beat, BEAT_MS);
   window.addEventListener('storage', (e) => {
-    if (e.key === KEY || e.key === null) refresh();
+    if (e.key === KEY || e.key === SAVED_KEY || e.key === null) refresh();
   });
-  // A closing tab takes its session off the list; one restored from the back/forward cache puts it back.
+  // A closing tab takes its session off the list of those running (a saved one stays listed as saved);
+  // one restored from the back/forward cache puts it back.
   window.addEventListener('pagehide', () => {
     if (mine) unlist(mine.id);
   });

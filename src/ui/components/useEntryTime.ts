@@ -4,7 +4,10 @@ import { dateTime } from '../services/format';
 import { useLiveBlind } from '../state/liveBlind';
 import { blindDayLabel, useTrading } from '../state/tradingStore';
 
-/** For an entry from a blind session still running (in this tab or another), that session's start date; else null. */
+/**
+ * For an entry from a blind session that has not ended (running in this tab or another, or saved to
+ * carry on later), that session's start date; else null.
+ */
 function useBlindStart(): (entry: JournalEntry) => string | null {
   const session = useTrading((s) => s.session);
   const live = useLiveBlind((s) => s.sessions);
@@ -15,15 +18,15 @@ function useBlindStart(): (entry: JournalEntry) => string | null {
   };
 }
 
-/** Whether an entry comes from a blind session still running, whose calendar date stays hidden. */
+/** Whether an entry comes from a blind session that has not ended, whose calendar date stays hidden. */
 export function useDateHidden(): (entry: JournalEntry) => boolean {
   const start = useBlindStart();
   return (entry) => start(entry) !== null;
 }
 
 /**
- * Formats a journal entry's times. While the blind session that produced the trade is still
- * running, in any tab, the calendar date stays hidden ("Day 2 10:15") wherever the entry is shown.
+ * Formats a journal entry's times. Until the blind session that produced the trade has ended, the
+ * calendar date stays hidden ("Day 2 10:15") wherever the entry is shown, in every tab.
  */
 export function useEntryTime(): (entry: JournalEntry, t: number) => string {
   const start = useBlindStart();

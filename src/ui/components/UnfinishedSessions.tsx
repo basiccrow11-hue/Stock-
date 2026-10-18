@@ -29,7 +29,8 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
   const [busy, setBusy] = useState(false);
   const pnl = s.equity - s.startingBalance;
   const money = `${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const challenge = s.meta.challengeId ? CHALLENGES.find((c) => c.id === s.meta.challengeId) : undefined;
+  // Its challenge attempt, while one is under way (a summary saved before that was noted says only which it started with).
+  const challenge = s.meta.challengeId && (s.challengeUnderWay ?? true) ? CHALLENGES.find((c) => c.id === s.meta.challengeId) : undefined;
   const discard = async () => {
     const open = s.openPositions ? ` Its ${plural(s.openPositions, 'open position')} ${s.openPositions === 1 ? 'goes' : 'go'} without a journal entry.` : '';
     const attempt = challenge ? ' Its challenge attempt is kept as abandoned.' : '';

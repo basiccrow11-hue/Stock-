@@ -37,7 +37,7 @@ describe('the new replay form and blind replays', () => {
     useLiveBlind.setState({ sessions: { 'replay_other-tab': '2024-08-30' } });
     const hidden = await open();
     expect(hidden.dateField().value).toBe('');
-    expect(document.body.textContent).toContain('belongs to a blind replay still running, so it stays hidden');
+    expect(document.body.textContent).toContain('belongs to a blind replay that has not ended, so it stays hidden');
     expect(document.body.textContent).not.toContain('2024-08-30');
     act(() => hidden.root.unmount());
 

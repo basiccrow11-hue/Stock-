@@ -48,6 +48,8 @@ export interface SessionSummary {
   equity: number;
   startingBalance: number;
   finished: boolean;
+  /** Whether its challenge attempt was still under way. Absent on summaries saved before this was noted. */
+  challengeUnderWay?: boolean;
 }
 
 export interface SavedSession {
@@ -212,13 +214,17 @@ export async function deleteSession(id: string): Promise<void> {
   for (const { key } of await idb.withPrefix<{ key: string }>('kv', `${CHECKPOINT}${id}:`)) await idb.delete('kv', key);
 }
 
+/** Every unfinished session kept, those a tab is running included. */
+export async function keptSessions(): Promise<SessionSummary[]> {
+  const all = await idb.withPrefix<SessionSummary>('kv', SUMMARY);
+  return all.filter((s) => s && typeof s.id === 'string' && typeof s.savedAt === 'number' && s.meta);
+}
+
 /** Unfinished sessions no tab is running, newest first. */
 export async function listSessions(): Promise<SessionSummary[]> {
-  const all = await idb.withPrefix<SessionSummary>('kv', SUMMARY);
+  const all = await keptSessions();
   const running = await lockedSessions();
-  return all
-    .filter((s) => s && typeof s.id === 'string' && typeof s.savedAt === 'number' && s.meta && !running.has(s.id) && !held.has(s.id))
-    .sort((a, b) => b.savedAt - a.savedAt);
+  return all.filter((s) => !running.has(s.id) && !held.has(s.id)).sort((a, b) => b.savedAt - a.savedAt);
 }
 
 // ---------------------------------------------------------------- where the clock has got to

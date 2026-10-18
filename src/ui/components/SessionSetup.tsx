@@ -52,7 +52,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
   const loading = useTrading((s) => s.loading);
   const [providerId, setProviderId] = useState(r.providerId);
   const [symbol, setSymbol] = useState(r.symbol);
-  // The saved date may be one a blind replay still running (here or in another tab) is hiding.
+  // The saved date may be one a blind replay that has not ended (running here or in another tab, or saved to carry on) is hiding.
   const [hiddenDate] = useState(() => Object.values(useLiveBlind.getState().sessions).includes(r.date));
   const [date, setDate] = useState(hiddenDate ? '' : r.date);
   const [startTime, setStartTime] = useState(r.startTime);
@@ -318,7 +318,7 @@ function ReplayForm({ onDone, presetChallenge }: { onDone: () => void; presetCha
               : "Downloads real 1-minute bars from the vendor through this app's data proxy."}
         </span>
       </div>
-      {hiddenDate && !date && <div className="small muted">The last date used belongs to a blind replay still running, so it stays hidden. Pick a date or a random one.</div>}
+      {hiddenDate && !date && <div className="small muted">The last date used belongs to a blind replay that has not ended, so it stays hidden. Pick a date or a random one.</div>}
       {range && <div className="small muted">Available data: {range.from} to {range.to}</div>}
       {extraSymbols.length > 0 && <div className="small muted">Also loading: {extraSymbols.slice(0, 7).join(', ')}</div>}
       {validation && <div className="alert warn">{validation}</div>}

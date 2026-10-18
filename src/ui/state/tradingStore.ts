@@ -22,6 +22,7 @@ import {
   MAX_SAVED_SESSIONS,
   claimSession,
   deleteSession,
+  keptSessions,
   listSessions,
   notePosition,
   readPosition,
@@ -35,11 +36,12 @@ import {
 } from '../services/savedSessions';
 import { getProvider } from './dataRegistry';
 import { getSettings, useSettings } from './settingsStore';
+import { useCredentials } from './credentials';
 import { useJournal, saveSnapshot } from './journalStore';
 import { useChallenges } from './challengeStore';
 import { toast } from './toasts';
 import { recordTradeClosed } from './streakStore';
-import { setLiveBlind } from './liveBlind';
+import { reconcileSavedBlind, setLiveBlind, setSavedBlind } from './liveBlind';
 import { newId } from '../../core/util/ids';
 import type { ChartScene } from '../chart/offscreenSnapshot';
 
@@ -395,6 +397,7 @@ function publish(force = false): void {
   if (finished && meta?.blind) {
     const last = exchangeDate(now);
     useTrading.setState({ session: { ...meta, blind: false, label: `${meta.symbols[0]} · ${meta.startDate}` } });
+    setSavedBlind(meta.id, null);
     toast('info', `Blind replay over: that was ${meta.symbols[0]} on ${last === meta.startDate ? meta.startDate : `${meta.startDate} to ${last}`}.`, 10_000);
   }
   if (finished && useTrading.getState().playing) {
@@ -819,6 +822,7 @@ function sessionRecord(): SavedSession | null {
   else return null;
   const st = b.state;
   const active = useChallenges.getState().active;
+  const challenge = active?.sessionId === meta.id ? structuredClone(active) : null;
   return {
     version: SAVED_SESSION_VERSION,
     summary: {
@@ -831,6 +835,7 @@ function sessionRecord(): SavedSession | null {
       equity: b.account().equity,
       startingBalance: st.startingBalance,
       finished: eng.replay?.finished ?? false,
+      challengeUnderWay: challenge !== null,
     },
     view: view(s),
     warnings: s.warnings,
@@ -838,8 +843,13 @@ function sessionRecord(): SavedSession | null {
     sim,
     journaledTrips: [...eng.journaledTrips],
     watching: [...eng.watching].map(([id, w]) => [id, structuredClone(w)]),
-    challenge: active?.sessionId === meta.id ? structuredClone(active) : null,
+    challenge,
   };
+}
+
+/** A saved session's start date while it is blind and its date still hidden, else null. */
+function hiddenStart(s: SessionSummary): string | null {
+  return s.meta.blind && !s.finished ? s.meta.startDate : null;
 }
 
 /** Saves the running session whole, in the background. */
@@ -849,6 +859,8 @@ function saveSession(): void {
   eng.savedAt = performance.now();
   notePositionNow();
   const id = rec.summary.id;
+  // Saved to carry on later, a blind session keeps its dates hidden in every tab even once no tab runs it.
+  setSavedBlind(id, hiddenStart(rec.summary));
   saving = saving
     .then(() => writeSession(rec))
     .catch((e) => {
@@ -887,6 +899,7 @@ async function adoptSession(id: string): Promise<void> {
 
 /** The session ended: nothing is kept of it to carry on. */
 function forgetSession(id: string): void {
+  setSavedBlind(id, null);
   releaseSession(id);
   if (tabSession() === id) rememberTabSession(null);
   saving = saving.then(() => deleteSession(id)).catch(() => undefined);
@@ -897,6 +910,12 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveSession();
   });
+}
+
+// As the app opens, the blind sessions listed as saved (liveBlind) are checked against those kept: one
+// saved before that listing existed is added, and one no longer kept goes.
+if (typeof window !== 'undefined') {
+  void reconcileSavedBlind(async () => (await keptSessions()).map((s) => ({ id: s.id, savedAt: s.savedAt, start: hiddenStart(s) }))).catch(() => undefined);
 }
 
 /** Unfinished sessions this browser kept that no tab is running, newest first. */
@@ -917,6 +936,7 @@ export async function discardSession(id: string): Promise<boolean> {
     if (rec?.challenge) await useChallenges.getState().importAttempts([{ ...rec.challenge, endedAt: Date.now() }]);
     saving = saving.then(() => deleteSession(id)).catch(() => undefined);
     await saving;
+    setSavedBlind(id, null);
   } finally {
     releaseSession(id);
   }
@@ -1115,6 +1135,16 @@ let resuming: string | null = null;
 /** Furthest a simulated market is moved on to where its clock had got to after its last whole save. */
 const SIM_CATCH_UP_LIMIT = 7 * 86_400;
 
+/** The longest carrying a session on waits for the server to say which vendor keys it keeps. */
+const SERVER_KEYS_WAIT_MS = 10_000;
+
+/** Asks the server which vendor keys it keeps (checkServer), waiting at most SERVER_KEYS_WAIT_MS for the answer. */
+async function serverKeysChecked(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([useCredentials.getState().checkServer(), new Promise<void>((r) => (timer = setTimeout(r, SERVER_KEYS_WAIT_MS)))]);
+  clearTimeout(timer);
+}
+
 /**
  * Carries on an unfinished session (savedSessions) where it was, paused, once it has loaded: ends the
  * running session first (endCurrent), as starting one does. A replay loads its data again and carries on
@@ -1147,6 +1177,8 @@ export async function resumeSession(id: string): Promise<boolean> {
   try {
     if (rec.replay) {
       const provider = getProvider(rec.replay.providerId);
+      // A key kept on the server is known only once the server has answered, which can be after a reload gets here.
+      if (provider.requiresCredentials && provider.unavailableReason() && !useCredentials.getState().serverChecked) await serverKeysChecked();
       const reason = provider.unavailableReason();
       if (reason) throw new Error(`${reason} Then resume the session.`);
       replay = await ReplaySession.resume(provider, rec.replay.state, id);
@@ -1204,6 +1236,10 @@ export async function resumeSession(id: string): Promise<boolean> {
     speed: (replay ? REPLAY_SPEEDS : SIM_SPEEDS).includes(shown.speed) ? shown.speed : replay ? 60 : 1,
   });
   if (rec.challenge) useChallenges.getState().start(rec.challenge);
+  // It went on to where it had got to under the execution settings it had then. From here it trades
+  // under those in use now (compared by value: settings are a new object on every page load), which
+  // take effect as a change made while it runs does.
+  if (JSON.stringify(getSettings().execution) !== JSON.stringify(b.cfg)) applyExecutionConfig();
   emitChart({ type: 'reset' });
   publish(true);
   resuming = null;

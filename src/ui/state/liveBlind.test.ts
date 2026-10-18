@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const KEY = 'stock-replay-live-blind';
+const SAVED = 'stock-replay-saved-blind';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -42,5 +43,54 @@ describe('blind sessions running in other tabs', () => {
     expect(localStorage.getItem(KEY)).toBeNull();
     setLiveBlind(null);
     expect(useLiveBlind.getState().sessions).toEqual({});
+  });
+});
+
+describe('blind sessions saved to carry on later', () => {
+  it('are seen in every tab from the start, with no heartbeat, through a closing tab, until taken off', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-08T15:00:00Z') });
+    localStorage.setItem(SAVED, JSON.stringify({ left: '2024-03-12' }));
+    const { setLiveBlind, setSavedBlind, useLiveBlind } = await import('./liveBlind');
+    expect(useLiveBlind.getState().sessions).toEqual({ left: '2024-03-12' });
+
+    // Carried on here, then the tab closes: it is no longer running, but still saved.
+    setLiveBlind({ id: 'left', start: '2024-03-12' });
+    window.dispatchEvent(new Event('pagehide'));
+    expect(localStorage.getItem(KEY)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual({ left: '2024-03-12' });
+    setLiveBlind(null);
+    vi.advanceTimersByTime(600_000);
+    expect(useLiveBlind.getState().sessions).toEqual({ left: '2024-03-12' });
+
+    // Another tab saves one, and lets go of it.
+    localStorage.setItem(SAVED, JSON.stringify({ left: '2024-03-12', other: '2023-06-01' }));
+    window.dispatchEvent(new StorageEvent('storage', { key: SAVED }));
+    expect(useLiveBlind.getState().sessions).toEqual({ left: '2024-03-12', other: '2023-06-01' });
+    localStorage.setItem(SAVED, JSON.stringify({ left: '2024-03-12' }));
+    window.dispatchEvent(new StorageEvent('storage', { key: SAVED }));
+    expect(useLiveBlind.getState().sessions).toEqual({ left: '2024-03-12' });
+
+    setSavedBlind('left', null);
+    expect(useLiveBlind.getState().sessions).toEqual({});
+    expect(localStorage.getItem(SAVED)).toBeNull();
+  });
+
+  it('are brought in line with the sessions kept as the app opens, without undoing what tabs list meanwhile', async () => {
+    localStorage.setItem(SAVED, JSON.stringify({ gone: '2020-01-02', kept: '2024-03-12', ending: '2022-02-02' }));
+    const { reconcileSavedBlind, setSavedBlind, useLiveBlind } = await import('./liveBlind');
+    await reconcileSavedBlind(async () => {
+      // While the sessions kept are read, another tab starts one and ends another.
+      setSavedBlind('started', '2025-01-15');
+      setSavedBlind('ending', null);
+      return [
+        { id: 'kept', savedAt: 1, start: '2024-03-12' },
+        { id: 'older', savedAt: 1, start: '2023-06-01' },
+        { id: 'ending', savedAt: 1, start: '2022-02-02' },
+        { id: 'plain', savedAt: 1, start: null },
+        { id: 'started', savedAt: Date.now() + 1, start: '2025-01-15' },
+      ];
+    });
+    expect(useLiveBlind.getState().sessions).toEqual({ kept: '2024-03-12', older: '2023-06-01', started: '2025-01-15' });
+    expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual({ kept: '2024-03-12', older: '2023-06-01', started: '2025-01-15' });
   });
 });

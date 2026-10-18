@@ -44,7 +44,7 @@ export interface Backup {
 export interface BackupOptions {
   snapshots: boolean;
   datasets: boolean;
-  /** Entries left out: those of a blind session still running, whose dates must stay hidden. */
+  /** Entries left out: those of a blind session that has not ended (running, or saved to carry on later), whose dates must stay hidden. */
   holdBack: (e: JournalEntry) => boolean;
 }
 

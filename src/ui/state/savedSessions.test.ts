@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, createElement, type ReactElement } from 'react';
+import { createRoot } from 'react-dom/client';
 import { exchangeTimeToUnix } from '../../core/time';
+import type { JournalEntry } from '../../core/journal';
+import { CHALLENGES } from '../../core/challenges/challenges';
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 /** IndexedDB stand-in: one Map per store, kept across module resets as a browser keeps it across a reload. */
 const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>() }));
@@ -56,10 +62,11 @@ async function page() {
   const { useJournal } = await import('./journalStore');
   const { useChallenges } = await import('./challengeStore');
   const { useToasts } = await import('./toasts');
+  const { useSettings } = await import('./settingsStore');
   const saved = await import('../services/savedSessions');
   await useJournal.getState().load();
   await useChallenges.getState().load();
-  return { store, useJournal, useChallenges, useToasts, saved };
+  return { store, useJournal, useChallenges, useToasts, useSettings, saved };
 }
 
 /** Closing the page as a reload does: its last saves land, then it goes. */
@@ -80,7 +87,11 @@ beforeEach(() => {
   locks.mine.clear();
   locks.elsewhere.clear();
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('carrying a replay on after a reload', () => {
   it('comes back paused where it was: clock, orders, positions, trades and what the chart showed', async () => {
@@ -285,6 +296,65 @@ describe('carrying a replay on after a reload', () => {
     // Still kept, to discard.
     expect((await b.store.unfinishedSessions()).map((s) => s.meta.symbols)).toEqual([['ACME']]);
   });
+
+  it('waits to hear whether the server keeps a vendor key before saying one is needed', async () => {
+    const a = await page();
+    polygonServesDemo(await import('./dataRegistry'));
+    (await import('./credentials')).useCredentials.setState((c) => ({ creds: { ...c.creds, serverHasPolygonKey: true }, serverChecked: true }));
+    expect(await a.store.startReplay({ ...replay, providerId: 'polygon' })).toBe(true);
+    a.store.jumpTo(at('10:05'));
+
+    const b = await reload(a);
+    polygonServesDemo(await import('./dataRegistry'));
+    // The server answers after the session is asked for, as a cold start does.
+    const answer = { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ polygon: true, alpaca: false }) };
+    vi.stubGlobal('fetch', vi.fn((url: string) => (url === '/api/server-keys' ? new Promise((r) => setTimeout(() => r(answer), 300)) : Promise.reject(new Error('offline')))));
+    // As the app opens: the check is asked for, and the session carried on without waiting for it.
+    void (await import('./credentials')).useCredentials.getState().checkServer();
+    expect(await b.store.resumeAfterReload()).toBe(true);
+    expect(b.store.useTrading.getState().now).toBe(at('10:05'));
+  });
+
+  it('gives up waiting for a server that does not answer', async () => {
+    const a = await page();
+    polygonServesDemo(await import('./dataRegistry'));
+    (await import('./credentials')).useCredentials.setState((c) => ({ creds: { ...c.creds, serverHasPolygonKey: true }, serverChecked: true }));
+    expect(await a.store.startReplay({ ...replay, providerId: 'polygon' })).toBe(true);
+
+    const b = await reload(a);
+    polygonServesDemo(await import('./dataRegistry'));
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const resumed = b.store.resumeAfterReload();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await resumed).toBe(false);
+    expect(b.store.useTrading.getState().error).toBe('Add a Polygon API key in Data & Settings. Then resume the session.');
+  });
+
+  it('trades under execution settings changed while it was away, from its next fill', async () => {
+    const a = await page();
+    a.useSettings.getState().updateExecution({ marketOrderFill: 'next_bar_open' });
+    expect(await a.store.startReplay(replay)).toBe(true);
+    a.store.jumpTo(at('10:05'));
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    // It fills at the open of the next bar to begin, after the last whole save: carrying on fills it
+    // again, under the settings it had then.
+    a.store.stepForward();
+    a.store.stepForward();
+    await settle();
+    expect(a.store.useTrading.getState().fills.map((f) => f.commission)).toEqual([0]);
+
+    const b = await page(); // a crash: no last save
+    const settings = b.useSettings;
+    settings.getState().updateExecution({ commission: { ...settings.getState().execution.commission, perOrder: 7 } });
+    expect(await b.store.resumeAfterReload()).toBe(true);
+    expect(b.store.useTrading.getState().fills.map((f) => f.commission)).toEqual([0]);
+    expect(b.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    b.store.stepForward();
+    b.store.stepForward();
+    await settle();
+    expect(b.store.useTrading.getState().fills.map((f) => f.commission)).toEqual([0, 7]);
+  });
 });
 
 describe('the simulated market after a reload', () => {
@@ -309,6 +379,21 @@ describe('the simulated market after a reload', () => {
     // And goes on.
     b.store.stepForward();
     expect(b.store.useTrading.getState().now).toBe(before.now + 60);
+  });
+
+  it('trades under execution settings changed while it was away', async () => {
+    const a = await page();
+    expect(await a.store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 60 })).toBe(true);
+    a.store.stepForward();
+    const b = await reload(a);
+    const settings = b.useSettings;
+    settings.getState().updateExecution({ commission: { ...settings.getState().execution.commission, perOrder: 7 } });
+    expect(await b.store.resumeAfterReload()).toBe(true);
+    const sym = b.store.useTrading.getState().activeSymbol;
+    expect(b.store.submitOrder({ symbol: sym, action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    b.store.stepForward();
+    await settle();
+    expect(b.store.useTrading.getState().fills.map((f) => f.commission)).toEqual([7]);
   });
 });
 
@@ -350,6 +435,54 @@ describe('unfinished sessions and other tabs', () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toMatchObject({ sessionId: id, result: { status: 'in_progress' } });
     expect(attempts[0].endedAt).toBeGreaterThan(0);
+  });
+
+  it('says a challenge attempt goes as abandoned only while one is under way', async () => {
+    const a = await page();
+    // A trade closed without a stop loss fails this challenge at once: its attempt is over.
+    expect(await a.store.startReplay({ ...replay, challengeId: 'grow-20-1pct' })).toBe(true);
+    const over = a.store.useTrading.getState().session!.id;
+    a.store.stepForward();
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    expect(a.store.closePosition('SPY').ok).toBe(true);
+    await vi.waitFor(() => expect(a.useChallenges.getState().attempts.map((x) => x.result.status)).toEqual(['failed']));
+    await settle();
+    rememberNothing();
+    const b = await page();
+    expect(await b.store.startReplay({ ...replay, challengeId: 'rules-20' })).toBe(true);
+    await settle();
+    rememberNothing();
+
+    const c = await page();
+    expect((await c.store.unfinishedSessions()).map((s) => [s.id === over, s.challengeUnderWay])).toEqual([
+      [false, true],
+      [true, false],
+    ]);
+    const { UnfinishedSessions } = await import('../components/UnfinishedSessions');
+    const asked: string[] = [];
+    vi.spyOn(window, 'confirm').mockImplementation((m) => (asked.push(String(m)), false));
+    const discardAll = (el: HTMLElement) => act(() => [...el.querySelectorAll('button')].filter((x) => x.textContent === 'Discard').forEach((x) => x.click()));
+    let list = render(createElement(UnfinishedSessions));
+    await vi.waitFor(() => expect(list.el.querySelectorAll('li')).toHaveLength(2));
+    const [underWay, ended] = [...list.el.querySelectorAll('li')].map((li) => li.textContent);
+    expect(underWay).toContain(`Challenge: ${CHALLENGES.find((x) => x.id === 'rules-20')!.title}`);
+    expect(ended).not.toContain('Challenge:');
+    discardAll(list.el);
+    expect(asked).toEqual([
+      'Discard this session? Its closed trades stay in your journal. Its challenge attempt is kept as abandoned.',
+      'Discard this session? Its closed trades stay in your journal.',
+    ]);
+    list.unmount();
+
+    // Saved before this was noted, a session says what it said before: the challenge it started with.
+    const kv = db.stores.get('kv')!;
+    const { challengeUnderWay, ...summary } = kv.get(`session-summary:${over}`) as Record<string, unknown>;
+    expect(challengeUnderWay).toBe(false);
+    kv.set(`session-summary:${over}`, summary);
+    list = render(createElement(UnfinishedSessions));
+    await vi.waitFor(() => expect(list.el.querySelectorAll('li')).toHaveLength(2));
+    expect(list.el.querySelectorAll('li')[1].textContent).toContain(`Challenge: ${CHALLENGES.find((x) => x.id === 'grow-20-1pct')!.title}`);
+    list.unmount();
   });
 
   it('keeps only the latest few', async () => {
@@ -460,7 +593,112 @@ describe('a replay’s undo history in storage', () => {
   }, 60_000);
 });
 
+describe('a blind session left unfinished', () => {
+  const SAVED_BLIND = 'stock-replay-saved-blind';
+
+  it('keeps its dates hidden in the journal, analytics, exports and backups of every tab until it ends', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, blind: true })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    a.store.stepForward();
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    a.store.stepForward();
+    expect(a.store.closePosition('SPY').ok).toBe(true);
+    await vi.waitFor(() => expect(a.useJournal.getState().entries).toHaveLength(1));
+    const entry = a.useJournal.getState().entries[0];
+    expect(entry.blind).toBe(true);
+    await settle();
+    // The tab closes; one opened later hides the dates from its first render, before anything is read.
+    window.dispatchEvent(new Event('pagehide'));
+    rememberNothing();
+    vi.resetModules();
+    expect((await import('./liveBlind')).useLiveBlind.getState().sessions).toEqual({ [id]: '2024-03-12' });
+
+    const b = await page();
+    expect((await b.store.unfinishedSessions()).map((s) => [s.id, s.meta.blind])).toEqual([[id, true]]);
+    const hidden = await shown(entry);
+    expect(hidden).toMatchObject({ hidden: true, time: expect.stringMatching(/^Day 1 \d\d:\d\d$/) });
+    const { createBackup } = await import('../services/backup');
+    const made = await createBackup({ snapshots: true, datasets: false, holdBack: hidden.holdBack });
+    expect([made.heldBack, made.backup.journal.length]).toEqual([1, 0]);
+
+    // Carried on and ended, it gives its dates back.
+    expect(await b.store.resumeSession(id)).toBe(true);
+    expect((await shown(entry)).hidden).toBe(true);
+    await b.store.endSession();
+    expect(await shown(entry)).toMatchObject({ hidden: false, time: expect.stringMatching(/^2024-03-12 /) });
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+  });
+
+  it('is listed once the app opens if it was saved before that listing, and taken off when let go', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, blind: true })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    window.dispatchEvent(new Event('pagehide'));
+    rememberNothing();
+    // Saved by an older version of the app, with a listing left of a session no longer kept.
+    localStorage.setItem(SAVED_BLIND, JSON.stringify({ gone: '2020-01-02' }));
+
+    const b = await page();
+    const { useLiveBlind } = await import('./liveBlind');
+    await vi.waitFor(() => expect(useLiveBlind.getState().sessions).toEqual({ [id]: '2024-03-12' }));
+    expect(await b.store.discardSession(id)).toBe(true);
+    expect(useLiveBlind.getState().sessions).toEqual({});
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+  });
+
+  it('gives its date back once it has run to its end', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, blind: true, endTime: '10:02' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    const { useLiveBlind } = await import('./liveBlind');
+    expect(JSON.parse(localStorage.getItem(SAVED_BLIND)!)).toEqual({ [id]: '2024-03-12' });
+    a.store.stepForward();
+    a.store.stepForward();
+    await settle();
+    expect(a.store.useTrading.getState()).toMatchObject({ finished: true, session: { blind: false } });
+    expect(useLiveBlind.getState().sessions).toEqual({});
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+  });
+});
+
 /** A new tab: nothing of the closed one's own tab state. */
 function rememberNothing() {
   sessionStorage.clear();
+}
+
+/** Renders `el` into the page, as a screen of the app. */
+function render(el: ReactElement) {
+  const host = document.body.appendChild(document.createElement('div'));
+  const root = createRoot(host);
+  act(() => root.render(el));
+  return {
+    el: host,
+    unmount: () => {
+      act(() => root.unmount());
+      host.remove();
+    },
+  };
+}
+
+/** How the journal, analytics and backup screens show `entry` (useEntryTime, useDateHidden), and what a backup leaves out. */
+async function shown(entry: JournalEntry) {
+  const { useDateHidden, useEntryTime } = await import('../components/useEntryTime');
+  const seen = { time: '', hidden: false, holdBack: (_: JournalEntry) => false };
+  function Probe() {
+    const time = useEntryTime();
+    const hidden = useDateHidden();
+    Object.assign(seen, { time: time(entry, entry.entryTime), hidden: hidden(entry), holdBack: hidden });
+    return null;
+  }
+  render(createElement(Probe)).unmount();
+  return seen;
+}
+
+/** The Polygon provider serving the demo data (there is no network here), for a vendor replay. */
+function polygonServesDemo({ polygonProvider, demoProvider }: typeof import('./dataRegistry')) {
+  vi.spyOn(polygonProvider, 'getBars').mockImplementation((req, signal) => demoProvider.getBars(req, signal));
+  vi.spyOn(polygonProvider, 'getCoarseBars').mockImplementation((req, tf, signal) => demoProvider.getCoarseBars(req, tf, signal));
 }
