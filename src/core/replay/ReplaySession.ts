@@ -125,6 +125,14 @@ export interface RevealedBar {
   bar: Bar;
 }
 
+/** Bars one engine revealed, oldest first, from its bar index `from` on, with when each ends. */
+interface Batch {
+  symbol: string;
+  from: number;
+  bars: Bar[];
+  ends: UnixSeconds[];
+}
+
 export interface Checkpoint {
   /** Bars revealed by each engine (engine order) when it was taken. */
   cursors: number[];
@@ -190,7 +198,7 @@ export class ReplaySession {
     // Prime the broker with each symbol's last known price before the start (no orders exist yet).
     for (const e of list) {
       const last = e.lastBar();
-      if (last) this.broker.onBar(e.symbol, last, e.barSeconds(last));
+      if (last) this.broker.onBar(e.symbol, last, e.revealedEnds(e.revealedCount - 1, e.revealedCount)[0] - last.time);
     }
     this.checkpoint();
   }
@@ -421,10 +429,11 @@ export class ReplaySession {
     return [...this.engines.values()].map((e) => e.revealedCount);
   }
 
-  /** A checkpoint at the current reveal point and time. A later one at the same point and time replaces it (not the start's). */
-  private checkpoint(): void {
-    const cursors = this.cursors();
-    const time = this.now;
+  /**
+   * A checkpoint at the reveal point `cursors` and time `time` (by default the current ones). A later one
+   * at the same point and time replaces it (not the start's).
+   */
+  private checkpoint(cursors = this.cursors(), time = this.now): void {
     const last = this.checkpoints[this.checkpoints.length - 1];
     if (this.checkpoints.length > 1 && last.time === time && last.cursors.every((c, i) => c === cursors[i])) this.checkpoints.pop();
     this.checkpoints.push({ cursors, time, revealed: cursors.reduce((a, b) => a + b, 0), broker: this.broker.checkpoint(), config: this.broker.cfg });
@@ -433,19 +442,57 @@ export class ReplaySession {
   /**
    * Feed bars to `broker` in the order they completed (then by open time, then engine order, primary
    * first). Every reveal hands over all bars completed by the new time, so feeding a replay range at
-   * once gives the same order as revealing it step by step did.
+   * once gives the same order as revealing it step by step did. `batches` are in engine order, each
+   * oldest first, so they are merged rather than sorted. With `checkpoints`, a checkpoint is taken
+   * whenever CHECKPOINT_BARS have gone by since the last, once every bar ending at that moment is in,
+   * as revealing the range step by step would have: a rewind after a long jump replays only a few bars.
    */
-  private process(broker: SimBroker, bars: RevealedBar[]): RevealedBar[] {
-    const rank = new Map(this.symbols.map((s, i) => [s, i]));
-    const keyed = bars.map((r) => ({ r, end: r.bar.time + this.engines.get(r.symbol)!.barSeconds(r.bar), rank: rank.get(r.symbol)! }));
-    keyed.sort((a, b) => a.end - b.end || a.r.bar.time - b.r.bar.time || a.rank - b.rank);
-    for (const { r } of keyed) broker.onBar(r.symbol, r.bar, this.engines.get(r.symbol)!.barSeconds(r.bar));
-    return keyed.map((k) => k.r);
+  private process(broker: SimBroker, batches: Batch[], checkpoints = false): RevealedBar[] {
+    const out: RevealedBar[] = [];
+    const next = batches.map(() => 0);
+    const total = batches.reduce((n, b) => n + b.bars.length, 0);
+    // Bars revealed, over every engine, before the first of these.
+    const before = batches.reduce((n, b) => n + b.from, 0);
+    for (let n = 0; n < total; n++) {
+      let k = -1;
+      for (let j = 0; j < batches.length; j++) {
+        const i = next[j];
+        if (i >= batches[j].bars.length) continue;
+        if (k < 0) {
+          k = j;
+          continue;
+        }
+        const end = batches[j].ends[i];
+        const best = batches[k].ends[next[k]];
+        // Ties go to the earlier batch: engine order.
+        if (end < best || (end === best && batches[j].bars[i].time < batches[k].bars[next[k]].time)) k = j;
+      }
+      const b = batches[k];
+      const i = next[k]++;
+      broker.onBar(b.symbol, b.bars[i], b.ends[i] - b.bars[i].time);
+      out.push({ symbol: b.symbol, bar: b.bars[i] });
+      if (!checkpoints || n === total - 1 || before + n + 1 - this.checkpoints[this.checkpoints.length - 1].revealed < CHECKPOINT_BARS) continue;
+      // Once the next bar to go in ends later: every bar ending at this moment is in.
+      if (batches.every((c, j) => next[j] >= c.bars.length || c.ends[next[j]] > b.ends[i])) this.checkpoint(batches.map((c, j) => c.from + next[j]), b.ends[i]);
+    }
+    return out;
+  }
+
+  /**
+   * The bars `reveal` gives for each engine, in engine order, as batches: the bars it just revealed (with
+   * one of its reveal methods), which are its newest.
+   */
+  private reveal(reveal: (e: ReplayEngine) => Bar[]): Batch[] {
+    return [...this.engines.values()].map((e) => {
+      const bars = reveal(e);
+      const from = e.revealedCount - bars.length;
+      return { symbol: e.symbol, from, bars, ends: e.revealedEnds(from, from + bars.length) };
+    });
   }
 
   /** Feed newly revealed bars to the broker. */
-  private feed(revealed: RevealedBar[]): RevealedBar[] {
-    const out = this.process(this.broker, revealed);
+  private feed(batches: Batch[]): RevealedBar[] {
+    const out = this.process(this.broker, batches, true);
     const revealedNow = this.cursors().reduce((a, b) => a + b, 0);
     if (revealedNow - this.checkpoints[this.checkpoints.length - 1].revealed >= CHECKPOINT_BARS) this.checkpoint();
     return out;
@@ -462,23 +509,21 @@ export class ReplaySession {
 
   /** Bring `broker`, rolled back to `cp`, up to the reveal point `cursors` with the bars in between. */
   private replayFrom(broker: SimBroker, cp: Checkpoint, cursors: number[]): void {
-    const bars: RevealedBar[] = [];
-    let k = 0;
-    for (const e of this.engines.values()) {
-      for (const bar of e.revealedBars(cp.cursors[k], cursors[k])) bars.push({ symbol: e.symbol, bar });
-      k++;
-    }
+    const batches = [...this.engines.values()].map((e, k) => ({
+      symbol: e.symbol,
+      from: cp.cursors[k],
+      bars: e.revealedBars(cp.cursors[k], cursors[k]),
+      ends: e.revealedEnds(cp.cursors[k], cursors[k]),
+    }));
     const config = broker.cfg;
     broker.cfg = cp.config;
-    this.process(broker, bars);
+    this.process(broker, batches);
     broker.cfg = config;
   }
 
   /** Move every engine's clock to `target`, revealing completed bars. */
   private advanceAll(target: UnixSeconds): RevealedBar[] {
-    const out: RevealedBar[] = [];
-    for (const e of this.engines.values()) for (const bar of e.advanceTo(target)) out.push({ symbol: e.symbol, bar });
-    return this.feed(out);
+    return this.feed(this.reveal((e) => e.advanceTo(target)));
   }
 
   private nextRevealTime(): UnixSeconds | null {
@@ -501,13 +546,9 @@ export class ReplaySession {
     // A symbol whose data has ended has no candle to complete: the replay moves on as Step does,
     // rather than taking every other symbol to the end with it.
     if (e.nextBarTime() === null) return this.step();
-    const own = e.stepCandle(timeframe).map((bar) => ({ symbol: e.symbol, bar }));
-    const rest: RevealedBar[] = [];
-    for (const other of this.engines.values()) {
-      if (other === e) continue;
-      for (const bar of other.advanceTo(e.now)) rest.push({ symbol: other.symbol, bar });
-    }
-    return this.feed([...own, ...rest]);
+    // The engines go in their order, so the others are taken to the candle's end only once it is known.
+    const own = e.stepCandle(timeframe);
+    return this.feed(this.reveal((other) => (other === e ? own : other.advanceTo(e.now))));
   }
 
   /**

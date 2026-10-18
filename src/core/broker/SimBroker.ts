@@ -353,6 +353,19 @@ export class SimBroker {
     return this.s.lastPrice[symbol];
   }
 
+  /** The account's equity, as account() gives it, without the rest. */
+  private equity(): number {
+    let longMV = 0;
+    let shortMV = 0;
+    for (const p of Object.values(this.s.positions)) {
+      if (p.quantity === 0) continue;
+      const px = this.s.lastPrice[p.symbol] ?? p.avgPrice;
+      if (p.quantity > 0) longMV += p.quantity * px;
+      else shortMV += p.quantity * px;
+    }
+    return money(this.s.cash + longMV + shortMV);
+  }
+
   account(): AccountSnapshot {
     let longMV = 0;
     let shortMV = 0;
@@ -1353,16 +1366,18 @@ export class SimBroker {
     return this.cfg.allowExtendedHours && o.extendedHours && o.type === 'limit';
   }
 
-  /** Start a new trading day when `barTime` is on one, and expire DAY orders whose session is over. */
-  private rollDay(barTime: UnixSeconds): void {
+  /**
+   * Start a new trading day when `barTime` is on one, and expire DAY orders whose session is over.
+   * `session` is barTime's (marketSession).
+   */
+  private rollDay(barTime: UnixSeconds, session = marketSession(barTime)): void {
     const date = exchangeDate(barTime);
     if (date !== this.s.sessionDate) {
-      if (this.s.sessionDate) this.s.dayStartEquity = this.account().equity;
+      if (this.s.sessionDate) this.s.dayStartEquity = this.equity();
       this.s.dayLowEquity = undefined;
       if (this.s.stepStart) this.s.stepStart.low = undefined;
       this.s.sessionDate = date;
     }
-    const session = marketSession(barTime);
     for (const o of this.liveOrders()) {
       if (!isOpen(o) || o.tif !== 'day' || !o.sessionDate) continue;
       const pastDate = date > o.sessionDate;
@@ -1384,9 +1399,10 @@ export class SimBroker {
   onBar(symbol: string, bar: Bar, barSeconds = 60): Fill[] {
     symbol = symbol.toUpperCase();
     const fillsBefore = this.s.fills.length;
-    this.rollDay(bar.time);
+    const session = marketSession(bar.time);
+    this.rollDay(bar.time, session);
     const end = bar.time + barSeconds;
-    const equity = this.account().equity;
+    const equity = this.equity();
     if (this.s.stepStart?.time !== end) {
       // The first bar ending at `end`: every bar ending earlier has closed, so the account really has this
       // equity, and the moments inside the step before are over.
@@ -1395,13 +1411,33 @@ export class SimBroker {
       this.s.dayLowEquity = low;
     }
     this.bar = { symbol, time: bar.time, offset: this.s.stepStart.equity - equity };
-    const session = marketSession(bar.time);
     // Pending orders become working once their session arrives.
     for (const o of this.liveOrders()) {
       if (o.symbol === symbol && o.status === 'pending' && this.eligible(o, session)) o.status = 'working';
     }
     this.noteRisk(symbol, bar.time);
+    // With no order of its own and no trade open in it, nothing can happen on the bar's path.
+    const traded = this.liveOrders().some((o) => o.symbol === symbol) || this.s.openTripBySymbol[symbol] ? this.trade(symbol, bar, barSeconds, session) : 0;
 
+    this.s.lastPrice[symbol] = bar.close;
+    this.s.lastBar[symbol] = { ...bar };
+    (this.s.lastBarSeconds ??= {})[symbol] = barSeconds;
+    (this.s.barVolumeUsed ??= {})[symbol] = traded;
+    this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
+
+    const low = this.bar.low;
+    if (low !== undefined) this.s.stepStart.low = Math.min(this.s.stepStart.low ?? low, low);
+    this.bar = undefined;
+    this.recordEquity(bar.time + barSeconds, barSeconds < 60);
+    this.touch();
+    return this.s.fills.slice(fillsBefore);
+  }
+
+  /**
+   * Walks `symbol`'s bar along its assumed path, filling the orders it reaches and tracking the open
+   * trade's excursions (onBar). Returns the shares traded in it.
+   */
+  private trade(symbol: string, bar: Bar, barSeconds: number, session: MarketSession): number {
     // The bar's assumed path in time: each point with the fraction of the bar elapsed when price is there.
     const points = this.intrabarPath(symbol, bar).map((p, i, all) => ({ p, f: i / (all.length - 1) }));
     // An order placed or changed after the bar opened (a daily or 5m bar shown beside a 1m symbol, a
@@ -1487,19 +1523,7 @@ export class SimBroker {
     for (const o of this.liveOrders()) {
       if (o.placedThrough && o.symbol === symbol && o.status === 'working' && o.filledQty === 0 && this.eligible(o, session) && (startsAt.get(o.id) ?? 0) < 1) delete o.placedThrough;
     }
-
-    this.s.lastPrice[symbol] = bar.close;
-    this.s.lastBar[symbol] = { ...bar };
-    (this.s.lastBarSeconds ??= {})[symbol] = barSeconds;
-    (this.s.barVolumeUsed ??= {})[symbol] = traded;
-    this.s.clock = Math.max(this.s.clock, bar.time + barSeconds);
-
-    const low = this.bar.low;
-    if (low !== undefined) this.s.stepStart.low = Math.min(this.s.stepStart.low ?? low, low);
-    this.bar = undefined;
-    this.recordEquity(bar.time + barSeconds, barSeconds < 60);
-    this.touch();
-    return this.s.fills.slice(fillsBefore);
+    return traded;
   }
 
   /** Marks a stop or stop-limit placed or changed already through the market (Order.placedThrough). */
@@ -1528,7 +1552,7 @@ export class SimBroker {
    * latest tick, as 1-minute bars would: the curve grows no faster however often prices tick.
    */
   private recordEquity(time: UnixSeconds, subMinute = false): void {
-    const eq = this.account().equity;
+    const eq = this.equity();
     const curve = this.s.equityCurve;
     const last = curve[curve.length - 1];
     if (last && (last.time === time || (subMinute && time > last.time && Math.ceil(last.time / 60) === Math.ceil(time / 60)))) {

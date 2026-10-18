@@ -238,6 +238,11 @@ export class ReplayEngine {
     return this.#bars.slice(Math.max(0, from), Math.min(to, this.#cursor + 1)).map((b) => ({ ...b }));
   }
 
+  /** When the revealed bars with index in [from, to) end (see barEnds), as revealedBars gives them. */
+  revealedEnds(from: number, to: number): UnixSeconds[] {
+    return this.#ends.slice(Math.max(0, from), Math.min(to, this.#cursor + 1));
+  }
+
   /** Revealed bars that open at or after `t` (copies). */
   revealedSince(t: UnixSeconds): Bar[] {
     return this.revealedBars(lastIndexAtOrBefore(this.#bars, t - 1, (b) => b.time) + 1, this.#cursor + 1);

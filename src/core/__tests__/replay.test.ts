@@ -845,6 +845,33 @@ describe('Demo data provider', () => {
     expect(account(s)).toEqual(account(await run(et(D, '10:07') + 30)));
     expect(s.broker.state.roundTrips.filter((t) => t.closed).length).toBeGreaterThan(0);
   });
+
+  it('leaves checkpoints along a long jump, so stepping back after it replays only a few bars', async () => {
+    const load = async () => (await ReplaySession.load(p, { ...setupFor(), symbol: 'SPY', extraSymbols: ['AAPL', 'MSFT'], startTime: '04:00', endTime: '20:00', lookbackDays: 1 }, ZERO_COST_CONFIG, 'j')).session;
+    const orders = (s: ReplaySession) => {
+      for (const sym of ['SPY', 'AAPL', 'MSFT']) {
+        const px = s.broker.markPrice(sym)!;
+        s.submit({ symbol: sym, action: 'buy', type: 'limit', limitPrice: px * 0.999, quantity: 10, stopLoss: px * 0.99, takeProfit: px * 1.002, tif: 'gtc' });
+      }
+    };
+    const jumped = await load();
+    jumped.jumpTo(et(D, '09:40'));
+    orders(jumped);
+    const fed = vi.spyOn(jumped.broker, 'onBar');
+    jumped.jumpTo(et(D, '15:00'));
+    expect(fed.mock.calls.length).toBeGreaterThan(3 * 300);
+    fed.mockClear();
+    jumped.stepBack();
+    expect(fed.mock.calls.length).toBeLessThanOrEqual(256);
+    // The same account as a replay stepped there bar by bar.
+    const stepped = await load();
+    stepped.jumpTo(et(D, '09:40'));
+    orders(stepped);
+    while (stepped.now < jumped.now) stepped.step();
+    expect(stepped.now).toBe(jumped.now);
+    expect(account(jumped)).toEqual(account(stepped));
+    expect(jumped.broker.state.fills.length).toBeGreaterThan(3);
+  });
 });
 
 describe('Step one candle on a symbol whose data has ended', () => {
