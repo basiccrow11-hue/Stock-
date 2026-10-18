@@ -76,21 +76,26 @@ describe('blind sessions saved to carry on later', () => {
   });
 
   it('are brought in line with the sessions kept as the app opens, without undoing what tabs list meanwhile', async () => {
-    localStorage.setItem(SAVED, JSON.stringify({ gone: '2020-01-02', kept: '2024-03-12', ending: '2022-02-02' }));
+    localStorage.setItem(SAVED, JSON.stringify({ gone: '2020-01-02', kept: '2024-03-12', ending: '2022-02-02', starting: '2021-01-04' }));
+    // A tab runs one it has listed as saved, before its first save has landed.
+    localStorage.setItem(KEY, JSON.stringify({ starting: { start: '2021-01-04', beat: Date.now() } }));
     const { reconcileSavedBlind, setSavedBlind, useLiveBlind } = await import('./liveBlind');
     await reconcileSavedBlind(async () => {
       // While the sessions kept are read, another tab starts one and ends another.
       setSavedBlind('started', '2025-01-15');
       setSavedBlind('ending', null);
       return [
-        { id: 'kept', savedAt: 1, start: '2024-03-12' },
-        { id: 'older', savedAt: 1, start: '2023-06-01' },
-        { id: 'ending', savedAt: 1, start: '2022-02-02' },
-        { id: 'plain', savedAt: 1, start: null },
-        { id: 'started', savedAt: Date.now() + 1, start: '2025-01-15' },
+        { id: 'kept', start: '2024-03-12', older: false },
+        { id: 'older', start: '2023-06-01', older: true },
+        // Taken off by the tab that ended it, or gave its date back, before its deletion or save landed.
+        { id: 'ended', start: '2019-05-06', older: false },
+        { id: 'ending', start: '2022-02-02', older: false },
+        { id: 'plain', start: null, older: true },
+        { id: 'started', start: '2025-01-15', older: false },
       ];
     });
-    expect(useLiveBlind.getState().sessions).toEqual({ kept: '2024-03-12', older: '2023-06-01', started: '2025-01-15' });
-    expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual({ kept: '2024-03-12', older: '2023-06-01', started: '2025-01-15' });
+    const listed = { kept: '2024-03-12', older: '2023-06-01', started: '2025-01-15', starting: '2021-01-04' };
+    expect(useLiveBlind.getState().sessions).toEqual(listed);
+    expect(JSON.parse(localStorage.getItem(SAVED)!)).toEqual(listed);
   });
 });

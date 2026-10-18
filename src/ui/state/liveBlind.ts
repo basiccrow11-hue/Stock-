@@ -65,12 +65,18 @@ export const useLiveBlind = create<{ sessions: LiveBlind }>(() => ({ sessions: {
 /** This tab's running blind session. */
 let mine: { id: string; start: string } | null = null;
 
-function refresh(listing = read()): void {
+/** The sessions tabs list as running, without those whose tab stopped renewing them. */
+function running(listing = read()): LiveBlind {
   const now = Date.now();
-  const sessions: LiveBlind = readSaved();
+  const sessions: LiveBlind = {};
   for (const [id, e] of Object.entries(listing)) {
     if (e && typeof e.start === 'string' && typeof e.beat === 'number' && now - e.beat < TTL_MS) sessions[id] = e.start;
   }
+  return sessions;
+}
+
+function refresh(listing = read()): void {
+  const sessions: LiveBlind = { ...readSaved(), ...running(listing) };
   if (mine) sessions[mine.id] = mine.start;
   const cur = useLiveBlind.getState().sessions;
   const same = Object.keys(sessions).length === Object.keys(cur).length && Object.entries(sessions).every(([id, s]) => cur[id] === s);
@@ -119,20 +125,21 @@ export function setSavedBlind(id: string, start: string | null): void {
 
 /**
  * Brings the saved listing in line with the sessions kept, once as the app opens. `kept` reads every
- * one, with when it was last saved and, for a blind one whose date is still hidden, its start date.
- * A session listed but no longer kept goes; one kept but not listed (saved before this listing
- * existed) is added.
+ * one with, for a blind one whose date is still hidden, its start date, and whether a version of the
+ * app from before this listing saved it (`older`). A session listed but no longer kept goes, unless a
+ * tab runs it (its first save may not have landed yet). One kept but not listed is added only if an
+ * older version saved it: this version lists a blind session each time it saves it, so one it saved
+ * and no longer lists has ended or given its date back, even if what is stored does not say so yet.
  */
-export async function reconcileSavedBlind(kept: () => Promise<{ id: string; savedAt: number; start: string | null }[]>): Promise<void> {
+export async function reconcileSavedBlind(kept: () => Promise<{ id: string; start: string | null; older: boolean }[]>): Promise<void> {
   // Read first: a session listed while `kept` is read is not taken for one no longer kept.
   const before = readSaved();
-  const since = Date.now();
   const all = await kept();
   const ids = new Set(all.map((k) => k.id));
   const saved = readSaved();
-  for (const id of Object.keys(before)) if (!ids.has(id)) delete saved[id];
-  // One saved since was listed, or taken off, by the tab that saved it.
-  for (const k of all) if (k.start !== null && !(k.id in before) && k.savedAt < since) saved[k.id] = k.start;
+  const live = running();
+  for (const id of Object.keys(before)) if (!ids.has(id) && !(id in live)) delete saved[id];
+  for (const k of all) if (k.start !== null && k.older && !(k.id in before)) saved[k.id] = k.start;
   writeSaved(saved);
   refresh();
 }

@@ -8,8 +8,11 @@ import { CHALLENGES } from '../../core/challenges/challenges';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-/** IndexedDB stand-in: one Map per store, kept across module resets as a browser keeps it across a reload. */
-const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>() }));
+/**
+ * IndexedDB stand-in: one Map per store, kept across module resets as a browser keeps it across a reload.
+ * `written`: the keys written, in order. `held`: while set, deleting a session's summary waits for it.
+ */
+const db = vi.hoisted(() => ({ stores: new Map<string, Map<string, unknown>>(), written: [] as string[], held: null as Promise<void> | null }));
 vi.mock('../services/idb', () => {
   const store = (name: string) => {
     if (!db.stores.has(name)) db.stores.set(name, new Map());
@@ -24,8 +27,14 @@ vi.mock('../services/idb', () => {
           .sort(([a], [b]) => (a < b ? -1 : 1))
           .map(([, v]) => structuredClone(v)),
       get: async (s: string, k: string) => structuredClone(store(s).get(k)),
-      set: async (s: string, k: string, v: unknown) => void store(s).set(k, structuredClone(v)),
-      delete: async (s: string, k: string) => void store(s).delete(k),
+      set: async (s: string, k: string, v: unknown) => {
+        db.written.push(k);
+        store(s).set(k, structuredClone(v));
+      },
+      delete: async (s: string, k: string) => {
+        if (db.held && k.startsWith('session-summary:')) await db.held;
+        store(s).delete(k);
+      },
       modify: async (s: string, k: string, fn: (v: unknown) => unknown) => {
         const next = fn(structuredClone(store(s).get(k)));
         if (next !== undefined) store(s).set(k, structuredClone(next));
@@ -82,6 +91,8 @@ const at = (hhmm: string) => exchangeTimeToUnix('2024-03-12', Number(hhmm.slice(
 
 beforeEach(() => {
   db.stores.clear();
+  db.written = [];
+  db.held = null;
   localStorage.clear();
   sessionStorage.clear();
   locks.mine.clear();
@@ -538,6 +549,85 @@ describe('unfinished sessions and other tabs', () => {
   });
 });
 
+describe('a session as saved when its replay or its challenge attempt ends', () => {
+  const kv = () => db.stores.get('kv')!;
+  const summary = (id: string) => kv().get(`session-summary:${id}`) as import('../services/savedSessions').SessionSummary;
+  const attempt = (id: string) => (kv().get(`session:${id}`) as { challenge: unknown }).challenge;
+  const saves = (id: string) => db.written.filter((k) => k === `session-summary:${id}`).length;
+
+  it('is saved with its attempt over once Play reaches the end', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, endTime: '10:03', speed: 23_400, challengeId: 'day-max-dd-5' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    a.store.play();
+    await vi.waitFor(() => expect(a.useChallenges.getState().attempts.map((x) => x.result.status)).toEqual(['failed']));
+    await settle();
+    // A tab that dies now, with no other save, leaves it saved as it ended.
+    expect(summary(id)).toMatchObject({ finished: true, challengeUnderWay: false });
+    expect(attempt(id)).toBeNull();
+  });
+
+  it('is saved once a step reaches the end, and not on every step', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, endTime: '10:03', challengeId: 'day-max-dd-5' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    const before = saves(id);
+    a.store.stepForward();
+    await settle();
+    expect(saves(id)).toBe(before);
+    for (let i = 0; i < 4; i++) a.store.stepForward();
+    await settle();
+    expect(a.store.useTrading.getState().finished).toBe(true);
+    expect(summary(id)).toMatchObject({ finished: true, challengeUnderWay: false });
+    expect(attempt(id)).toBeNull();
+    expect(saves(id)).toBe(before + 1);
+    a.store.stepForward();
+    a.store.stepCandle();
+    await settle();
+    expect(saves(id)).toBe(before + 1);
+  });
+
+  it('is saved once its attempt fails between saves, mid-session', async () => {
+    const a = await page();
+    const { execution } = a.useSettings.getState();
+    a.useSettings.getState().updateExecution({ marketOrderFill: 'next_bar_open', commission: { ...execution.commission, perOrder: 1_500 } });
+    expect(await a.store.startReplay({ ...replay, challengeId: 'day-max-dd-5' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    // It fills at the next bar's open, where its commission takes equity more than 5% below the start.
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1 }).ok).toBe(true);
+    await settle();
+    expect(summary(id).challengeUnderWay).toBe(true);
+    a.store.stepForward();
+    a.store.stepForward();
+    await vi.waitFor(() => expect(a.useChallenges.getState().attempts.map((x) => x.result.status)).toEqual(['failed']));
+    await settle();
+    expect(a.store.useTrading.getState().positions).toHaveLength(1);
+    expect(summary(id)).toMatchObject({ finished: false, challengeUnderWay: false });
+    expect(attempt(id)).toBeNull();
+  });
+
+  it('is saved once your own rule, marked broken on a trade, fails its attempt', async () => {
+    const a = await page();
+    a.useSettings.getState().updateRules({ minRewardRisk: 0, custom: ['Wait for a pullback'] });
+    expect(await a.store.startReplay({ ...replay, challengeId: 'rules-20' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    a.store.stepForward();
+    const px = a.store.lastPrice('SPY')!;
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1, stopLoss: Math.round(px - 1) }).ok).toBe(true);
+    a.store.stepForward();
+    expect(a.store.closePosition('SPY').ok).toBe(true);
+    await vi.waitFor(() => expect(a.useJournal.getState().entries).toHaveLength(1));
+    await settle();
+    expect(summary(id).challengeUnderWay).toBe(true);
+    await a.useJournal.getState().updateRuleCheck(a.useJournal.getState().entries[0].id, 'Wait for a pullback', false);
+    expect(a.useChallenges.getState().attempts.map((x) => x.result.status)).toEqual(['failed']);
+    await settle();
+    expect(summary(id).challengeUnderWay).toBe(false);
+    expect(attempt(id)).toBeNull();
+  });
+});
+
 describe('a replay’s undo history in storage', () => {
   it('stores the log about once, not once per checkpoint, and reads every checkpoint back as it was', async () => {
     const { ReplaySession } = await import('../../core/replay/ReplaySession');
@@ -674,7 +764,12 @@ describe('a blind session left unfinished', () => {
     await settle();
     window.dispatchEvent(new Event('pagehide'));
     rememberNothing();
-    // Saved by an older version of the app, with a listing left of a session no longer kept.
+    // Saved by an older version of the app (its summary does not say whether a challenge attempt was
+    // under way), with a listing left of a session no longer kept.
+    const kv = db.stores.get('kv')!;
+    const { challengeUnderWay, ...older } = kv.get(`session-summary:${id}`) as Record<string, unknown>;
+    expect(challengeUnderWay).toBe(false);
+    kv.set(`session-summary:${id}`, older);
     localStorage.setItem(SAVED_BLIND, JSON.stringify({ gone: '2020-01-02' }));
 
     const b = await page();
@@ -698,6 +793,67 @@ describe('a blind session left unfinished', () => {
     expect(a.store.useTrading.getState()).toMatchObject({ finished: true, session: { blind: false } });
     expect(useLiveBlind.getState().sessions).toEqual({});
     expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+  });
+
+  it('is not listed again by a tab that opens while another tab ends it', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, blind: true })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    a.store.stepForward();
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    a.store.stepForward();
+    expect(a.store.closePosition('SPY').ok).toBe(true);
+    await vi.waitFor(() => expect(a.useJournal.getState().entries).toHaveLength(1));
+    const entry = a.useJournal.getState().entries[0];
+    await settle();
+    // Ended, it is deleted after the writes before it: its dates stay hidden until then.
+    let land!: () => void;
+    db.held = new Promise((r) => (land = r));
+    await a.store.endSession();
+    await settle();
+    expect(JSON.parse(localStorage.getItem(SAVED_BLIND)!)).toEqual({ [id]: '2024-03-12' });
+
+    // Another tab opens meanwhile.
+    vi.resetModules();
+    await import('./tradingStore');
+    const { useLiveBlind } = await import('./liveBlind');
+    await settle();
+    land();
+    await settle();
+    window.dispatchEvent(new StorageEvent('storage', { key: SAVED_BLIND }));
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+    expect(useLiveBlind.getState().sessions).toEqual({});
+    expect(await shown(entry)).toMatchObject({ hidden: false, time: expect.stringMatching(/^2024-03-12 /) });
+  });
+
+  it('is not listed again once +1 candle has run it to its end, even by a tab that opens after the save of that was lost', async () => {
+    const a = await page();
+    expect(await a.store.startReplay({ ...replay, blind: true, endTime: '10:03' })).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    a.store.stepForward();
+    expect(a.store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }).ok).toBe(true);
+    a.store.stepForward();
+    expect(a.store.closePosition('SPY').ok).toBe(true);
+    await vi.waitFor(() => expect(a.useJournal.getState().entries).toHaveLength(1));
+    await settle();
+    const kv = db.stores.get('kv')!;
+    const blindSummary = structuredClone(kv.get(`session-summary:${id}`));
+    a.store.stepCandle();
+    a.store.stepCandle();
+    await settle();
+    expect(a.store.useTrading.getState()).toMatchObject({ finished: true, session: { blind: false } });
+    expect(kv.get(`session-summary:${id}`)).toMatchObject({ finished: true, meta: { blind: false } });
+    await page();
+    await settle();
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+
+    // The tab went before that save landed: what is stored still says blind.
+    kv.set(`session-summary:${id}`, blindSummary);
+    rememberNothing();
+    await page();
+    await settle();
+    expect(localStorage.getItem(SAVED_BLIND)).toBeNull();
+    expect((await import('./liveBlind')).useLiveBlind.getState().sessions).toEqual({});
   });
 });
 

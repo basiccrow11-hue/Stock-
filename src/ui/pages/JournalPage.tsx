@@ -75,14 +75,15 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
         (!noteless || Object.values(e.notes).every((n) => !n.trim())),
     );
   }, [entries, query, outcome, noteless]);
-  // A running blind session's trades go first, newest first. Listed by exit time among the others,
-  // the dates of their neighbours would give the hidden date away.
+  // Trades of blind sessions that have not ended (running, or saved to carry on later) go first, newest
+  // first. Listed by exit time among the others, the dates of their neighbours would give the hidden date away.
   const hidden = filtered.filter(dateHidden);
   const list = hidden.length ? [...hidden.sort((a, b) => b.createdAt - a.createdAt), ...filtered.filter((e) => !dateHidden(e))] : filtered;
 
-  // Exports carry full timestamps, so the running blind session's trades wait until it ends.
+  // Exports carry full timestamps, so those trades wait until their blind session ends.
   const exportable = list.filter((e) => !dateHidden(e));
   const held = list.length - exportable.length;
+  const heldSessions = new Set(hidden.map((e) => e.sessionId)).size;
 
   const current = entries.find((e) => e.id === selected) ?? list[0];
   // Pin the entry shown by default. Otherwise saving its notes can drop it from a "Needs notes" or
@@ -110,7 +111,11 @@ export function JournalPage({ focusId }: { focusId: string | null }) {
           <h1>Journal</h1>
           <span className="muted small">{entries.length} trades. An entry is created automatically when a trade closes.</span>
           <div className="spacer" />
-          {held > 0 && <span className="muted small">Exports leave out the {held} trade(s) from the blind session in progress until it ends.</span>}
+          {held > 0 && (
+            <span className="muted small">
+              Exports leave out {held} {held === 1 ? 'trade until its' : 'trades until their'} {heldSessions === 1 ? 'blind session ends' : 'blind sessions end'}.
+            </span>
+          )}
           <button className="btn sm" disabled={!exportable.length} onClick={() => download('trade-journal.csv', toCsv(exportable), 'text/csv')}>
             Export CSV
           </button>

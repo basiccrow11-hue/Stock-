@@ -387,6 +387,7 @@ function publish(force = false): void {
   const st = b.state;
   const now = eng.replay ? eng.replay.now : eng.stream ? eng.stream.clock : 0;
   const finished = eng.replay ? eng.replay.finished : false;
+  const reachedEnd = finished && !useTrading.getState().finished;
   useTrading.setState({
     now,
     finished,
@@ -413,11 +414,14 @@ function publish(force = false): void {
     setSavedBlind(meta.id, null);
     toast('info', `Blind replay over: that was ${meta.symbols[0]} on ${last === meta.startDate ? meta.startDate : `${meta.startDate} to ${last}`}.`, 10_000);
   }
-  if (finished && useTrading.getState().playing) {
-    pause();
-    if (!revealed) toast('info', 'Replay reached the end time.');
-  }
-  evaluateActiveChallenge();
+  const stopping = finished && useTrading.getState().playing;
+  if (stopping && !revealed) toast('info', 'Replay reached the end time.');
+  const attemptEnded = evaluateActiveChallenge();
+  // Saved when it reaches its end or its challenge attempt ends, with the attempt scored and the date
+  // given back, so a tab that goes then does not leave it saved as blind or with its attempt under way.
+  // Pausing saves it.
+  if (stopping) pause();
+  else if (reachedEnd || attemptEnded) saveSession();
 }
 
 // ------------------------------------------------------------------ journal + learning hooks
@@ -667,13 +671,14 @@ export function challengeFailedByBrokenRule(sessionId: string, rule: string): Ch
   return CHALLENGES.find((c) => c.id === active.challengeId) ?? null;
 }
 
-function evaluateActiveChallenge(): void {
+/** Scores the running session's challenge attempt. True when that ended it (passed or failed). */
+function evaluateActiveChallenge(): boolean {
   const active = useChallenges.getState().active;
   const b = broker();
   // Scored only on its own session's trades (a journal change can come at any moment, even mid-switch).
-  if (!active || !b || active.sessionId !== useTrading.getState().session?.id) return;
+  if (!active || !b || active.sessionId !== useTrading.getState().session?.id) return false;
   const def = CHALLENGES.find((c) => c.id === active.challengeId);
-  if (!def) return;
+  if (!def) return false;
   const st = b.state;
   let result: ReturnType<typeof evaluateChallenge>;
   try {
@@ -692,14 +697,16 @@ function evaluateActiveChallenge(): void {
   } catch (e) {
     // Scoring a challenge must never stop trading or journaling: its last result stays until the next try.
     console.error(`Challenge ${def.id} could not be evaluated`, e);
-    return;
+    return false;
   }
   const prev = active.result.status;
   useChallenges.getState().updateActive(result);
   if (prev === 'in_progress' && result.status !== 'in_progress') {
     toast(result.status === 'passed' ? 'success' : 'error', `Challenge ${result.status === 'passed' ? 'passed' : 'failed'}: ${def.title}${result.official ? '' : ' (unofficial: rewind used)'}`, 8000);
     void useChallenges.getState().finishActive();
+    return true;
   }
+  return false;
 }
 
 function afterChange(revealed: { symbol: string; bar: Bar }[]): void {
@@ -912,10 +919,14 @@ async function adoptSession(id: string): Promise<void> {
 
 /** The session ended: nothing is kept of it to carry on. */
 function forgetSession(id: string): void {
-  setSavedBlind(id, null);
   releaseSession(id);
   if (tabSession() === id) rememberTabSession(null);
-  saving = saving.then(() => deleteSession(id)).catch(() => undefined);
+  // Off the blind listing once it is deleted, so a tab opening meanwhile does not list it again; its
+  // dates stay hidden until then.
+  saving = saving
+    .then(() => deleteSession(id))
+    .catch(() => undefined)
+    .then(() => setSavedBlind(id, null));
 }
 
 if (typeof document !== 'undefined') {
@@ -926,9 +937,10 @@ if (typeof document !== 'undefined') {
 }
 
 // As the app opens, the blind sessions listed as saved (liveBlind) are checked against those kept: one
-// saved before that listing existed is added, and one no longer kept goes.
+// saved before that listing existed is added, and one no longer kept goes. A summary saved then does not
+// say whether its challenge attempt was under way either: that came in with the listing.
 if (typeof window !== 'undefined') {
-  void reconcileSavedBlind(async () => (await keptSessions()).map((s) => ({ id: s.id, savedAt: s.savedAt, start: hiddenStart(s) }))).catch(() => undefined);
+  void reconcileSavedBlind(async () => (await keptSessions()).map((s) => ({ id: s.id, start: hiddenStart(s), older: s.challengeUnderWay === undefined }))).catch(() => undefined);
 }
 
 /** Unfinished sessions this browser kept that no tab is running, newest first. */
@@ -1454,9 +1466,9 @@ useSettings.subscribe((s, prev) => {
   if (s.execution !== prev.execution) applyExecutionConfig();
 });
 // Your own rules marked on a trade's review count toward a rules challenge at once, even while
-// playback is paused for the review.
+// playback is paused for the review. One that ends the attempt is saved with the session.
 useJournal.subscribe((s, prev) => {
-  if (s.entries !== prev.entries) evaluateActiveChallenge();
+  if (s.entries !== prev.entries && evaluateActiveChallenge()) saveSession();
 });
 
 export function setPickTarget(t: TradingSnapshot['pickTarget']): void {

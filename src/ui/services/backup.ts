@@ -58,9 +58,11 @@ async function stored<T>(store: 'journal' | 'challenges' | 'datasets', fallback:
   }
 }
 
-export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; heldBack: number }> {
+/** A backup, with how many journal entries it leaves out (holdBack) and from how many sessions. */
+export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; heldBack: number; heldSessions: number }> {
   const all = await stored<JournalEntry>('journal', () => useJournal.getState().entries);
   const journal = all.filter((e) => !o.holdBack(e));
+  const heldSessions = new Set(all.filter((e) => o.holdBack(e)).map((e) => e.sessionId)).size;
   const snapshots: Record<string, string> = {};
   if (o.snapshots) {
     for (const e of journal) {
@@ -92,7 +94,7 @@ export async function createBackup(o: BackupOptions): Promise<{ backup: Backup; 
     // Daily data stored with midnight stamps by an earlier version goes in filed under its session.
     ...(o.datasets ? { datasets: (await stored<CsvDataset>('datasets', () => [])).map(sessionStamped) } : {}),
   };
-  return { backup, heldBack: all.length - journal.length };
+  return { backup, heldBack: all.length - journal.length, heldSessions };
 }
 
 /**

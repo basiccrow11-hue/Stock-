@@ -2,6 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
+import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
+import type { RoundTrip } from '../../core/types';
+
+vi.mock('../services/download', () => ({ download: () => undefined }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -49,5 +53,41 @@ describe('restoring settings from a backup', () => {
     await choose(fresh.host, backupFile);
     expect(replaceSettingsBox(fresh.host).checked).toBe(false);
     fresh.unmount();
+  });
+});
+
+let n = 0;
+/** A closed one-share trade of session `sessionId`, journaled (`blind`: in blind mode). */
+function entry(sessionId: string, blind: boolean): JournalEntry {
+  const t = 1_710_252_000 + n * 600;
+  const trip: RoundTrip = {
+    ...{ id: `t${++n}`, symbol: 'SPY', direction: 'long', entryTime: t, exitTime: t + 300, maxQuantity: 1, avgEntry: 100, avgExit: 101 },
+    ...{ entryQtyTotal: 1, exitQtyTotal: 1, pnl: 1, commission: 0, highWhileOpen: 101, lowWhileOpen: 99, fills: [], closed: true, source: 'DEMO' },
+  };
+  return journalEntryFromTrip(trip, { sessionId, mode: 'replay', rewound: false, blind });
+}
+
+describe('backing up while blind sessions have not ended', () => {
+  it('says how many trades are left out until their blind sessions end, one or several', async () => {
+    const card = await mount();
+    const { useJournal } = await import('../state/journalStore');
+    const { useLiveBlind } = await import('../state/liveBlind');
+    const { useToasts } = await import('../state/toasts');
+    const backUp = async (entries: JournalEntry[], hidden: Record<string, string>) => {
+      useToasts.setState({ toasts: [] });
+      act(() => {
+        useJournal.setState({ entries, loaded: true });
+        useLiveBlind.setState({ sessions: hidden });
+      });
+      await act(async () => [...card.host.querySelectorAll('button')].find((b) => b.textContent === 'Download backup')!.click());
+      await vi.waitFor(() => expect(useToasts.getState().toasts).toHaveLength(1));
+      return useToasts.getState().toasts[0].text;
+    };
+    expect(await backUp([entry('a', true), entry('b', true), entry('b', true), entry('c', false)], { a: '2024-03-12', b: '2024-05-01' })).toBe(
+      'Backup saved with 1 trade. 3 trades are left out until their blind sessions end.',
+    );
+    expect(await backUp([entry('a', true), entry('a', true), entry('c', false)], { a: '2024-03-12' })).toBe('Backup saved with 1 trade. 2 trades are left out until their blind session ends.');
+    expect(await backUp([entry('a', true), entry('c', false)], { a: '2024-03-12' })).toBe('Backup saved with 1 trade. 1 trade is left out until its blind session ends.');
+    card.unmount();
   });
 });
