@@ -43,4 +43,28 @@ describe('the README', () => {
     expect(stacked).toMatch(/\.ticket-submit \{ position: static;/);
     expect(paragraph('Orders')).toContain('stays in view at the bottom of the column while the rest of the ticket scrolls, except on a phone');
   });
+
+  it('lists what the order ticket keeps under More options, and says the bottom panel is small before a session', () => {
+    const ticket = read('./components/OrderTicket.tsx');
+    const start = ticket.indexOf('<details className="ticket-more"');
+    expect(start).toBeGreaterThan(-1);
+    const more = ticket.slice(start, ticket.indexOf('</details>', start));
+    const orders = paragraph('Orders');
+    // [what the code puts inside the disclosure, how the README names it]
+    const inside: [string, string][] = [
+      ['Time in force', 'time in force'],
+      ['Extended hours', 'extended hours'],
+      ['onClick={sizeToRisk}', 'sizing from a risk %'],
+      ['targetFromR(m)', 'the 1R/2R/3R targets'],
+      ['Strategy / setup tag', 'the strategy tag'],
+      ['className="risk-box"', 'the full estimate'],
+    ];
+    for (const [code, words] of inside) {
+      expect(more).toContain(code);
+      expect(orders).toContain(words);
+    }
+    expect(orders).toContain('**More options** holds the rest');
+    expect(css).toMatch(/\.area-bottom\.idle \{ height: auto; \}/);
+    expect(paragraph('Chart')).toContain('Before a session it is only its tabs and one line');
+  });
 });

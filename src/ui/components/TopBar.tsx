@@ -121,7 +121,7 @@ export function TopBar({ view, onView }: { view: View; onView: (v: View) => void
         )}
       </div>
       {/* Account value and day P/L always show; the others (data-fit, most useful first) wherever they fit
-          on the bar's row. Those are all in the account box on the right too. */}
+          on the bar's row. Those are all in the account's details on the right too (RightPanel). */}
       <div className="topbar-right">
         {account && (
           <div className="metrics">

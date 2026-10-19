@@ -10,7 +10,13 @@ import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
 import { modelledQuote } from '../services/modelledQuote';
 import { modalOpen, useFocusRescue } from './common';
+import { useRememberedOpen } from './useRememberedOpen';
 
+/**
+ * The four sides, each always meaning the same thing. No button changes its meaning with the position
+ * (a "Sell" that becomes "Sell short" when you are flat): a fill while the replay plays could change it
+ * under the pointer between aiming and clicking.
+ */
 const ACTIONS: { a: OrderAction; label: string; cls: string }[] = [
   { a: 'buy', label: 'Buy', cls: 'buy' },
   { a: 'sell', label: 'Sell', cls: 'sell' },
@@ -58,6 +64,7 @@ export function OrderTicket() {
   const [ext, setExt] = useState(false);
   const [tag, setTag] = useState('');
   const [riskPct, setRiskPct] = useState(String(rules.maxRiskPctPerTrade));
+  const [moreOpen, setMoreOpen] = useRememberedOpen('ticket-more');
   /** The last submit's outcome, or Size by risk's refusal (`sizing`). */
   const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; sizing?: boolean; n: number } | null>(null);
   const resultSeq = useRef(0);
@@ -283,6 +290,13 @@ export function OrderTicket() {
   const modelled = last !== undefined ? modelledQuote(exec, last, now ? marketSession(now) !== 'regular' : false) : null;
   const label = `${action.toUpperCase()} ${q || 0} ${symbol} ${type === 'market' ? 'MKT' : type === 'limit' ? `LMT ${limit || '—'}` : type === 'stop' ? `STP ${stop || '—'}` : `STP ${stop || '—'} LMT ${limit || '—'}`}`;
   const strict = exec.strictRisk.enabled;
+  const overRisk = !!risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade + 1e-9;
+  const tradeOver = !!trade && (trade.unmeasurable || trade.pct > rules.maxRiskPctPerTrade + 1e-9);
+  // What More options holds that changes this order, said on it while it is closed: nothing out of
+  // sight changes an order unnoticed. Extended hours only counts on a limit order, the only kind it changes.
+  const hiddenSet = [tif === 'gtc' ? 'GTC' : '', ext && type === 'limit' ? 'Ext. hours' : '', tag.trim() ? `Tag: ${tag.trim()}` : ''].filter(Boolean);
+  // Quantity has a row of its own, unless one price field (a limit's or a stop's) sits beside it.
+  const qtyWide = type === 'market' || type === 'stop_limit';
 
   return (
     <div className="ticket" ref={ticketRef}>
@@ -299,31 +313,24 @@ export function OrderTicket() {
           </span>
         </span>
       </div>
-      <div className="actions" role="group" aria-label="Order side">
+      <div className="seg ticket-sides" role="group" aria-label="Order side">
         {ACTIONS.map((x) => (
-          <button key={x.a} className={`btn sm ${action === x.a ? `${x.cls} sel` : ''}`} aria-pressed={action === x.a} onClick={() => setAction(x.a)}>
+          <button key={x.a} type="button" className={`${x.cls}${action === x.a ? ' sel' : ''}`} aria-pressed={action === x.a} onClick={() => setAction(x.a)}>
             {x.label}
           </button>
         ))}
       </div>
-      <div className="seg" style={{ width: '100%' }} role="group" aria-label="Order type">
+      <div className="seg ticket-types" role="group" aria-label="Order type">
         {TYPES.map((x) => (
-          <button key={x.t} className={type === x.t ? 'on' : ''} aria-pressed={type === x.t} style={{ flex: 1 }} onClick={() => setType(x.t)}>
+          <button key={x.t} type="button" className={type === x.t ? 'on' : ''} aria-pressed={type === x.t} onClick={() => setType(x.t)}>
             {x.label}
           </button>
         ))}
       </div>
       <div className="grid2">
-        <label className="field">
+        <label className={`field${qtyWide ? ' wide' : ''}`}>
           Quantity (shares)
           <input type="number" min={1} step={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-        </label>
-        <label className="field">
-          Time in force
-          <select value={tif} onChange={(e) => setTif(e.target.value as TimeInForce)}>
-            <option value="day">Day</option>
-            <option value="gtc">GTC</option>
-          </select>
         </label>
         {(type === 'stop' || type === 'stop_limit') && (
           <label className="field">
@@ -362,71 +369,119 @@ export function OrderTicket() {
           </>
         )}
       </div>
-      {opening && (
-        <div className="row" style={{ gap: 4 }}>
-          <span className="muted small">Size for</span>
-          <input type="number" step={0.05} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} aria-label="Risk per trade, percent of account" />
-          <span className="muted small">% risk</span>
-          <button className="btn sm" onClick={sizeToRisk}>
-            Size
-          </button>
-          <span className="spacer" />
-          <span className="muted small">TP</span>
-          {[1, 2, 3].map((m) => (
-            <button key={m} className="btn sm" onClick={() => targetFromR(m)} title={`Set take profit at ${m}× the stop distance`}>
-              {m}R
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="row wrap" style={{ gap: 10 }}>
-        <label className="check small" title="Limit orders only. Fills use wider pre/post-market spreads.">
-          <input type="checkbox" checked={ext} disabled={type !== 'limit'} onChange={(e) => setExt(e.target.checked)} />
-          Extended hours
-        </label>
-        <input type="text" placeholder="Strategy / setup tag" value={tag} onChange={(e) => setTag(e.target.value)} style={{ flex: 1 }} />
-      </div>
 
-      <div className="risk-box">
-        <span className="muted">Est. entry</span>
-        <span className="num">{fmtPrice(entry)}</span>
-        <span className="muted">Position value</span>
-        <span className="num">{money(risk?.positionValue)}</span>
-        {opening && (
-          <>
-            <span className="muted">Stop distance</span>
-            <span className="num">{risk?.stopDistance !== null && risk ? `${risk.stopDistance.toFixed(entry! < 1 ? 4 : 2)} (${pct(risk.stopDistancePct)})` : '—'}</span>
-            <span className="muted">Dollar risk</span>
-            <span className="num">{money(risk?.dollarRisk)}</span>
-            <span className="muted">% of account</span>
-            <span className={`num ${risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
-              {risk?.pctRisk == null ? '—' : `${pctAgainst(risk.pctRisk, rules.maxRiskPctPerTrade)}%`}
-            </span>
-            {trade && (
+      {/* What fewer orders need, one click away and open again after a reload once opened (useRememberedOpen).
+          A summary, so Space opens it as Enter does rather than playing the replay. */}
+      <details className="ticket-more" open={moreOpen} onToggle={(e) => setMoreOpen(e.currentTarget.open)}>
+        <summary title={!moreOpen && hiddenSet.length ? `Set here: ${hiddenSet.join(', ')}` : undefined}>
+          More options
+          {!moreOpen && hiddenSet.length > 0 && <span className="ticket-more-set"> · {hiddenSet.join(' · ')}</span>}
+        </summary>
+        <div className="ticket-more-body">
+          <div className="grid2">
+            <label className="field">
+              Time in force
+              <select value={tif} onChange={(e) => setTif(e.target.value as TimeInForce)}>
+                <option value="day">Day</option>
+                <option value="gtc">GTC</option>
+              </select>
+            </label>
+            <label className="check small" title="Limit orders only. Fills use wider pre/post-market spreads.">
+              <input type="checkbox" checked={ext} disabled={type !== 'limit'} onChange={(e) => setExt(e.target.checked)} />
+              Extended hours
+            </label>
+          </div>
+          {opening && (
+            <>
+              <div className="row" style={{ gap: 4 }}>
+                <span className="muted small">Size for</span>
+                <input type="number" step={0.05} min={0.05} value={riskPct} onChange={(e) => setRiskPct(e.target.value)} style={{ width: 58 }} aria-label="Risk per trade, percent of account" />
+                <span className="muted small">% risk</span>
+                <button className="btn sm" onClick={sizeToRisk}>
+                  Size
+                </button>
+              </div>
+              <div className="row" style={{ gap: 4 }}>
+                <span className="muted small">Take profit at</span>
+                {[1, 2, 3].map((m) => (
+                  <button key={m} className="btn sm" onClick={() => targetFromR(m)} title={`Set take profit at ${m}× the stop distance`}>
+                    {m}R
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          <input type="text" placeholder="Strategy / setup tag" aria-label="Strategy / setup tag" value={tag} onChange={(e) => setTag(e.target.value)} />
+          <div className="risk-box">
+            <span className="muted">Est. entry</span>
+            <span className="num">{fmtPrice(entry)}</span>
+            <span className="muted">Position value</span>
+            <span className="num">{money(risk?.positionValue)}</span>
+            {opening && (
               <>
-                <span className="muted" title="The whole trade with this order: every share, held, working or in this order (or the trade's largest size, if you sold part), counted from the trade's first stop, as Strict Mode and the trade review measure it">
-                  Trade risk
-                </span>
-                <span className={`num ${trade.unmeasurable || trade.pct > rules.maxRiskPctPerTrade + 1e-9 ? 'error' : ''}`}>
-                  {trade.unmeasurable ? "can't be measured" : `${pctAgainst(trade.pct, rules.maxRiskPctPerTrade)}% from ${formatTick(trade.stop)}`}
-                </span>
+                <span className="muted">Stop distance</span>
+                <span className="num">{risk?.stopDistance !== null && risk ? `${risk.stopDistance.toFixed(entry! < 1 ? 4 : 2)} (${pct(risk.stopDistancePct)})` : '—'}</span>
+                <span className="muted">Dollar risk</span>
+                <span className="num">{money(risk?.dollarRisk)}</span>
+                <span className="muted">% of account</span>
+                <span className={`num ${overRisk ? 'error' : ''}`}>{risk?.pctRisk == null ? '—' : `${pctAgainst(risk.pctRisk, rules.maxRiskPctPerTrade)}%`}</span>
+                {trade && (
+                  <>
+                    <span className="muted" title="The whole trade with this order: every share, held, working or in this order (or the trade's largest size, if you sold part), counted from the trade's first stop, as Strict Mode and the trade review measure it">
+                      Trade risk
+                    </span>
+                    <span className={`num ${tradeOver ? 'error' : ''}`}>
+                      {trade.unmeasurable ? "can't be measured" : `${pctAgainst(trade.pct, rules.maxRiskPctPerTrade)}% from ${formatTick(trade.stop)}`}
+                    </span>
+                  </>
+                )}
+                <span className="muted">Potential reward</span>
+                <span className="num">{money(risk?.reward)}</span>
+                <span className="muted">Reward : risk</span>
+                <span className="num">{risk?.rewardRiskRatio ? `${risk.rewardRiskRatio.toFixed(2)} : 1` : '—'}</span>
               </>
             )}
-            <span className="muted">Potential reward</span>
-            <span className="num">{money(risk?.reward)}</span>
-            <span className="muted">Reward : risk</span>
-            <span className="num">{risk?.rewardRiskRatio ? `${risk.rewardRiskRatio.toFixed(2)} : 1` : '—'}</span>
-          </>
-        )}
-        <span className="muted">Est. commission</span>
-        <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
-      </div>
+            <span className="muted">Est. commission</span>
+            <span className="num">{entry && q > 0 ? money(commissionFor(exec, q, entry)) : '—'}</span>
+          </div>
+        </div>
+      </details>
       {strict && opening && (
         <div className="alert info">
           Strict Mode is on: a trade may risk up to {exec.strictRisk.maxRiskPctPerTrade}%, every share counted from its first stop as the trade review counts it, and be up to {exec.strictRisk.maxPositionPctOfEquity}% of equity{exec.strictRisk.requireStopLoss ? '; stop required' : ''}.
         </div>
       )}
       <div className="ticket-submit" ref={footRef}>
+        {/* The estimate at a glance, beside the button it is checked before (the full table is in More
+            options). Over your risk limit, the risk is in red, as it is in the table. */}
+        <dl className="ticket-est">
+          <div>
+            <dt>Est. entry</dt>
+            <dd className="num">{fmtPrice(entry)}</dd>
+          </div>
+          <div>
+            <dt>Value</dt>
+            <dd className="num">{money(risk?.positionValue)}</dd>
+          </div>
+          {opening && (
+            <>
+              <div title={risk?.pctRisk == null ? undefined : `${pctAgainst(risk.pctRisk, rules.maxRiskPctPerTrade)}% of the account (your limit is ${rules.maxRiskPctPerTrade}%)`}>
+                <dt>$ risk</dt>
+                <dd className={`num ${overRisk ? 'error' : ''}`}>{money(risk?.dollarRisk)}</dd>
+              </div>
+              <div>
+                <dt>R:R</dt>
+                <dd className="num">{risk?.rewardRiskRatio ? `${risk.rewardRiskRatio.toFixed(2)} : 1` : '—'}</dd>
+              </div>
+              {trade && (
+                <div title="The whole trade with this order, from its first stop, as Strict Mode and the trade review measure it">
+                  <dt>Trade risk</dt>
+                  <dd className={`num ${tradeOver ? 'error' : ''}`}>{trade.unmeasurable ? "can't be measured" : `${pctAgainst(trade.pct, rules.maxRiskPctPerTrade)}%`}</dd>
+                </div>
+              )}
+            </>
+          )}
+        </dl>
         {/* Why the order can't be placed: read with the button, and announced (below) once typing settles. */}
         {bracket.map((e, i) => (
           <div key={e} id={`${bracketId}-${i}`} className="alert error" aria-hidden="true">
