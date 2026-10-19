@@ -121,6 +121,35 @@ describe('the bottom panel', () => {
     again.unmount();
   });
 
+  it('is only its tabs and one line before a session, so the chart keeps the room, and takes its own height again once one starts', async () => {
+    const store = await import('../state/tradingStore');
+    await store.endSession();
+    localStorage.setItem(KEY, JSON.stringify({ height: 300 }));
+    const style = addStyles();
+    const p = await mount();
+    try {
+      expect(p.panel.classList.contains('idle')).toBe(true);
+      expect(getComputedStyle(p.panel).height).toBe('auto');
+      expect(p.panel.style.getPropertyValue('--bottom-h')).toBe('');
+      // Nothing to resize, and no empty-state box: one muted line.
+      expect(p.handle()).toBeNull();
+      expect(p.body().querySelector('.empty')).toBeNull();
+      expect(p.body().textContent).toBe('No session yet. Its positions, orders, fills, closed trades, journal and log show here.');
+      // Every tab is still there, and it still collapses to them.
+      expect([...p.host.querySelectorAll('.tabs button:not(.dock-toggle)')].map((b) => b.textContent)).toEqual(['Positions', 'Orders', 'Fills', 'Closed trades', 'Journal', 'Activity log']);
+      expect(p.toggle.getAttribute('aria-expanded')).toBe('true');
+
+      await act(() => store.startSim({ config: { seed: 7 }, startingBalance: 25_000, speed: 1 }));
+      expect(p.panel.classList.contains('idle')).toBe(false);
+      expect(p.panel.style.getPropertyValue('--bottom-h')).toBe('300px');
+      expect(p.handle()).not.toBeNull();
+      expect(p.body().textContent).toContain('No open positions');
+    } finally {
+      p.unmount();
+      style.remove();
+    }
+  });
+
   it('starts collapsed on a short laptop screen until the user opens it, but not in the one-column layout', async () => {
     const { SHORT_SCREEN, STACKED } = await import('./useBottomDock');
     screenMatches(SHORT_SCREEN);

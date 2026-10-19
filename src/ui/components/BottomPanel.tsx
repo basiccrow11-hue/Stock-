@@ -111,9 +111,15 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
   };
 
   return (
-    <div className={`panel area-bottom${collapsed ? ' collapsed' : ''}`} ref={panelRef} style={!collapsed && shownHeight !== undefined ? ({ '--bottom-h': `${shownHeight}px` } as CSSProperties) : undefined}>
+    // With no session there is nothing to list: the panel is its tabs and one line (.idle), so the
+    // chart keeps the room, and it takes its chosen height again when a session starts.
+    <div
+      className={`panel area-bottom${collapsed ? ' collapsed' : ''}${session ? '' : ' idle'}`}
+      ref={panelRef}
+      style={!collapsed && session && shownHeight !== undefined ? ({ '--bottom-h': `${shownHeight}px` } as CSSProperties) : undefined}
+    >
       {/* The top edge resizes the panel: drag it, or Tab to it and use the arrow keys (Home and End for the smallest and largest). */}
-      {!collapsed && dock.resizable && (
+      {!collapsed && session && dock.resizable && (
         <div
           className="dock-resize"
           role="separator"
@@ -169,7 +175,7 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
       </div>
       <div className="panel-body" id={bodyId} hidden={collapsed}>
         {collapsed ? null : !session ? (
-          <EmptyState title="No active session">Start a replay or the simulated market to trade.</EmptyState>
+          <p className="dock-idle">No session yet. Its positions, orders, fills, closed trades, journal and log show here.</p>
         ) : shown === 'positions' ? (
           <PositionsTab />
         ) : shown === 'orders' ? (

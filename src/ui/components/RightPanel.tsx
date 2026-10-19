@@ -1,20 +1,25 @@
-/** Right column: account summary, active challenge progress, open positions and the order ticket. */
+/** Right column: the account in one line, active challenge progress, open positions and the order ticket. */
 import { useMemo } from 'react';
 import { useTrading } from '../state/tradingStore';
 import { useChallenges } from '../state/challengeStore';
 import { CHALLENGES } from '../../core/challenges/challenges';
 import { OrderTicket } from './OrderTicket';
 import { PositionList } from './PositionList';
-import { EmptyState, useFocusRescue } from './common';
+import { useFocusRescue } from './common';
+import { useRememberedOpen } from './useRememberedOpen';
 import { money, pct, pnlClass, signedMoney } from '../services/format';
 
 /**
- * The account at a glance, in little room so the ticket below stays in view. Account value and day
- * P/L are always in the top bar, so they are not repeated here; the starting balance is only here.
+ * The account at a glance, in one line, so the ticket below keeps its room. Account value, day P/L,
+ * buying power and unrealized P/L are in the top bar, so the line has what the bar lacks: the session's
+ * P/L, realized P/L, the trades closed and the win rate. The line opens the rest (starting balance,
+ * cash, buying power, unrealized P/L), which the top bar leaves out when the window is narrow; once
+ * opened it stays open, after a reload too (useRememberedOpen).
  */
 function AccountBox() {
   const account = useTrading((s) => s.account);
   const trips = useTrading((s) => s.trips);
+  const [open, setOpen] = useRememberedOpen('account-details');
   const stats = useMemo(() => {
     const closed = trips.filter((t) => t.closed);
     const wins = closed.filter((t) => t.pnl > 0).length;
@@ -23,22 +28,29 @@ function AccountBox() {
   if (!account) return null;
   const total = account.equity - account.startingBalance;
   const item = (k: string, v: string, cls = '', title?: string) => (
-    <div title={title}>
-      <dt>{k}</dt>
-      <dd className={`num ${cls}`}>{v}</dd>
-    </div>
+    <span className="acct-item" title={title}>
+      <span className="k">{k}</span>
+      <span className={`v num ${cls}`}>{v}</span>
+    </span>
   );
   return (
-    <dl className="acct">
-      {item('Starting balance', money(account.startingBalance))}
-      {item('Cash', money(account.cash))}
-      {item('Buying power', money(account.buyingPower))}
-      {item('Session P/L', signedMoney(total), pnlClass(total), account.startingBalance > 0 ? `${pct((total / account.startingBalance) * 100, 2, true)} since the session started` : undefined)}
-      {item('Unrealized P/L', signedMoney(account.unrealizedPnl), pnlClass(account.unrealizedPnl))}
-      {item('Realized P/L', signedMoney(account.realizedPnl), pnlClass(account.realizedPnl))}
-      {item('Closed trades', String(stats.n))}
-      {item('Win rate', stats.winRate === null ? '—' : `${stats.winRate.toFixed(0)}%`)}
-    </dl>
+    <details className="acct" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary title={open ? 'Hide the account details' : 'Starting balance, cash, buying power and unrealized P/L'}>
+        {item('Session P/L', signedMoney(total), pnlClass(total), account.startingBalance > 0 ? `${pct((total / account.startingBalance) * 100, 2, true)} since the session started` : undefined)}
+        {item('Realized', signedMoney(account.realizedPnl), pnlClass(account.realizedPnl))}
+        {item('Trades', String(stats.n), '', 'Closed trades this session')}
+        {item('Win rate', stats.winRate === null ? '—' : `${stats.winRate.toFixed(0)}%`)}
+        <svg className="acct-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 6l4 4 4-4" />
+        </svg>
+      </summary>
+      <div className="acct-more">
+        {item('Starting balance', money(account.startingBalance))}
+        {item('Cash', money(account.cash))}
+        {item('Buying power', money(account.buyingPower))}
+        {item('Unrealized P/L', signedMoney(account.unrealizedPnl), pnlClass(account.unrealizedPnl))}
+      </div>
+    </details>
   );
 }
 
@@ -67,22 +79,24 @@ function ChallengeWidget() {
   );
 }
 
-/** Before any session: what this column is for, and how to start. */
+/**
+ * Before any session: one line on how to start, and the other ways in as small links. The chart above
+ * has the Replay button; this column only says what it will hold.
+ */
 function NoSession({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
   return (
-    <EmptyState title="No session running">
-      <p className="small" style={{ margin: '0 0 12px' }}>
-        Start a replay of a past trading day or the simulated market. Your paper account, open positions and the order ticket appear here.
+    <div className="right-idle">
+      <p>Press Replay above the chart, then click the bar to start from. Your paper account and order ticket appear here.</p>
+      <p className="right-idle-links">
+        <button type="button" className="link-btn" onClick={() => onNewSession('replay')}>
+          Advanced replay setup
+        </button>
+        <span aria-hidden="true">·</span>
+        <button type="button" className="link-btn" onClick={() => onNewSession('sim')}>
+          Simulated market
+        </button>
       </p>
-      <div className="stack">
-        <button className="btn primary" onClick={() => onNewSession('replay')}>
-          Start a historical replay
-        </button>
-        <button className="btn" onClick={() => onNewSession('sim')}>
-          Start the simulated market
-        </button>
-      </div>
-    </EmptyState>
+    </div>
   );
 }
 
