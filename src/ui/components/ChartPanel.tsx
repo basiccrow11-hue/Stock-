@@ -1,14 +1,36 @@
+import { useEffect, useState } from 'react';
 import { TIMEFRAMES } from '../../core/types';
 import { ChartView } from '../chart/ChartView';
 import { TOOL_LABELS, useDrawings, type DrawingTool } from '../chart/drawings';
-import { setTimeframe, useTrading } from '../state/tradingStore';
+import { dismissError, retryBrowse, setBrowseSource, setSelectingBar, setTimeframe, useTrading } from '../state/tradingStore';
+import { getProvider } from '../state/dataRegistry';
 import { IndicatorMenu } from './IndicatorMenu';
 import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
+import { ReplayMenu } from './ReplayMenu';
 import { EmptyState, useFocusRescue } from './common';
 import { UnfinishedSessions } from './UnfinishedSessions';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
+
+/** Where the first-use tip ("Press Replay, then click the bar…") is remembered as dismissed. */
+const TIP_KEY = 'stock-replay-bar-replay-tip';
+
+function tipDismissed(): boolean {
+  try {
+    return localStorage.getItem(TIP_KEY) === 'dismissed';
+  } catch {
+    return false;
+  }
+}
+
+function dismissTip(): void {
+  try {
+    localStorage.setItem(TIP_KEY, 'dismissed');
+  } catch {
+    /* storage blocked: the tip shows again next time */
+  }
+}
 
 export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { onNewSession: (mode: 'replay' | 'sim') => void; onOpenSettings?: () => void; active?: boolean }) {
   const session = useTrading((s) => s.session);
@@ -16,11 +38,16 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   const timeframe = useTrading((s) => s.timeframe);
   const loading = useTrading((s) => s.loading);
   const carryingOn = useTrading((s) => s.carryingOn !== null);
-  const error = useTrading((s) => s.error);
+  const selecting = useTrading((s) => s.selectingBar);
   const { tool, setTool, color, setColor, clear, drawings } = useDrawings();
   const isSim = session?.mode === 'sim';
   // Clear all drawings disables itself once they are gone: focus goes to the drawing tools.
   const toolsRef = useFocusRescue<HTMLDivElement>((bar) => bar.querySelector<HTMLElement>('[aria-label="Drawing tools"] button.on'));
+
+  // Another page covering the chart stops picking a bar on it.
+  useEffect(() => {
+    if (!active) setSelectingBar(false);
+  }, [active]);
 
   return (
     <section className="panel area-chart">
@@ -37,16 +64,11 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         <IndicatorMenu />
         <ChartSettingsMenu onOpenSettings={onOpenSettings} />
         <div className="spacer" />
-        <button className="btn sm" onClick={() => onNewSession('replay')}>
-          New replay
-        </button>
-        <button className="btn sm" onClick={() => onNewSession('sim')}>
-          Sim market
-        </button>
+        <ReplayMenu onNewSession={onNewSession} />
       </div>
       <div className="chart-host">
-        {/* Only with a session: before one, the start panel covers the chart and the tools would be hidden under it. */}
-        {session && (
+        {/* Not while a reload carries its session on: the chart is covered then. */}
+        {!carryingOn && (
           <div className="draw-tools" ref={toolsRef}>
             <div className="seg" role="group" aria-label="Drawing tools">
               {(Object.keys(TOOL_LABELS) as DrawingTool[]).map((t) => (
@@ -66,36 +88,107 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
           </div>
         )}
         <ChartView symbol={symbol} timeframe={timeframe} />
-        {!session && (
-          <div className="chart-empty">
-            {loading ? (
-              <EmptyState title="Loading market data…">Preparing the replay. Future bars stay hidden.</EmptyState>
-            ) : carryingOn ? (
-              // A reload carries on the session this tab was running, unless another tab runs it (this one was
-              // duplicated from it): it is not offered to resume or discard meanwhile.
-              <EmptyState title="Picking up where you left off…">If the session this tab was running can be carried on, it comes back as it was, paused.</EmptyState>
-            ) : (
-              <div className="stack" style={{ alignItems: 'center', width: '100%', maxWidth: 520, textAlign: 'center' }}>
-                {error && <div className="alert error">{error}</div>}
-                <UnfinishedSessions />
-                <h2>Practice trading when the market is closed</h2>
-                <p className="muted">
-                  Pick an old trading day and replay it bar by bar without seeing what comes next, or trade a continuously running fictional market.
-                </p>
-                <div className="row wrap" style={{ justifyContent: 'center' }}>
-                  <button className="btn primary" onClick={() => onNewSession('replay')}>
-                    Start a historical replay
-                  </button>
-                  <button className="btn" onClick={() => onNewSession('sim')}>
-                    Start the simulated market
-                  </button>
-                </div>
-              </div>
-            )}
+        {loading ? (
+          // Over the chart it starts from (a bar replay keeps its view), which stays in sight, dimmed.
+          <div className="chart-empty chart-veil">
+            <EmptyState title="Loading market data…">Preparing the replay. Future bars stay hidden.</EmptyState>
           </div>
+        ) : carryingOn ? (
+          // A reload carries on the session this tab was running, unless another tab runs it (this one was
+          // duplicated from it): it is not offered to resume or discard meanwhile.
+          <div className="chart-empty">
+            <EmptyState title="Picking up where you left off…">If the session this tab was running can be carried on, it comes back as it was, paused.</EmptyState>
+          </div>
+        ) : (
+          !session && <BrowseNotes selecting={selecting} />
         )}
       </div>
       <ReplayControls active={active} />
     </section>
+  );
+}
+
+/**
+ * What the chart with no session says over its top: why the last start failed, the sessions left
+ * unfinished to resume or discard, and, until dismissed, how to start a replay; why its bars cannot be
+ * shown, in its middle; and that they are loading. Picking a bar, only the error stays.
+ */
+function BrowseNotes({ selecting }: { selecting: boolean }) {
+  const error = useTrading((s) => s.error);
+  const browse = useTrading((s) => s.browse);
+  const symbol = useTrading((s) => s.activeSymbol);
+  const [tip, setTip] = useState(() => !tipDismissed());
+  const [unfinishedHidden, setUnfinishedHidden] = useState(false);
+  // Pressing Replay is what the tip teaches: once done, it is not needed again.
+  useEffect(() => {
+    if (!selecting || !tip) return;
+    dismissTip();
+    setTip(false);
+  }, [selecting, tip]);
+  const provider = getProvider(browse.providerId);
+  return (
+    <>
+      <div className="browse-notes">
+        {error && (
+          <div className="alert error row" role="alert">
+            <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
+            <button className="btn sm ghost" onClick={dismissError} aria-label="Dismiss this message" title="Dismiss">
+              ✕
+            </button>
+          </div>
+        )}
+        {!selecting && !unfinishedHidden && (
+          <div className="browse-unfinished">
+            <UnfinishedSessions />
+            <button className="btn sm ghost browse-hide" onClick={() => setUnfinishedHidden(true)} aria-label="Hide unfinished sessions" title="Hide for now">
+              ✕
+            </button>
+          </div>
+        )}
+        {!selecting && tip && !browse.error && (
+          <div className="browse-tip">
+            <span>
+              Press <b>Replay</b>, then click the bar to start from.
+            </span>
+            <button
+              className="btn sm ghost"
+              onClick={() => {
+                dismissTip();
+                setTip(false);
+              }}
+              aria-label="Dismiss this tip"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+      </div>
+      {browse.loading && (
+        <div className="browse-loading" role="status">
+          Loading {symbol}…
+        </div>
+      )}
+      {browse.error && !browse.loading && (
+        <div className="browse-empty" role="alert">
+          <div className="card stack">
+            <strong>
+              No chart of {symbol} from {provider.name}
+            </strong>
+            <span>{browse.error}</span>
+            <div className="row wrap">
+              <button className="btn sm" onClick={retryBrowse}>
+                Try again
+              </button>
+              {provider.id !== 'demo' && (
+                <button className="btn sm" onClick={() => setBrowseSource('demo')}>
+                  Use the demo data
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

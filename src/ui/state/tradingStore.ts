@@ -9,7 +9,11 @@ import { create } from 'zustand';
 import { bucketFor, ownCandles } from '../../core/data/aggregate';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
-import { ReplaySession, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
+import { DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
+import { barEnds } from '../../core/replay/ReplayEngine';
+import { HOURS_DAYS, candleSpeed, cutTime, hhmm, playOnEndDate, randomDay, sessionEndMinute } from '../../core/replay/barReplay';
+import type { HistoricalDataProvider } from '../../core/data/provider';
+import { DEMO_FIRST_DATE } from '../../core/data/demoProvider';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
 import { isDriven, type StreamingDataProvider, type StreamUpdate, type Unsubscribe } from '../../core/data/provider';
@@ -17,7 +21,7 @@ import { SimMarket, type SimConfig, type SimEvent } from '../../core/sim/SimMark
 import { journalEntryFromTrip, type JournalEntry } from '../../core/journal';
 import { reviewTrade, type TradeReview, type TradingRules } from '../../core/learning/review';
 import { CHALLENGES, evaluateChallenge, type ChallengeDefinition } from '../../core/challenges/challenges';
-import { exchangeDate, isTradingDay, marketSession, nextTradingDay, prevTradingDay, withoutDates } from '../../core/time';
+import { AFTERHOURS_CLOSE, PREMARKET_OPEN, REGULAR_OPEN, exchangeDate, exchangeTimeToUnix, isTradingDay, marketSession, nextTradingDay, parseHHMM, prevTradingDay, withoutDates } from '../../core/time';
 import {
   SAVED_SESSION_VERSION,
   MAX_SAVED_SESSIONS,
@@ -35,7 +39,7 @@ import {
   type SavedSession,
   type SessionSummary,
 } from '../services/savedSessions';
-import { csvDatasetsLoaded, csvProvider, getProvider } from './dataRegistry';
+import { csvDatasetsLoaded, csvProvider, getProvider, onCsvDatasetsChanged } from './dataRegistry';
 import { getSettings, useSettings } from './settingsStore';
 import { useCredentials } from './credentials';
 import { useJournal, saveSnapshot } from './journalStore';
@@ -66,6 +70,18 @@ export interface Quote {
   prevClose: number | null;
   changePct: number | null;
   time: UnixSeconds;
+}
+
+/** The chart shown while no session runs (see browsing below). */
+export interface BrowseState {
+  /** Its data source (a HISTORICAL_PROVIDERS id). The symbol is the snapshot's activeSymbol. */
+  providerId: string;
+  /** Its bars are loading. */
+  loading: boolean;
+  /** Why it cannot be shown, or null. */
+  error: string | null;
+  /** What kind of prices it shows, once they are in (for the chart's watermark). */
+  source: DataSourceKind | null;
 }
 
 export interface TradingSnapshot {
@@ -105,6 +121,10 @@ export interface TradingSnapshot {
    * resume or discard, since the reload carries it on itself.
    */
   carryingOn: string | null;
+  /** With no session: the chart's data source and how its bars are loading. Starting or ending a session leaves it as it is. */
+  browse: BrowseState;
+  /** Bar Replay's select-bar mode: the next click on a candle starts a replay there (startBarReplay). */
+  selectingBar: boolean;
 }
 
 // ------------------------------------------------------------------ chart bus
@@ -113,9 +133,10 @@ export interface TradingSnapshot {
  * `tick` carries the simulated 1m bars a step touched, oldest first, each in its latest state: the
  * forming bar is re-sent with cumulative values, and a fast step can finish several minutes at once.
  * `history` says the bars from before a replay's loaded bars (getChartHistory) arrived for `symbol`,
- * or failed to.
+ * or failed to. A `reset` with `cut` is a bar replay started from a bar of the chart shown before it
+ * (startBarReplay): the chart keeps its zoom, with room after that bar for the bars to come.
  */
-export type ChartEvent = { type: 'reset' } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bars: Bar[] } | { type: 'history'; symbol: string };
+export type ChartEvent = { type: 'reset'; cut?: boolean } | { type: 'append'; symbol: string; bars: Bar[] } | { type: 'tick'; symbol: string; bars: Bar[] } | { type: 'history'; symbol: string };
 type ChartListener = (e: ChartEvent) => void;
 const chartListeners = new Set<ChartListener>();
 export function onChartEvent(fn: ChartListener): () => void {
@@ -199,8 +220,8 @@ const eng: Engines = {
 export const REPLAY_SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 23400];
 export const SIM_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300];
 
-/** What starting or ending a session resets: not carryingOn, which only the reload settles. */
-const EMPTY: Omit<TradingSnapshot, 'carryingOn'> = {
+/** What starting or ending a session resets: not carryingOn, which only the reload settles, nor what the chart shows with no session. */
+const EMPTY: Omit<TradingSnapshot, 'carryingOn' | 'browse'> = {
   session: null,
   activeSymbol: 'SPY',
   timeframe: '1m',
@@ -227,9 +248,20 @@ const EMPTY: Omit<TradingSnapshot, 'carryingOn'> = {
   reviewsPending: 0,
   pickTarget: null,
   pickedPrice: null,
+  selectingBar: false,
 };
 
-export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY, carryingOn: tabSession() }));
+/** The chart the app opens on, with no session: the symbol, timeframe and data source last used (settings.replay). */
+function openingChart(): Pick<TradingSnapshot, 'activeSymbol' | 'timeframe' | 'browse'> {
+  const r = getSettings().replay;
+  return {
+    activeSymbol: r.symbol.trim().toUpperCase() || EMPTY.activeSymbol,
+    timeframe: TIMEFRAMES.includes(r.timeframe) ? r.timeframe : EMPTY.timeframe,
+    browse: { providerId: r.providerId, loading: false, error: null, source: null },
+  };
+}
+
+export const useTrading = create<TradingSnapshot>()(() => ({ ...EMPTY, ...openingChart(), carryingOn: tabSession() }));
 
 // As the app opens: a session this tab was running that is no longer kept at all (it ended, or was
 // discarded) cannot come back, which is known before the journal and imported data are in. One kept
@@ -256,34 +288,187 @@ function broker(): SimBroker | null {
   return eng.replay?.broker ?? eng.simBroker;
 }
 
+// ------------------------------------------------------------------ browsing: the chart with no session
+
+/**
+ * With no session running, the chart shows the chosen symbol's real chart up to the end of its data
+ * (ReplaySession.preview), with the history a replay's chart has, to look at and pick a bar to replay
+ * from (Bar Replay). Only the chart reads it, through getBaseBars, getChartHistory, getBaseTimeframe
+ * and candleStarts: it is no session, so no quote, account, order, journal entry, save, challenge or
+ * Play ever sees it. Its bars load when a chart first asks for them.
+ */
+const browseEng: {
+  /** The bars shown, and what they were loaded for (browseTarget's key). */
+  preview: ReplaySession | null;
+  key: string | null;
+  /** The load under way, which a newer one (or a session starting) stops and discards. */
+  loading: { key: string; abort: AbortController } | null;
+  /** The load that failed, not tried again until something changes (retryBrowse). */
+  failed: string | null;
+  /** Counts changes to the imported data, so imported bars are loaded again after one. */
+  csvVersion: number;
+} = { preview: null, key: null, loading: null, failed: null, csvVersion: 0 };
+
+/**
+ * What the chart with no session shows: the data source, the symbol, and the trading days of its bars a
+ * replay on the chart's timeframe loads before its start (DEFAULT_LOOKBACK, loadedDays). So a bar replay
+ * cut from it shows no less on the left, and timeframes that load the same days share one load.
+ */
+function browseTarget(): { key: string; prefix: string; provider: HistoricalDataProvider; symbol: string; days: number } {
+  const s = useTrading.getState();
+  const provider = getProvider(s.browse.providerId);
+  const symbol = s.activeSymbol.toUpperCase();
+  const days = loadedDays(provider.baseTimeframe(symbol), DEFAULT_LOOKBACK[s.timeframe]);
+  const prefix = `${provider.id}|${symbol}|`;
+  return { key: `${prefix}${days}${provider === csvProvider ? `|${browseEng.csvVersion}` : ''}`, prefix, provider, symbol, days };
+}
+
+/** Whether nothing runs, so the chart shows the browsing chart. A reload carrying its session on shows nothing meanwhile. */
+function browsing(): boolean {
+  return !eng.replay && !eng.stream && !useTrading.getState().carryingOn;
+}
+
+/**
+ * The bars the chart shows for `symbol` with no session, or null (a session runs, or none have loaded
+ * for what is chosen). While another timeframe's bars load, the symbol's chart stays as it was.
+ */
+function shownPreview(symbol: string): ReplaySession | null {
+  const p = browseEng.preview;
+  if (!p || !browsing() || !browseEng.key?.startsWith(browseTarget().prefix) || p.symbol !== symbol.toUpperCase()) return null;
+  return p;
+}
+
+/** shownPreview, after starting to load what is chosen if that is not loaded (not while a session is starting). */
+function browsePreview(symbol: string): ReplaySession | null {
+  if (browsing() && !useTrading.getState().loading) {
+    const t = browseTarget();
+    if (t.key !== browseEng.key && t.key !== browseEng.loading?.key && t.key !== browseEng.failed) void loadBrowse(t);
+  }
+  return shownPreview(symbol);
+}
+
+function setBrowse(patch: Partial<BrowseState>): void {
+  useTrading.setState((s) => ({ browse: { ...s.browse, ...patch } }));
+}
+
+/** Why a ticker the data source lists its tickers for is not one of them, or null when it is. */
+async function notListed(provider: HistoricalDataProvider, symbol: string): Promise<string | null> {
+  if (provider !== csvProvider && provider.id !== 'demo') return null;
+  if (await provider.availableRange(symbol)) return null;
+  const list = (await provider.listSymbols()).map((x) => x.symbol);
+  return `${provider === csvProvider ? 'Your imported data' : 'The demo data'} has no ${symbol}. Choose one of: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ', …' : ''}.`;
+}
+
+/** Loads the browsing chart's bars for `t`; a newer load, or a session starting, discards it. */
+async function loadBrowse(t: ReturnType<typeof browseTarget>): Promise<void> {
+  browseEng.loading?.abort.abort();
+  const mine = { key: t.key, abort: new AbortController() };
+  browseEng.loading = mine;
+  browseEng.failed = null;
+  setBrowse({ loading: true, error: null });
+  const current = () => browseEng.loading === mine;
+  try {
+    // Imported data is there only once the app has read it, which can be after the chart asks as the app opens.
+    if (t.provider === csvProvider && t.provider.unavailableReason()) await csvDatasetsLoaded();
+    if (!current()) return;
+    const reason = t.provider.unavailableReason() ?? (await notListed(t.provider, t.symbol));
+    if (reason) throw new Error(reason);
+    const preview = await ReplaySession.preview(t.provider, { symbol: t.symbol, lookbackDays: t.days }, mine.abort.signal);
+    if (!current()) return;
+    browseEng.loading = null;
+    browseEng.preview = preview;
+    browseEng.key = t.key;
+    setBrowse({ loading: false, error: null, source: preview.broker.state.source });
+  } catch (e) {
+    if (!current()) return;
+    browseEng.loading = null;
+    browseEng.failed = t.key;
+    browseEng.preview = null;
+    browseEng.key = null;
+    setBrowse({ loading: false, error: (e as Error).message, source: null });
+  }
+  if (browsing()) emitChart({ type: 'reset' });
+}
+
+/** Stops a load of the browsing chart under way (a session is starting): it is loaded again when the chart next asks. */
+function stopBrowseLoad(): void {
+  if (!browseEng.loading) return;
+  browseEng.loading.abort.abort();
+  browseEng.loading = null;
+  setBrowse({ loading: false });
+}
+
+/** Tries the browsing chart's load again after it failed (a key added, the data imported, Try again). */
+export function retryBrowse(): void {
+  if (!browseEng.failed) return;
+  browseEng.failed = null;
+  setBrowse({ error: null });
+  if (browsing()) emitChart({ type: 'reset' });
+}
+
+/** Keeps what the browsing chart shows for the next visit and for the next replay set up (settings.replay). */
+function rememberChart(patch: { providerId?: string; symbol?: string; timeframe?: Timeframe }): void {
+  const r = getSettings().replay;
+  const changed = Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && v !== r[k as keyof typeof patch]));
+  if (Object.keys(changed).length) useSettings.getState().updateReplay(changed);
+}
+
+/** The data source of the chart shown with no session (a HISTORICAL_PROVIDERS id); its symbol is set by setActiveSymbol. */
+export function setBrowseSource(providerId: string): void {
+  const s = useTrading.getState();
+  if (s.browse.providerId === providerId) return;
+  setBrowse({ providerId, error: null });
+  rememberChart({ providerId });
+  if (!s.session) {
+    useTrading.setState({ selectingBar: false });
+    emitChart({ type: 'reset' });
+  }
+}
+
+if (typeof window !== 'undefined') {
+  // Imported data read, added or deleted: the browsing chart of it loads again. A key added or the
+  // server's keys known: a load that failed for want of one is tried again.
+  onCsvDatasetsChanged(() => {
+    browseEng.csvVersion++;
+    if (browseEng.failed?.startsWith('csv|')) browseEng.failed = null;
+    if (useTrading.getState().browse.providerId === 'csv' && browsing()) emitChart({ type: 'reset' });
+  });
+  useCredentials.subscribe(() => retryBrowse());
+}
+
+// A reload that could not carry its session on, or a start that failed, leaves the browsing chart to show.
+useTrading.subscribe((s, prev) => {
+  if (!s.session && ((prev.carryingOn && !s.carryingOn) || (prev.loading && !s.loading))) emitChart({ type: 'reset' });
+});
+
 // ------------------------------------------------------------------ data access for the chart
 
-/** Revealed base bars for a symbol (replay) or generated history (sim). Never future data. */
+/** Revealed base bars for a symbol (replay) or generated history (sim); with no session, the browsing chart's. Never future data. */
 export function getBaseBars(symbol: string): Bar[] {
   if (eng.replay) return eng.replay.engineFor(symbol)?.visibleBaseBars() ?? [];
   if (eng.stream) return eng.stream.getHistory(symbol);
-  return [];
+  return browsePreview(symbol)?.engineFor(symbol)?.visibleBaseBars() ?? [];
 }
 
 /**
  * What a `timeframe` chart of `symbol` draws from before the replay's loaded bars (ReplaySession.chartHistory),
- * or null outside a replay. The first chart that wants it starts loading it (`retry`: again after a
- * failure), and a 'history' chart event says when it has arrived.
+ * or null outside a replay (with no session, the browsing chart's). The first chart that wants it starts
+ * loading it (`retry`: again after a failure), and a 'history' chart event says when it has arrived.
  */
 export function getChartHistory(symbol: string, timeframe: Timeframe, retry = false): ChartHistory | null {
-  const replay = eng.replay;
+  const replay = eng.replay ?? (eng.stream ? null : browsePreview(symbol));
   const h = replay?.chartHistory(symbol, timeframe);
   if (!replay || !h) return null;
   if (!h.wanted || !(h.status === 'idle' || (retry && h.status === 'failed'))) return h;
   void replay.loadHistory(symbol).then(() => {
-    if (eng.replay === replay) emitChart({ type: 'history', symbol });
+    if (eng.replay === replay || (!eng.replay && browseEng.preview === replay && browsing())) emitChart({ type: 'history', symbol });
   });
   return replay.chartHistory(symbol, timeframe);
 }
 
-/** The size of `symbol`'s base bars: the replay's data, or the simulated market's 1-minute bars. */
+/** The size of `symbol`'s base bars: the replay's data (or the browsing chart's), or the simulated market's 1-minute bars. */
 export function getBaseTimeframe(symbol: string): Timeframe {
-  return eng.replay?.engineFor(symbol)?.baseTimeframe ?? '1m';
+  return (eng.replay ?? (eng.stream ? null : browsePreview(symbol)))?.engineFor(symbol)?.baseTimeframe ?? '1m';
 }
 
 /**
@@ -295,7 +480,7 @@ export function getBaseTimeframe(symbol: string): Timeframe {
  * copied once).
  */
 export function candleStarts(symbol: string, timeframe: Timeframe): (t: UnixSeconds) => UnixSeconds {
-  const e = eng.replay?.engineFor(symbol);
+  const e = (eng.replay ?? (eng.stream ? null : browsePreview(symbol)))?.engineFor(symbol);
   if (e) {
     const own = ownCandles(timeframe, e.baseTimeframe);
     return (t) => {
@@ -1001,6 +1186,8 @@ export async function discardSession(id: string): Promise<boolean> {
 
 function resetEngines(): void {
   stopTimer();
+  // The browsing chart's bars still loading are not wanted now; those loaded are kept for coming back to it.
+  stopBrowseLoad();
   // The session ends here: reviews still waiting on price after their exit go by what it showed.
   settleWatchedReviews(true);
   eng.watching = new Map();
@@ -1030,11 +1217,11 @@ let loadSeq = 0;
  * What ending the running session does to its open positions, for the user to confirm before another
  * session starts; null when nothing is open.
  */
-export function sessionEndNotice(): string | null {
+export function sessionEndNotice(action: 'start' | 'exit' = 'start'): string | null {
   const open = broker()?.openPositions() ?? [];
   if (!useTrading.getState().session || open.length === 0) return null;
   const list = open.map((p) => `${p.symbol} ${p.quantity > 0 ? 'long' : 'short'} ${Math.abs(p.quantity)}`).join(', ');
-  return `Starting a new session ends this one. Your open ${open.length === 1 ? 'position' : 'positions'} (${list}) will be closed at the last price, as a market order would close ${open.length === 1 ? 'it' : 'them'}, and journaled with the exit reason "Session ended". Working orders are cancelled.`;
+  return `${action === 'exit' ? 'Exiting ends this session.' : 'Starting a new session ends this one.'} Your open ${open.length === 1 ? 'position' : 'positions'} (${list}) will be closed at the last price, as a market order would close ${open.length === 1 ? 'it' : 'them'}, and journaled with the exit reason "Session ended". Working orders are cancelled.`;
 }
 
 /**
@@ -1058,9 +1245,10 @@ async function endCurrent(): Promise<void> {
 /**
  * Loads a replay and, once it has loaded, ends the running session (endCurrent) and starts it. A load
  * that fails leaves the running session as it was, paused. False when it failed (the error is in the
- * store) or a newer start or end took its place.
+ * store) or a newer start or end took its place. `cut`: started from a bar of the chart (startBarReplay).
  */
-export async function startReplay(setup: ReplaySetup & { providerId: string; timeframe: Timeframe; speed: number; blind: boolean; challengeId?: string }): Promise<boolean> {
+export async function startReplay(options: ReplaySetup & { providerId: string; timeframe: Timeframe; speed: number; blind: boolean; challengeId?: string; cut?: boolean }): Promise<boolean> {
+  const { cut, ...setup } = options;
   const seq = ++loadSeq;
   const provider = getProvider(setup.providerId);
   // Imported data is there only once the app has read it, which can be after this is asked for as it opens.
@@ -1117,7 +1305,7 @@ export async function startReplay(setup: ReplaySetup & { providerId: string; tim
       result: { status: 'in_progress', progress: 0, detail: def?.description ?? '', official: true },
     });
   }
-  emitChart({ type: 'reset' });
+  emitChart(cut ? { type: 'reset', cut } : { type: 'reset' });
   publish(true);
   void adoptSession(id);
   for (const w of warnings) toast('warning', w, 6000);
@@ -1175,14 +1363,23 @@ export async function startSim(opts: { config: Partial<SimConfig>; startingBalan
   return true;
 }
 
-/** Ends the running session (endCurrent): its open positions are closed at the last price and journaled. */
+/**
+ * Ends the running session (endCurrent): its open positions are closed at the last price and journaled.
+ * The chart goes back to browsing on the same timeframe: a replay's symbol from its data source; after
+ * the simulated market, whose stocks are made up, the symbol browsed before it.
+ */
 export async function endSession(): Promise<void> {
   const seq = ++loadSeq;
   useTrading.setState({ loading: false });
+  const providerId = eng.replay ? eng.providerId : null;
   await endCurrent();
   if (seq !== loadSeq) return;
+  const sim = !!eng.stream;
   resetEngines();
-  useTrading.setState({ ...EMPTY });
+  const s = useTrading.getState();
+  const symbol = sim ? getSettings().replay.symbol.trim().toUpperCase() || EMPTY.activeSymbol : s.activeSymbol.toUpperCase();
+  useTrading.setState({ ...EMPTY, activeSymbol: symbol, timeframe: s.timeframe, browse: { ...s.browse, providerId: providerId ?? s.browse.providerId, error: null } });
+  rememberChart({ providerId: providerId ?? undefined, symbol, timeframe: s.timeframe });
   emitChart({ type: 'reset' });
 }
 
@@ -1327,10 +1524,11 @@ export async function resumeAfterReload(): Promise<boolean> {
   }
 }
 
+/** Plays the session; picking a bar to replay from stops, as the chart is about to move under it. */
 export function play(): void {
   const s = useTrading.getState();
   if (!s.session || s.finished) return;
-  useTrading.setState({ playing: true });
+  useTrading.setState({ playing: true, selectingBar: false });
   startTimer();
 }
 
@@ -1351,15 +1549,25 @@ export function setSpeed(speed: number): void {
   notePositionNow();
 }
 
+/** The chart's timeframe; with no session it is kept for the next visit (settings.replay). Picking a bar to replay from stops. */
 export function setTimeframe(tf: Timeframe): void {
-  useTrading.setState({ timeframe: tf });
+  useTrading.setState({ timeframe: tf, selectingBar: false });
+  if (!useTrading.getState().session) rememberChart({ timeframe: tf });
   emitChart({ type: 'reset' });
   notePositionNow();
 }
 
+/**
+ * The symbol the chart shows. During a session, one of its symbols; with no session, any symbol of the
+ * browsing chart's data source (in capitals), kept for the next visit and the next replay set up. Picking
+ * a bar to replay from stops.
+ */
 export function setActiveSymbol(symbol: string): void {
-  if (useTrading.getState().activeSymbol === symbol) return;
-  useTrading.setState({ activeSymbol: symbol });
+  const s = useTrading.getState();
+  const next = s.session ? symbol : symbol.trim().toUpperCase();
+  if (!next || s.activeSymbol === next) return;
+  useTrading.setState({ activeSymbol: next, selectingBar: false });
+  if (!s.session) rememberChart({ symbol: next });
   emitChart({ type: 'reset' });
   publish(true);
 }
@@ -1439,6 +1647,187 @@ export function jumpTo(time: UnixSeconds): void {
   }
 }
 
+// ------------------------------------------------------------------ Bar Replay
+
+/**
+ * Why a bar cannot be picked on the chart to replay from now, or null when it can: a blind replay would
+ * show its dates (a bar replay is not blind), the simulated market's made-up stocks have no data to
+ * replay, and with no session the chart needs its bars first.
+ */
+export function selectBarBlocked(): string | null {
+  const s = useTrading.getState();
+  if (s.session?.blind) return 'A blind replay hides its dates, and picking a bar would show them. Exit the replay first.';
+  if (s.session?.mode === 'sim') return 'The simulated market has no past data to replay. Exit it first.';
+  if (!s.session && !shownPreview(s.activeSymbol)) return s.browse.error ?? 'The chart is still loading.';
+  return null;
+}
+
+/** Select-bar mode on or off (selectingBar). On, playback pauses and a price pick waiting for the chart is let go. */
+export function setSelectingBar(on: boolean): void {
+  if (!on) {
+    if (useTrading.getState().selectingBar) useTrading.setState({ selectingBar: false });
+    return;
+  }
+  if (selectBarBlocked()) return;
+  pause();
+  useTrading.setState({ selectingBar: true, pickTarget: null });
+}
+
+/**
+ * Where a replay started from the chart takes its bars: the chart's data source and symbol. While the
+ * simulated market runs, whose stocks are made up, the symbol and data source browsed before it.
+ */
+export function barReplaySource(): { providerId: string; symbol: string } {
+  const s = useTrading.getState();
+  if (eng.replay && eng.providerId) return { providerId: eng.providerId, symbol: s.activeSymbol.toUpperCase() };
+  const symbol = eng.stream ? getSettings().replay.symbol : s.activeSymbol;
+  return { providerId: getProvider(s.browse.providerId).id, symbol: symbol.trim().toUpperCase() };
+}
+
+/** The replay or browsing chart that shows `symbol` from `providerId`, if the chart shows one. */
+function chartData(providerId: string, symbol: string): ReplaySession | null {
+  if (eng.replay) return eng.providerId === providerId && eng.replay.engineFor(symbol) ? eng.replay : null;
+  const p = shownPreview(symbol);
+  return p && browseEng.key?.startsWith(`${providerId}|`) ? p : null;
+}
+
+type KnownBars = { bars: readonly Bar[]; ends: readonly UnixSeconds[]; timeframe: Timeframe };
+
+/** `replay`'s bars of `symbol` the chart can show, each with when it ends: the loaded ones, then the history before them. */
+function knownBars(replay: ReplaySession | null, symbol: string, timeframe: Timeframe): KnownBars[] {
+  const e = replay?.engineFor(symbol);
+  if (!replay || !e) return [];
+  const out: KnownBars[] = [{ bars: e.revealedBars(0, e.revealedCount), ends: e.revealedEnds(0, e.revealedCount), timeframe: e.baseTimeframe }];
+  const h = replay.chartHistory(symbol, timeframe);
+  if (h?.bars.length) out.push({ bars: h.bars, ends: barEnds(h.bars, h.timeframe), timeframe: h.timeframe });
+  return out;
+}
+
+/**
+ * When the data's sessions end (sessionEndMinute) around `day`, in minutes: from `known` bars that cover
+ * those days, else from bars of them asked of the data source.
+ */
+async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars[]): Promise<number> {
+  for (const k of known) {
+    const close = sessionEndMinute(k.bars, k.ends, day);
+    if (close !== null) return close;
+  }
+  let from = day;
+  for (let i = 0; i < HOURS_DAYS; i++) from = prevTradingDay(from);
+  const bars = await provider.getBars({ symbol, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(nextTradingDay(day), 0) });
+  return sessionEndMinute(bars, barEnds(bars, provider.baseTimeframe(symbol)), day) ?? AFTERHOURS_CLOSE;
+}
+
+/** A bar replay that cannot start: why, as a start error with no session, else in a toast (the session runs on). */
+function startRefused(message: string): false {
+  if (useTrading.getState().session) toast('error', `The replay did not start: ${message}`, 10_000);
+  else useTrading.setState({ error: message });
+  return false;
+}
+
+const NOTHING_FOLLOWS = {
+  bar: 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.',
+  time: 'Nothing follows that moment in the data, so there is nothing to replay. Pick an earlier date or time.',
+};
+
+/**
+ * Starts a replay of `symbol` from `providerId` at `t` with the chart's timeframe (startReplay), the way
+ * Bar Replay starts every replay: it plays on for PLAY_ON_DAYS of that timeframe, never past the end of
+ * the data or across a day an imported file has no bars for (playOnEndDate), and on its last day to the
+ * end of the data's sessions (sessionClose), so it never plays empty hours. As many days before the start
+ * as a replay on that timeframe loads (DEFAULT_LOOKBACK); the default balance; that symbol only; not blind;
+ * no challenge; about one candle a second (candleSpeed). Saved as the next replay's setup (settings.replay),
+ * as the setup form saves it, so Advanced replay setup opens on it. `known`: the chart's bars, for the
+ * data's hours. `what` was picked: a bar of the chart (which keeps its view, see ChartEvent) or a moment.
+ */
+async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: string, known: KnownBars[], what: 'bar' | 'time'): Promise<boolean> {
+  const provider = getProvider(providerId);
+  const timeframe = useTrading.getState().timeframe;
+  const day = exchangeDate(t);
+  let endDate: string;
+  let close: number;
+  try {
+    if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
+    const reason = provider.unavailableReason() ?? (await notListed(provider, symbol));
+    if (reason) return startRefused(reason);
+    endDate = playOnEndDate(day, timeframe, await lastDataDay(provider, symbol), await provider.sessionDates?.(symbol));
+    close = await sessionClose(provider, symbol, day, known);
+  } catch (e) {
+    return startRefused((e as Error).message);
+  }
+  const endTime = hhmm(close);
+  if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(NOTHING_FOLLOWS[what]);
+  const startTime = hhmm((t - exchangeTimeToUnix(day, 0)) / 60);
+  const speed = candleSpeed(timeframe, REPLAY_SPEEDS);
+  useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, multiDay: endDate > day, endDate, timeframe, speed });
+  const ok = await startReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, endDate, startingBalance: getSettings().defaultBalance, lookbackDays: DEFAULT_LOOKBACK[timeframe], timeframe, speed, blind: false, cut: what === 'bar' });
+  const failed = useTrading.getState().error;
+  if (!ok && failed) {
+    // The replay's own words for an empty window are about start and end times, which were not asked for here.
+    const message = failed === 'No data between the selected start and end times.' ? NOTHING_FOLLOWS[what] : failed;
+    if (useTrading.getState().session) useTrading.setState({ error: null });
+    startRefused(message);
+  }
+  return ok;
+}
+
+/**
+ * Bar Replay: starts a replay of the chart's symbol cut at its candle that starts at `candleStart` (one of
+ * the chart's timeframe). It starts as that candle ends (cutTime): it is the newest candle shown, complete,
+ * and the next bar shown is the first one after it. Any session running ends first (endCurrent), as
+ * another start ends it. False when it did not start: why is in the store's error, or a toast while a
+ * session runs on.
+ */
+export async function startBarReplay(candleStart: UnixSeconds): Promise<boolean> {
+  const blocked = selectBarBlocked();
+  useTrading.setState({ selectingBar: false });
+  if (blocked) return startRefused(blocked);
+  const { providerId, symbol } = barReplaySource();
+  const timeframe = useTrading.getState().timeframe;
+  const known = knownBars(chartData(providerId, symbol), symbol, timeframe);
+  let t: UnixSeconds | null = null;
+  for (const k of known) t ??= cutTime(candleStart, timeframe, k.bars, k.ends, k.timeframe);
+  if (t === null) return startRefused('That bar is not on the chart.');
+  return startReplayFrom(t, providerId, symbol, known, 'bar');
+}
+
+/** Select date: starts a replay of the chart's symbol at `time` (HH:MM, exchange time) on `date`, as a bar replay starts. */
+export async function startReplayAt(date: string, time: string): Promise<boolean> {
+  useTrading.setState({ selectingBar: false });
+  const { providerId, symbol } = barReplaySource();
+  const known = knownBars(chartData(providerId, symbol), symbol, useTrading.getState().timeframe);
+  return startReplayFrom(exchangeTimeToUnix(date, parseHHMM(time)), providerId, symbol, known, 'time');
+}
+
+/**
+ * Random bar: starts a replay of the chart's symbol at the 09:30 open of a trading day picked at random
+ * from its data (one with bars, for imported data), as a bar replay starts. Picked without looking at
+ * the bars, so nothing about the day is known before it plays.
+ */
+export async function startRandomBar(rand: () => number = Math.random): Promise<boolean> {
+  useTrading.setState({ selectingBar: false });
+  const { providerId, symbol } = barReplaySource();
+  const provider = getProvider(providerId);
+  let day: string | null;
+  try {
+    if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
+    const reason = provider.unavailableReason() ?? (await notListed(provider, symbol));
+    if (reason) return startRefused(reason);
+    const range = await provider.availableRange(symbol);
+    day = randomDay(range ? exchangeDate(range.from) : DEMO_FIRST_DATE, await lastDataDay(provider, symbol), await provider.sessionDates?.(symbol), rand);
+  } catch (e) {
+    return startRefused((e as Error).message);
+  }
+  if (!day) return startRefused(`There is no ${symbol} data to replay.`);
+  const known = knownBars(chartData(providerId, symbol), symbol, useTrading.getState().timeframe);
+  return startReplayFrom(exchangeTimeToUnix(day, REGULAR_OPEN), providerId, symbol, known, 'time');
+}
+
+/** Clears the start error shown over the chart. */
+export function dismissError(): void {
+  useTrading.setState({ error: null });
+}
+
 /** The simulated market's broker, its clock brought up to the market's time for an order action. */
 function simBrokerNow(): SimBroker | null {
   if (!eng.stream || !eng.simBroker) return null;
@@ -1510,8 +1899,9 @@ useJournal.subscribe((s, prev) => {
   if (s.entries !== prev.entries && evaluateActiveChallenge()) saveSession();
 });
 
+/** The order-ticket field waiting for a price click on the chart; asking for one stops picking a bar to replay from. */
 export function setPickTarget(t: TradingSnapshot['pickTarget']): void {
-  useTrading.setState({ pickTarget: t });
+  useTrading.setState(t ? { pickTarget: t, selectingBar: false } : { pickTarget: null });
 }
 
 let pickSeq = 0;

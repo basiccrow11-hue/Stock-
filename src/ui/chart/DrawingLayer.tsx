@@ -224,7 +224,8 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
       down = null;
       const rect = svgRef.current?.getBoundingClientRect();
       const s = useDrawings.getState();
-      if (!still || !rect || s.tool !== 'select' || useTrading.getState().pickTarget) return;
+      // A click that picks a price, or a bar to replay from, is not for the drawings.
+      if (!still || !rect || s.tool !== 'select' || useTrading.getState().pickTarget || useTrading.getState().selectingBar) return;
       const { proj, width, height } = latest.current;
       const [x, y] = [e.clientX - rect.left, e.clientY - rect.top];
       // A click on an axis or an indicator pane is a click off every drawing.
@@ -251,7 +252,8 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
 
   const onPointerDown = (e: React.PointerEvent) => {
     // Only the main button or first finger places points: not a right-click, nor the second finger of a pinch.
-    if (tool === 'select' || e.button !== 0 || !e.isPrimary) return;
+    // Nor a click that picks a bar to replay from (styles.css lets such clicks through to the chart as well).
+    if (tool === 'select' || e.button !== 0 || !e.isPrimary || useTrading.getState().selectingBar) return;
     const pt = pointFromEvent(e);
     if (!pt) return;
     const needed = POINTS_NEEDED[tool as DrawingType];
@@ -292,7 +294,7 @@ export function DrawingLayer({ geometry, version }: { geometry: ChartGeometry; v
   };
 
   const startDrag = (e: React.PointerEvent, d: Drawing, pointIndex: number | 'all') => {
-    if (tool !== 'select' || e.button !== 0 || !e.isPrimary || drag) return;
+    if (tool !== 'select' || e.button !== 0 || !e.isPrimary || drag || useTrading.getState().selectingBar) return;
     e.stopPropagation();
     // A finger or pen that lands on a drawing that is not selected (possible where a mouse is the
     // main pointer; on touch screens such drawings take no touches) selects it with a tap and only

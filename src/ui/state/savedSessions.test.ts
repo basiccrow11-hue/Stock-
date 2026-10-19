@@ -697,6 +697,13 @@ describe('the Trade screen as a reload carries its session on', () => {
   });
 
   /**
+   * What the Trade screen shows over the chart in place of a session: that it is picking one up or loading
+   * one (.chart-empty), or, with none, the notes over the chart of the symbol (.browse-notes: how to start
+   * a replay, and the sessions left unfinished).
+   */
+  const SCREEN = '.chart-empty, .browse-notes';
+
+  /**
    * Opens the app in this tab again, its storage slow (a large journal or imported data takes a while to
    * read), as a reload does. `offered` gets each list of unfinished sessions the screen shows, with whether
    * `shownWith` was on the screen too at that moment; `screens`, each text the Trade screen shows in place
@@ -711,7 +718,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     const offered: { text: string; withIt: boolean }[] = [];
     const screens: string[] = [];
     const seen = new MutationObserver((changes) => {
-      const now = document.querySelector('.chart-empty')?.textContent ?? '';
+      const now = document.querySelector(SCREEN)?.textContent ?? '';
       if (now !== screens[screens.length - 1]) screens.push(now);
       for (const c of changes)
         for (const n of c.addedNodes) {
@@ -723,7 +730,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     const app = render(createElement(App));
     // From here React schedules its own updates, as in the browser: the app's loads finish outside act.
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
-    const screen = () => app.el.querySelector('.chart-empty')?.textContent ?? '';
+    const screen = () => app.el.querySelector(SCREEN)?.textContent ?? '';
     const close = () => {
       if (!open.delete(close)) return;
       seen.disconnect();
@@ -775,7 +782,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     const other = await leaveRunning('11:00');
     locks.elsewhere = new Set([`stock-replay-session:${other}`]);
     app = await openApp();
-    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.screen()).toContain('Press Replay, then click the bar to start from.'), { timeout: 5000 });
     await settle();
     expect(app.offered.map((o) => o.text).join()).not.toContain('11:00 ET');
     locks.elsewhere.clear();
@@ -808,7 +815,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     expect(app.screen()).not.toContain('Picking up where you left off');
     await vi.waitFor(() => expect(app.offered).toHaveLength(1), { timeout: 5000 });
     // Offered on the screen that starts a session, which never said it was picking one up.
-    expect(app.screen()).toContain('Practice trading when the market is closed');
+    expect(app.screen()).toContain('Press Replay, then click the bar to start from.');
     expect(app.offered[0].text).toContain('SPY · 2024-03-12');
     expect(app.store.useTrading.getState().session).toBeNull();
     expect((await app.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
@@ -820,7 +827,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     // The tab running it was duplicated: the copy remembers the session too, but the other tab holds it.
     locks.elsewhere = new Set([`stock-replay-session:${id}`]);
     const app = await openApp();
-    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.screen()).toContain('Press Replay, then click the bar to start from.'), { timeout: 5000 });
     await settle();
     const waiting = app.screens.filter((s) => s.includes('Picking up where you left off'));
     expect(waiting.length).toBeGreaterThan(0);
@@ -856,13 +863,13 @@ describe('the Trade screen as a reload carries its session on', () => {
     sessionStorage.setItem('stock-replay-tab-session', id);
     const loaded = hold('datasets');
     const app = await openApp();
-    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.screen()).toContain('Press Replay, then click the bar to start from.'), { timeout: 5000 });
     expect(sessionStorage.getItem('stock-replay-tab-session')).toBeNull();
     // Only as the app first drew, before it had read which sessions are kept.
     expect(app.screens.slice(1).filter((s) => s.includes('Picking up where you left off'))).toEqual([]);
     loaded();
     await settle();
-    expect(app.screen()).toContain('Practice trading when the market is closed');
+    expect(app.screen()).toContain('Press Replay, then click the bar to start from.');
     expect(app.screens.slice(1).filter((s) => s.includes('Picking up where you left off'))).toEqual([]);
     expect(app.store.useTrading.getState().session).toBeNull();
     app.close();
@@ -881,7 +888,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     loaded();
     await vi.waitFor(() => expect(app.store.useTrading.getState().session?.id).toBe(id), { timeout: 5000 });
     expect(app.offered).toEqual([]);
-    expect(app.screens.filter((s) => s.includes('Practice trading when the market is closed'))).toEqual([]);
+    expect(app.screens.filter((s) => s.includes('Press Replay, then click the bar to start from.'))).toEqual([]);
     app.close();
   }, 20_000);
 
@@ -968,8 +975,10 @@ describe('the Trade screen as a reload carries its session on', () => {
     (await import('./settingsStore')).useSettings.getState().updateReplay({ providerId: 'csv', symbol: 'ACME', date: '2024-03-12', startTime: '10:00', endTime: '11:00', multiDay: false, blind: false, timeframe: '1m', includeWatchlist: false });
     const loaded = hold('datasets');
     const app = await openApp();
-    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
-    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Start a historical replay')!.click();
+    await vi.waitFor(() => expect(app.screen()).toContain('Press Replay, then click the bar to start from.'), { timeout: 5000 });
+    // The full form is in the Replay button's menu.
+    document.querySelector<HTMLButtonElement>('button[aria-label="More ways to start a replay"]')!.click();
+    await vi.waitFor(() => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === 'Advanced replay setup…')!.click());
     const warning = () => document.querySelector('.modal .alert.warn, [role="dialog"] .alert.warn')?.textContent ?? null;
     await vi.waitFor(() => expect(warning()).toBe('Your imported data is still loading.'), { timeout: 5000 });
     expect(document.body.textContent).not.toContain('No CSV data');
@@ -993,7 +1002,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     expect(sessionStorage.getItem('stock-replay-tab-session')).toBeNull();
     const app = await openApp();
     expect(app.screen()).not.toContain('Picking up where you left off');
-    await vi.waitFor(() => expect(app.screen()).toContain('Practice trading when the market is closed'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.screen()).toContain('Press Replay, then click the bar to start from.'), { timeout: 5000 });
     app.close();
   }, 20_000);
 });

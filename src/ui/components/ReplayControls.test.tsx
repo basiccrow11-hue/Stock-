@@ -81,7 +81,12 @@ describe('the replay controls', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const root = createRoot(host);
-    const button = (label: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`) ?? [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent!.includes(label))!;
+    const find = (label: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`) ?? [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent!.includes(label));
+    // Step forward one bar (of the data) is with the less used controls, behind the row's ⋯ button.
+    const button = (label: string) => {
+      if (!find(label)) act(() => find('More replay controls')!.click());
+      return find(label)!;
+    };
     let clock = 0;
     const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
@@ -128,5 +133,93 @@ describe('the replay controls', () => {
       csvProvider.remove('THIN');
       await store.endSession();
     }
+  });
+
+  it('keep the row simple, as TradingView does: Select bar, Play, Forward one candle, speed, clock and Exit, with the rest behind ⋯', async () => {
+    const store = await import('../state/tradingStore');
+    const { ReplayControls } = await import('./ReplayControls');
+    const { exchangeTimeToUnix } = await import('../../core/time');
+    const at = (hhmm: string) => exchangeTimeToUnix('2024-03-12', Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3)));
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '5m', speed: 1, blind: false })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(ReplayControls)));
+    const bar = host.querySelector('.replay-bar')!;
+    /** What a control says: its label, or its text without the icons. */
+    const label = (e: Element) =>
+      e.tagName === 'SELECT' ? 'speed' : (e.getAttribute('aria-label') ?? [...e.childNodes].filter((c) => !(c instanceof Element && c.getAttribute('aria-hidden') === 'true')).map((c) => c.textContent).join('').trim());
+    const row = () => [...bar.querySelectorAll(':scope > button, :scope > select, :scope > div > button')].map(label);
+    expect(row()).toEqual(['Select bar', 'Play', 'Forward one 5m candle', 'speed', 'Jump to…', 'More replay controls', 'Exit replay']);
+    expect(bar.querySelector('.clock')!.textContent).toBe('2024-03-12 10:00:00');
+    const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => label(b) === text)!;
+    const newest = () => store.getBaseBars('SPY').at(-1)!.time;
+
+    // Forward shows the next whole candle of the chart: five bars of the 1-minute data.
+    act(() => button('Forward one 5m candle').click());
+    expect(newest()).toBe(at('10:04'));
+    // The less used controls: the panel stays open while they are used.
+    expect(host.querySelector('[role="dialog"][aria-label="More replay controls"]')).toBeNull();
+    act(() => button('More replay controls').click());
+    const panel = () => host.querySelector('[role="dialog"][aria-label="More replay controls"]');
+    expect([...panel()!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'))).toEqual(['Restart', 'Step back one bar', 'Step forward one bar']);
+    act(() => button('Step forward one bar').click());
+    expect(newest()).toBe(at('10:05'));
+    act(() => button('Step forward one bar').click());
+    expect(newest()).toBe(at('10:06'));
+    expect(panel()).not.toBeNull();
+    act(() => button('Restart').click());
+    expect(store.useTrading.getState().now).toBe(at('10:00'));
+
+    // Select bar picks a bar on the chart to start a fresh replay from; pressed again it stops.
+    act(() => button('Select bar').click());
+    expect(store.useTrading.getState().selectingBar).toBe(true);
+    expect(button('Select bar').getAttribute('aria-pressed')).toBe('true');
+    act(() => button('Select bar').click());
+    expect(store.useTrading.getState().selectingBar).toBe(false);
+
+    // Exit asks first while a position is open, as a new start does; the chart then shows SPY on 5m with no session.
+    act(() => void store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 10 }));
+    act(() => store.stepForward());
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    act(() => button('Exit replay').click());
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatch(/^Exiting ends this session\. Your open position \(SPY long 10\)/);
+    expect(store.useTrading.getState().session).not.toBeNull();
+    confirm.mockReturnValue(true);
+    act(() => button('Exit replay').click());
+    await vi.waitFor(() => expect(store.useTrading.getState().session).toBeNull());
+    expect(store.useTrading.getState()).toMatchObject({ activeSymbol: 'SPY', timeframe: '5m' });
+    expect(host.querySelector('.replay-bar')).toBeNull();
+    confirm.mockRestore();
+    act(() => root.unmount());
+    store.setTimeframe('1m');
+  });
+
+  it('say why Select bar is not for a blind replay, and give the simulated market Exit but no Select bar', async () => {
+    const store = await import('../state/tradingStore');
+    const { useToasts } = await import('../state/toasts');
+    const { ReplayControls } = await import('./ReplayControls');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: true })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(ReplayControls)));
+    const find = (text: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === text || b.textContent!.trim() === text);
+    const select = find('Select bar')!;
+    expect(select.getAttribute('aria-disabled')).toBe('true');
+    expect(select.title).toBe('A blind replay hides its dates, and picking a bar would show them. Exit the replay first.');
+    useToasts.setState({ toasts: [] });
+    act(() => select.click());
+    expect(store.useTrading.getState().selectingBar).toBe(false);
+    expect(useToasts.getState().toasts.map((t) => t.text)).toEqual([select.title]);
+
+    expect(await store.startSim({ config: { seed: 4 }, startingBalance: 25_000, speed: 1 })).toBe(true);
+    await act(async () => undefined);
+    expect(find('Select bar')).toBeUndefined();
+    expect(find('▶ Start market')).toBeDefined();
+    act(() => find('Exit the simulated market')!.click());
+    await vi.waitFor(() => expect(store.useTrading.getState().session).toBeNull());
+    act(() => root.unmount());
   });
 });

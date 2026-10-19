@@ -17,19 +17,21 @@
 import { TIMEFRAMES, type Bar, type OrderRequest, type Timeframe, type UnixSeconds } from '../types';
 import type { BarRequest, HistoricalDataProvider } from '../data/provider';
 import { aggregateBars } from '../data/aggregate';
-import type { ExecutionConfig } from '../broker/config';
+import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from '../broker/config';
 import { SimBroker, type BrokerCheckpoint, type BrokerState, type SubmitResult } from '../broker/SimBroker';
 import { ReplayEngine, barEndTime } from './ReplayEngine';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
   REGULAR_CLOSE,
+  addDays,
   afterHoursCloseMinute,
   exchangeDate,
   exchangeMinuteOfDay,
   exchangeTimeToUnix,
   formatExchangeTime,
   isTradingDay,
+  lastCompletedTradingDay,
   nextTradingDay,
   parseHHMM,
   prevTradingDay,
@@ -81,6 +83,33 @@ export function historyTimeframe(base: Timeframe): Timeframe {
  * history's: enough for 1m to 15m charts. Longer lookbacks come from the history.
  */
 export const BASE_LOOKBACK_LIMIT = DEFAULT_LOOKBACK['15m'];
+
+/**
+ * Trading days of data at its own bar size (`base`) a replay loads before its start for a lookback of
+ * `lookbackDays`: all of them when the data is as coarse as the history, else at most BASE_LOOKBACK_LIMIT.
+ */
+export function loadedDays(base: Timeframe, lookbackDays: number): number {
+  return historyTimeframe(base) === base ? lookbackDays : Math.min(lookbackDays, BASE_LOOKBACK_LIMIT);
+}
+
+/**
+ * The last trading day `provider` has `symbol`'s data for: where its availableRange ends, or, for a
+ * source that does not say (a vendor), the last trading day that has ended by `now`.
+ */
+export async function lastDataDay(provider: HistoricalDataProvider, symbol: string, now = new Date()): Promise<string> {
+  const range = await provider.availableRange(symbol.toUpperCase());
+  return tradingDayOnOrBefore(range ? exchangeDate(range.to) : lastCompletedTradingDay(now));
+}
+
+/** Where a replay's clock starts and ends, and up to when its bars are asked for (see ReplaySession.load). */
+interface LoadWindow {
+  date: string;
+  start: UnixSeconds;
+  end: UnixSeconds;
+  to: UnixSeconds;
+  lookbackDays: number;
+  preview?: boolean;
+}
 
 /** Trading days before the start the history reaches back (a daily chart's lookback, or a longer one asked for). */
 const HISTORY_DAYS = DEFAULT_LOOKBACK['1D'];
@@ -223,6 +252,38 @@ export class ReplaySession {
     const to = Math.max(end, exchangeTimeToUnix(endDate, AFTERHOURS_CLOSE));
 
     const symbols = [symbol, ...(setup.extraSymbols ?? []).map((s) => s.toUpperCase()).filter((s) => s !== symbol)];
+    const { engines, histories, warnings } = await ReplaySession.loadSymbols(provider, symbols, { date, start, end, to, lookbackDays: setup.lookbackDays }, signal);
+    const session = new ReplaySession(engines, { ...setup, symbol, date, endDate }, config, sessionId, provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL');
+    session.provider = provider;
+    session.histories = histories;
+    return { session, warnings };
+  }
+
+  /**
+   * `symbol`'s chart as a replay's chart shows it, with the clock at the end of its data (lastDataDay):
+   * the bars of that last day and of the trading days a replay with `lookbackDays` loads before its
+   * start, every one revealed, and the history for higher timeframes as a replay loads it (chartHistory,
+   * loadHistory). For looking at a chart before any replay starts: nothing plays in it, and it is never
+   * traded (its account is its own, and stays empty).
+   */
+  static async preview(provider: HistoricalDataProvider, setup: { symbol: string; lookbackDays: number }, signal?: AbortSignal, now = new Date()): Promise<ReplaySession> {
+    const symbol = setup.symbol.toUpperCase();
+    const date = await lastDataDay(provider, symbol, now);
+    // The end of that day: every bar of it has ended by then, whatever its hours.
+    const clock = exchangeTimeToUnix(addDays(date, 1), 0);
+    const { engines, histories } = await ReplaySession.loadSymbols(provider, [symbol], { date, start: clock, end: clock, to: clock, lookbackDays: setup.lookbackDays, preview: true }, signal);
+    // Its times are never read: the clock sits at the end of the day, and nothing plays.
+    const session = new ReplaySession(engines, { symbol, date, startTime: '24:00', endTime: '24:00', startingBalance: 0, lookbackDays: setup.lookbackDays }, DEFAULT_EXECUTION_CONFIG, 'preview', provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL');
+    session.provider = provider;
+    session.histories = histories;
+    return session;
+  }
+
+  /**
+   * Each of `symbols`' engine over `w` and the record of its history for higher timeframes. Symbols after
+   * the first that fail to load are skipped and reported in `warnings`; the first one's failure is thrown.
+   */
+  private static async loadSymbols(provider: HistoricalDataProvider, symbols: string[], w: LoadWindow, signal?: AbortSignal): Promise<{ engines: ReplayEngine[]; histories: Map<string, SymbolHistory>; warnings: string[] }> {
     const warnings: string[] = [];
     const engines: ReplayEngine[] = [];
     const histories = new Map<string, SymbolHistory>();
@@ -231,27 +292,23 @@ export class ReplaySession {
         const base = provider.baseTimeframe(sym);
         const timeframe = historyTimeframe(base);
         // Months of 1-minute bars would take long to load and chart: past a few weeks, history comes coarser.
-        const baseDays = timeframe === base ? setup.lookbackDays : Math.min(setup.lookbackDays, BASE_LOOKBACK_LIMIT);
-        let from = date;
+        const baseDays = loadedDays(base, w.lookbackDays);
+        let from = w.date;
         for (let i = 0; i < baseDays; i++) from = prevTradingDay(from);
-        const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to }, signal);
-        if (bars.length === 0) throw new Error(`No ${sym} data for ${date}. Pick another date or data source.`);
-        engines.push(new ReplayEngine({ symbol: sym, start, end, baseTimeframe: base }, bars));
+        const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: w.to }, signal);
+        if (bars.length === 0) throw new Error(`No ${sym} data for ${w.date}. Pick another date or data source.`);
+        engines.push(new ReplayEngine({ symbol: sym, start: w.start, end: w.end, baseTimeframe: base, preview: w.preview }, bars));
         const baseStart = exchangeDate(bars.reduce((t, b) => Math.min(t, b.time), Infinity));
         // Data that begins after the first day asked for has nothing earlier to load either.
         const dataStart = baseStart > from ? baseStart : null;
         histories.set(sym, { bars: [], timeframe, status: dataStart ? 'ready' : 'idle', error: null, baseFrom: from, baseDays, baseStart, dataStart, loading: null });
       } catch (e) {
         if ((e as Error).name === 'AbortError') throw e;
-        if (sym === symbol) throw e;
+        if (sym === symbols[0]) throw e;
         warnings.push(`${sym} skipped: ${(e as Error).message}`);
       }
     }
-    const source = provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL';
-    const session = new ReplaySession(engines, { ...setup, symbol, date, endDate }, config, sessionId, source);
-    session.provider = provider;
-    session.histories = histories;
-    return { session, warnings };
+    return { engines, histories, warnings };
   }
 
   /**

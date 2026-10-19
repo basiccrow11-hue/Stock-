@@ -322,6 +322,15 @@ export function tradingDayOnOrBefore(date: string): string {
   return isTradingDay(date) ? date : prevTradingDay(date);
 }
 
+/** The last trading day whose sessions have all ended at `now`: today once its after-hours are over, else the trading day before. */
+export function lastCompletedTradingDay(now: Date): string {
+  const nowSec = Math.floor(now.getTime() / 1000);
+  let d = exchangeDate(nowSec);
+  if (!isTradingDay(d) || nowSec < exchangeTimeToUnix(d, AFTERHOURS_CLOSE)) d = addDays(d, -1);
+  while (!isTradingDay(d)) d = addDays(d, -1);
+  return d;
+}
+
 /** Nearest trading day on or after `date`. */
 export function tradingDayOnOrAfter(date: string): string {
   return isTradingDay(date) ? date : nextTradingDay(date);

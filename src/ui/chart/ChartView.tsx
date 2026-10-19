@@ -43,6 +43,7 @@ import { useSettings, type IndicatorConfig } from '../state/settingsStore';
 import { candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
 import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
+import { BarCutLayer } from './BarCutLayer';
 import { ChartLegend, type LegendEntry, type LegendModel, type LegendSource } from './ChartLegend';
 import { useDrawings } from './drawings';
 import { OSCILLATORS, addIndicatorSeries, addVolumeSeries, chartMarkers, endsSession, indicatorColors, indicatorName, indicatorPoint as indicatorPointOf, indicatorSpec, timeLabels, toJpeg, volumePoint as volumePointOf, watermarkLines, withHistory } from './chartParts';
@@ -114,6 +115,8 @@ const STACKED_LAYOUT = '(max-width: 820px), (max-width: 1180px) and (max-height:
  * up to as many again before the oldest are let go (slideWindow).
  */
 const WINDOW = 2000;
+/** The share of the view left empty after the newest candle when a bar replay starts (see drawCandles), for the candles to come. */
+const CUT_ROOM = 0.2;
 /** Scrolling to within this many candles of the oldest one handed over brings older ones. */
 const WINDOW_MARGIN = 300;
 /**
@@ -242,6 +245,9 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   const positions = useTrading((s) => s.positions);
   const simEventCount = useTrading((s) => s.simEvents.length);
   const pickTarget = useTrading((s) => s.pickTarget);
+  const selectingBar = useTrading((s) => s.selectingBar);
+  // With no session the chart shows the browsing chart, whose data source the watermark names too.
+  const browseSource = useTrading((s) => s.browse.source);
   const blind = session?.blind ?? false;
   const shift = blind && session ? blindChartShift(session.id) : 0;
   const shiftRef = useRef(shift);
@@ -298,7 +304,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     });
     chart.subscribeClick((param) => {
       const series = candleRef.current;
-      if (!param.point || !series || !useTrading.getState().pickTarget) return;
+      // Picking a bar to replay from takes the click instead (BarCutLayer).
+      if (!param.point || !series || !useTrading.getState().pickTarget || useTrading.getState().selectingBar) return;
       // point.y is relative to the clicked pane; only the price pane maps to prices.
       if (param.paneIndex !== undefined && param.paneIndex !== 0) return;
       const p = series.coordinateToPrice(param.point.y);
@@ -516,10 +523,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     watermarkRef.current = createTextWatermark(chart.panes()[0], {
       horzAlign: 'center',
       vertAlign: 'center',
-      lines: session ? watermarkLines(symbol, timeframe, session.source, pal) : [],
+      lines: session ? watermarkLines(symbol, timeframe, session.source, pal) : browseSource ? watermarkLines(symbol, timeframe, browseSource, pal) : [],
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, symbol, timeframe, pal.watermark, pal.watermarkSub]);
+  }, [session, browseSource, symbol, timeframe, pal.watermark, pal.watermarkSub]);
 
   // ---------------------------------------------------------------- indicator series setup
   // Rebuilt only when the set of indicators or their parameters change. Colours are applied in place
@@ -924,15 +931,16 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
 
   /**
    * Rebuild every candle from the revealed bars and the history before them, and hand the chart the
-   * newest. `retry` loads the history again if it failed before (a new look at this chart).
+   * newest. `retry` loads the history again if it failed before (a new look at this chart). `cut`: a bar
+   * replay started from a bar of the chart shown until now (see drawCandles).
    */
-  function fullRedraw(retry = false): void {
+  function fullRedraw(retry = false, cut = false): void {
     if (!candleRef.current) return;
     baseRef.current = getBaseBars(symbol);
     baseTfRef.current = getBaseTimeframe(symbol);
     // At the data's own bar size each bar is a candle: getBaseBars already gave copies.
     const candles = ownCandles(timeframe, baseTfRef.current) ? baseRef.current.slice() : aggregateBars(baseRef.current, timeframe, baseTfRef.current);
-    drawCandles(candles, getChartHistory(symbol, timeframe, retry));
+    drawCandles(candles, getChartHistory(symbol, timeframe, retry), cut);
   }
 
   /** The history arrived (or failed): only the candles before those of the revealed bars change. */
@@ -991,8 +999,12 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     return lastIndexAtOrBefore(candles, candleFor(t, timeframe, baseTfRef.current).start, (c) => c.time);
   }
 
-  /** Put the history's candles before `candles` (those of the revealed bars) and hand the chart the newest. */
-  function drawCandles(candles: Bar[], history: ChartHistory | null): void {
+  /**
+   * Put the history's candles before `candles` (those of the revealed bars) and hand the chart the newest.
+   * `cut`: a bar replay started from a bar of the chart shown until now, the newest of `candles`: the view
+   * keeps its zoom, with that bar near the right edge and room after it for the candles to come.
+   */
+  function drawCandles(candles: Bar[], history: ChartHistory | null, cut = false): void {
     historyRef.current = history;
     const merged = withHistory(candles, history, timeframe);
     const drawn = windowKeyRef.current;
@@ -1037,8 +1049,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     setWindowData();
     const api = chartRef.current;
     if (edge !== undefined && api) {
-      // A position counted from the newest candle, which the library applies on its next frame.
-      scrollToPosition(api, edge === null ? api.timeScale().options().rightOffset : edge - (candlesRef.current.length - 1));
+      // A position counted from the newest candle, which the library applies on its next frame. After a cut,
+      // a share of the view's width as it was, in candles (the zoom stays), but never less than the usual room.
+      const rightOffset = api.timeScale().options().rightOffset;
+      const newest = cut && range ? Math.max(rightOffset, Math.round((range.to - range.from) * CUT_ROOM)) : rightOffset;
+      scrollToPosition(api, edge === null ? newest : edge - (candlesRef.current.length - 1));
     } else if (view && api) {
       // The library keeps the view on its candles when candles are added after the newest one while that one is
       // off the view, and else as far from the newest candle as it was. Only, it never leaves the view's right
@@ -1158,7 +1173,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       const now = useTrading.getState();
       const shown = now.activeSymbol === symbol && now.timeframe === timeframe;
       if (e.type === 'reset') {
-        if (shown) fullRedraw();
+        if (shown) fullRedraw(false, e.cut);
         return;
       }
       if (e.symbol !== symbol) return;
@@ -1242,9 +1257,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }, [timeframe, geometryVersion, seriesVersion]);
 
   return (
-    <div className={`chart-wrap${pickTarget ? ' picking' : ''}`}>
+    <div className={`chart-wrap${pickTarget ? ' picking' : ''}${selectingBar ? ' cutting' : ''}`}>
       <div ref={containerRef} className="chart-canvas" />
       {geometry && <DrawingLayer geometry={geometry} version={geometryVersion} />}
+      {geometry && selectingBar && <BarCutLayer geometry={geometry} version={geometryVersion} />}
       {geometry && (
         <div className="chart-corner" style={{ left: geometry.paneWidth() - 8, top: geometry.paneHeight() - 8 }}>
           <DeleteDrawingButton />

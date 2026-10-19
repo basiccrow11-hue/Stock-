@@ -23,6 +23,11 @@ export interface ReplayWindow {
   /** Replay ends when this time is reached. */
   end: UnixSeconds;
   baseTimeframe: Timeframe;
+  /**
+   * A preview (ReplaySession.preview): its start is the end of its bars, so every bar is revealed and
+   * none has to come after the start. Nothing plays in it.
+   */
+  preview?: boolean;
 }
 
 export class ReplayEngine {
@@ -57,7 +62,7 @@ export class ReplayEngine {
     this.#now = window.start;
     this.#cursor = lastIndexAtOrBefore(this.#ends, window.start, (t) => t);
     this.#firstSessionIndex = this.#cursor + 1;
-    if (this.#firstSessionIndex >= this.#bars.length) {
+    if (!window.preview && this.#firstSessionIndex >= this.#bars.length) {
       throw new Error('No data between the selected start and end times.');
     }
   }

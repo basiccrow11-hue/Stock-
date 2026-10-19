@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { act, createElement } from 'react';
+import { Profiler, act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Bar, Timeframe } from '../../core/types';
 import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, regularCloseMinute } from '../../core/time';
@@ -233,7 +233,7 @@ const lw = vi.hoisted(() => {
     }
   }
 
-  return { charts: [] as Chart[], markers: [] as { time: number; text?: string }[], Chart, lenient };
+  return { charts: [] as Chart[], markers: [] as { time: number; text?: string }[], watermarks: [] as { lines: { text: string }[] }[], Chart, lenient };
 });
 
 vi.mock('lightweight-charts', async (original) => {
@@ -247,7 +247,7 @@ vi.mock('lightweight-charts', async (original) => {
       return c;
     },
     createSeriesMarkers: (series: { markers: unknown }) => lw.lenient({ setMarkers: (m: { time: number }[]) => (series.markers = lw.markers = m) }),
-    createTextWatermark: () => lw.lenient({}),
+    createTextWatermark: (_pane: unknown, options: { lines: { text: string }[] }) => (lw.watermarks.push(options), lw.lenient({})),
   };
 });
 
@@ -1722,4 +1722,207 @@ describe('letting go of the chart', () => {
     act(() => r.unmount());
     await store.endSession();
   }, 60_000);
+});
+
+describe('Bar Replay on the chart', () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const store = await import('../state/tradingStore');
+    store.setSelectingBar(false);
+    await store.endSession();
+  });
+
+  /**
+   * The chart with no session, of `symbol` on `timeframe`, once its candles are drawn; `renders` counts
+   * the chart's renders. Its frames come when `frame` lets one go by.
+   */
+  async function browse(symbol: string, timeframe: Timeframe, frame: () => void) {
+    const store = await import('../state/tradingStore');
+    const { ChartView } = await import('./ChartView');
+    const { useSettings } = await import('../state/settingsStore');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    store.setActiveSymbol(symbol);
+    store.setTimeframe(timeframe);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const counted = { renders: 0 };
+    await act(async () => root.render(createElement(Profiler, { id: 'chart', onRender: () => void counted.renders++ }, createElement(ChartView, { symbol, timeframe }))));
+    const chart = lw.charts.at(-1)!;
+    await vi.waitFor(() => expect(chart.series[0].points.length).toBeGreaterThan(0), { timeout: 20_000 });
+    frame();
+    const container = host.querySelector<HTMLElement>('.chart-canvas')!;
+    // jsdom lays nothing out: the chart's element is given the height of the chart.
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    return { host, root, chart, container, counted };
+  }
+
+  /** A pointer event at x (from the chart's left edge) over the chart's canvas. */
+  const pointer = (chart: InstanceType<typeof lw.Chart>, type: string, x: number, pointerType = 'mouse') =>
+    act(() => void chart.canvas.dispatchEvent(new PointerEvent(type, { pointerId: pointerType === 'mouse' ? 1 : 2, pointerType, isPrimary: true, button: 0, clientX: x, clientY: 120, bubbles: true })));
+  /** A still click (or tap) at x. */
+  const click = (chart: InstanceType<typeof lw.Chart>, x: number, pointerType = 'mouse') => {
+    pointer(chart, 'pointerdown', x, pointerType);
+    pointer(chart, 'pointerup', x, pointerType);
+  };
+  /** Where the line and the shade are drawn: their left edges, and where the shade ends. */
+  const cutAt = (host: HTMLElement) => {
+    const line = host.querySelector<HTMLElement>('.bar-cut-line')!;
+    const shade = host.querySelector<HTMLElement>('.bar-cut-shade')!;
+    return { line: line.style.display === 'none' ? null : parseFloat(line.style.left), shade: parseFloat(shade.style.left), shadeEnd: parseFloat(shade.style.left) + parseFloat(shade.style.width), refused: line.classList.contains('refused') };
+  };
+  const hint = (host: HTMLElement) => host.querySelector('.bar-cut-hint')?.textContent ?? null;
+
+  it('shows the chosen symbol with no session, up to the end of its data, named with its data source', async () => {
+    const store = await import('../state/tradingStore');
+    const { demoProvider } = await import('../state/dataRegistry');
+    const { toChartTime } = await import('./ChartView');
+    const frame = controlFrames();
+    const a = await browse('QQQ', '15m', frame);
+    expect(store.useTrading.getState().session).toBeNull();
+    const main = a.chart.series[0];
+    // The last 15-minute candle of the last day of the data, after hours, and the history before it.
+    expect(main.points.at(-1)!.time).toBe(toChartTime(exchangeTimeToUnix(demoProvider.lastDate, 19 * 60 + 45)));
+    expect(exchangeDate(main.points[0].time)).not.toBe(demoProvider.lastDate);
+    expect(lw.watermarks.at(-1)!.lines.map((l) => l.text)).toEqual(['QQQ · 15m', expect.stringMatching(/demo/i)]);
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it('follows the pointer from candle to candle without redrawing the chart, and starts the replay at the bar clicked, keeping the zoom with room after it', async () => {
+    const store = await import('../state/tradingStore');
+    const frame = controlFrames();
+    const a = await browse('SPY', '1m', frame);
+    const main = a.chart.series[0];
+    const ts = a.chart.ts;
+    const n = main.points.length;
+    // Zoomed out to 200 candles, on the newest.
+    act(() => ts.scrollTo({ from: n + 7 - 200, to: n + 7 }));
+    frame();
+    act(() => store.setSelectingBar(true));
+    expect(a.host.querySelector('.chart-wrap.cutting')).not.toBeNull();
+    expect(hint(a.host)).toBe('Click a bar to start the replay there · Esc to cancel');
+
+    const k = n - 61;
+    const x = ts.logicalToCoordinate(k)!;
+    const spacing = ts.logicalToCoordinate(1)! - ts.logicalToCoordinate(0)!;
+    const renders = a.counted.renders;
+    let published = 0;
+    const off = store.useTrading.subscribe(() => void published++);
+    // Anywhere over a candle puts the line on its middle and shades everything after it.
+    pointer(a.chart, 'pointermove', x + spacing * 0.4);
+    frame();
+    expect(cutAt(a.host)).toEqual({ line: expect.closeTo(x, 6), shade: expect.closeTo(x + spacing / 2, 6), shadeEnd: expect.closeTo(ts.width(), 6), refused: false });
+    pointer(a.chart, 'pointermove', x - spacing * 3.2);
+    frame();
+    expect(cutAt(a.host).line).toBeCloseTo(x - spacing * 3, 6);
+    pointer(a.chart, 'pointermove', x);
+    frame();
+    expect(a.counted.renders).toBe(renders);
+    expect(published).toBe(0);
+    off();
+
+    const cut = main.points[k].time;
+    click(a.chart, x);
+    await vi.waitFor(() => expect(store.useTrading.getState().session).not.toBeNull(), { timeout: 20_000 });
+    frame();
+    // The bar clicked is the newest the replay shows, a fifth of the view from the right edge: the zoom is kept.
+    expect(main.points.at(-1)!.time).toBe(cut);
+    expect(ts.span).toBe(200);
+    expect(ts.rightOffset).toBe(40);
+    expect(store.useTrading.getState().selectingBar).toBe(false);
+    expect(a.host.querySelector('.chart-wrap.cutting, .bar-cut-line')).toBeNull();
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it('will not start at the newest bar, and says why; Escape stops picking', async () => {
+    const store = await import('../state/tradingStore');
+    const frame = controlFrames();
+    const a = await browse('SPY', '1m', frame);
+    const ts = a.chart.ts;
+    const n = a.chart.series[0].points.length;
+    act(() => store.setSelectingBar(true));
+    pointer(a.chart, 'pointermove', ts.logicalToCoordinate(n - 1)!);
+    frame();
+    expect(cutAt(a.host).refused).toBe(true);
+    expect(hint(a.host)).toBe('This is the newest bar: nothing follows it yet. Pick an earlier one.');
+    click(a.chart, ts.logicalToCoordinate(n - 1)!);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+    expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false, selectingBar: true });
+    // One before it is fine.
+    pointer(a.chart, 'pointermove', ts.logicalToCoordinate(n - 2)!);
+    frame();
+    expect(cutAt(a.host).refused).toBe(false);
+    expect(hint(a.host)).toBe('Click a bar to start the replay there · Esc to cancel');
+
+    act(() => void window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    expect(store.useTrading.getState().selectingBar).toBe(false);
+    expect(a.host.querySelector('.bar-cut-hint')).toBeNull();
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it('on a touch screen, puts the line on the bar tapped and starts there on a second tap on it', async () => {
+    const store = await import('../state/tradingStore');
+    const frame = controlFrames();
+    const a = await browse('SPY', '5m', frame);
+    const main = a.chart.series[0];
+    const ts = a.chart.ts;
+    const n = main.points.length;
+    act(() => store.setSelectingBar(true));
+    const first = ts.logicalToCoordinate(n - 30)!;
+    const other = ts.logicalToCoordinate(n - 20)!;
+    click(a.chart, first, 'touch');
+    expect(cutAt(a.host).line).toBeCloseTo(first, 6);
+    expect(hint(a.host)).toBe('Tap this bar again to start the replay there · Esc to cancel');
+    // A tap on another bar moves the line there; a second tap on that one starts.
+    click(a.chart, other, 'touch');
+    expect(cutAt(a.host).line).toBeCloseTo(other, 6);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+    expect(store.useTrading.getState().session).toBeNull();
+    const cut = main.points[n - 20].time;
+    click(a.chart, other, 'touch');
+    await vi.waitFor(() => expect(store.useTrading.getState().session).not.toBeNull(), { timeout: 20_000 });
+    frame();
+    expect(main.points.at(-1)!.time).toBe(cut);
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it('leaves the drawings alone while a bar is picked: no drawing is placed, selected or moved', async () => {
+    const store = await import('../state/tradingStore');
+    const { useDrawings } = await import('./drawings');
+    const frame = controlFrames();
+    const a = await browse('SPY', '1m', frame);
+    const ts = a.chart.ts;
+    const n = a.chart.series[0].points.length;
+    act(() => useDrawings.getState().clear());
+    act(() => useDrawings.getState().setTool('hline'));
+    act(() => store.setSelectingBar(true));
+    const svg = a.host.querySelector('svg.drawing-layer')!;
+    act(() => void svg.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: ts.logicalToCoordinate(n - 10)!, clientY: 120, bubbles: true })));
+    expect(useDrawings.getState().drawings).toEqual([]);
+    expect(useDrawings.getState().tool).toBe('hline');
+    act(() => store.setSelectingBar(false));
+    // Not picking a bar, the same press places the line.
+    act(() => void svg.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: ts.logicalToCoordinate(n - 10)!, clientY: 120, bubbles: true })));
+    expect(useDrawings.getState().drawings).toHaveLength(1);
+    act(() => useDrawings.getState().select(null));
+
+    // A click on the line (the stand-in chart draws every price at y 100) neither selects it nor starts
+    // moving it. Clicked on the newest bar, which starts no replay.
+    act(() => store.setSelectingBar(true));
+    const newest = ts.logicalToCoordinate(n - 1)!;
+    const hit = a.host.querySelector('svg.drawing-layer .hit')!;
+    act(() => void hit.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: newest, clientY: 100, bubbles: true })));
+    expect(useDrawings.getState().selectedId).toBeNull();
+    act(() => void a.chart.canvas.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: newest, clientY: 100, bubbles: true })));
+    act(() => void a.chart.canvas.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: newest, clientY: 100, bubbles: true })));
+    expect(useDrawings.getState().selectedId).toBeNull();
+    expect(store.useTrading.getState().session).toBeNull();
+    // Not picking a bar, the same click selects it.
+    act(() => store.setSelectingBar(false));
+    act(() => void a.chart.canvas.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: newest, clientY: 100, bubbles: true })));
+    act(() => void a.chart.canvas.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: newest, clientY: 100, bubbles: true })));
+    expect(useDrawings.getState().selectedId).toBe(useDrawings.getState().drawings[0].id);
+    act(() => useDrawings.getState().clear());
+    act(() => a.root.unmount());
+  }, 30_000);
 });

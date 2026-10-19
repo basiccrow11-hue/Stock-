@@ -3,10 +3,13 @@ import {
   REPLAY_SPEEDS,
   SIM_SPEEDS,
   blindDayLabel,
+  endSession,
   jumpTo,
   pause,
   play,
   restart,
+  selectBarBlocked,
+  sessionEndNotice,
   setSpeed,
   stepBack,
   stepCandle,
@@ -20,6 +23,7 @@ import { exchangeDate, exchangeTimeToUnix, formatExchangeTime, parseHHMM } from 
 import { price, speedLabel } from '../services/format';
 import { modalOpen, useFocusRescue } from './common';
 import { usePopover } from './usePopover';
+import { ScissorsIcon, toggleSelectBar } from './ReplayMenu';
 
 /** Warns before a rewind to `target` (or Restart) and says what it undoes; false when cancelled. */
 function confirmRewind(target: number | null, restart = false): boolean {
@@ -37,6 +41,12 @@ function confirmRewind(target: number | null, restart = false): boolean {
 /** Step back one bar, after the same warning as any rewind. */
 function confirmStepBack(): void {
   if (confirmRewind(stepBackTarget())) stepBack();
+}
+
+/** Ends the session (Exit), after saying what that does to open positions; the chart goes back to browsing. */
+function confirmExit(): void {
+  const notice = sessionEndNotice('exit');
+  if (!notice || window.confirm(notice)) void endSession();
 }
 
 /**
@@ -120,6 +130,35 @@ function JumpMenu() {
   );
 }
 
+/**
+ * The replay's less used controls, kept out of the row so it stays as simple as TradingView's: Restart,
+ * Step back one bar and Step forward one bar (one bar of the data, finer than the chart's candles). Its
+ * panel stays open while they are used, so a few steps take a click each; the keys do them too.
+ */
+function MoreControls({ now, start, finished, ordered }: { now: number; start: number; finished: boolean; ordered: boolean }) {
+  const { open, toggle, boxRef, triggerRef, popRef } = usePopover();
+  return (
+    <div ref={boxRef} style={{ position: 'relative' }}>
+      <button ref={triggerRef} className={`btn icon${open ? ' active' : ''}`} onClick={toggle} aria-expanded={open} aria-label="More replay controls" title="Restart, step back, step one bar">
+        <span aria-hidden="true">⋯</span>
+      </button>
+      {open && (
+        <div ref={popRef} className="card popover more-pop" role="dialog" aria-label="More replay controls">
+          <button className="btn sm" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(start, true) && restart()} disabled={now <= start && !ordered}>
+            <span aria-hidden="true">⏮</span> Restart
+          </button>
+          <button className="btn sm" data-home="back" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= start}>
+            <span aria-hidden="true">◀</span> Step back one bar <kbd>←</kbd>
+          </button>
+          <button className="btn sm" title="Step forward one bar of the data (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
+            <span aria-hidden="true">▶|</span> Step forward one bar <kbd>→</kbd>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ReplayControls({ active = true }: { active?: boolean }) {
   const session = useTrading((s) => s.session);
   const playing = useTrading((s) => s.playing);
@@ -131,6 +170,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const timeframe = useTrading((s) => s.timeframe);
   // Restart also clears orders placed at the start, so it stays available there once there are any.
   const ordered = useTrading((s) => s.orders.length > 0);
+  const selecting = useTrading((s) => s.selectingBar);
   // Set when Space was used for play/pause, so its keyup cannot press the focused button either
   // (some browsers press buttons on keyup). A ref, so it survives the listeners being re-registered.
   const spaceTaken = useRef(false);
@@ -143,6 +183,8 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       bar.querySelector<HTMLElement>('[data-home="back"]:not(:disabled)') ??
       bar.querySelector<HTMLElement>('select'),
   );
+  // Read when rendering: what the session is, and the browsing chart's bars, decide it.
+  const selectBlocked = selectBarBlocked();
 
   useEffect(() => {
     if (!active) return;
@@ -182,20 +224,21 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
     <div className="replay-bar" ref={barRef}>
       {isReplay ? (
         <>
-          <button className="btn icon" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(session.start, true) && restart()} disabled={now <= session.start && !ordered}>
-            <span aria-hidden="true">⏮</span>
-          </button>
-          <button className="btn icon" data-home="back" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= session.start}>
-            <span aria-hidden="true">◀</span>
+          {/* Picks a bar to start a fresh replay from, ending this one as any new start does. */}
+          <button
+            className={`btn sm${selecting ? ' active' : ''}`}
+            aria-pressed={selecting}
+            aria-disabled={!!selectBlocked || undefined}
+            title={selectBlocked ?? (selecting ? 'Stop picking a bar (Esc)' : 'Select bar: click a bar on the chart to start a new replay there')}
+            onClick={toggleSelectBar}
+          >
+            <ScissorsIcon /> Select bar
           </button>
           <button className={`btn ${playing ? '' : 'primary'}`} data-home="play" style={{ minWidth: 76 }} onClick={() => (playing ? pause() : play())} disabled={finished}>
             <span aria-hidden="true">{playing ? '❚❚' : '▶'}</span> {playing ? 'Pause' : 'Play'}
           </button>
-          <button className="btn icon" title="Step forward one bar (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
-            <span aria-hidden="true">▶|</span>
-          </button>
-          <button className="btn sm" title={`Step one ${timeframe} candle (Shift+→)`} onClick={stepCandle} disabled={finished}>
-            +1 {timeframe}
+          <button className="btn icon" title={`Forward one ${timeframe} candle (Shift+→)`} aria-label={`Forward one ${timeframe} candle`} onClick={stepCandle} disabled={finished}>
+            <span aria-hidden="true">⏭</span>
           </button>
         </>
       ) : (
@@ -221,16 +264,20 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
       )}
       {rewinds > 0 && <span className="badge warn" title="You rewound this session; results are not blind.">REWOUND ×{rewinds}</span>}
       {finished && <span className="badge neutral">END OF REPLAY</span>}
+      <div className="spacer" />
       {isReplay && (
         <>
-          <div className="spacer" />
           <JumpMenu />
+          <MoreControls now={now} start={session.start} finished={finished} ordered={ordered} />
           {/* A line along the bar's top edge, so it takes no room in the row. */}
           <div className="progress" title={`${(progress * 100).toFixed(0)}% of the session window`}>
             <div style={{ width: `${progress * 100}%` }} />
           </div>
         </>
       )}
+      <button className="btn icon" onClick={confirmExit} aria-label={isReplay ? 'Exit replay' : 'Exit the simulated market'} title={isReplay ? 'Exit replay: end it and go back to the chart' : 'Exit the simulated market: end it and go back to the chart'}>
+        <span aria-hidden="true">✕</span>
+      </button>
     </div>
   );
 }

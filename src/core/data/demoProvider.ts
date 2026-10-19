@@ -17,10 +17,10 @@ import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
   REGULAR_OPEN,
-  addDays,
   exchangeDate,
   exchangeTimeToUnix,
   isTradingDay,
+  lastCompletedTradingDay,
   nextTradingDay,
   regularCloseMinute,
 } from '../time';
@@ -144,17 +144,6 @@ class MarketFactor {
     this.build();
     return this.ordered;
   }
-}
-
-function lastCompletedTradingDay(now: Date): string {
-  // A day is complete once its after-hours session has ended.
-  const nowSec = Math.floor(now.getTime() / 1000);
-  let d = exchangeDate(nowSec);
-  if (!isTradingDay(d) || nowSec < exchangeTimeToUnix(d, AFTERHOURS_CLOSE)) {
-    d = addDays(d, -1);
-  }
-  while (!isTradingDay(d)) d = addDays(d, -1);
-  return d;
 }
 
 export class DemoDataProvider implements HistoricalDataProvider {
