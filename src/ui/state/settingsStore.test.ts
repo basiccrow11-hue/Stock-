@@ -142,3 +142,32 @@ describe('a damaged or hand-edited save', () => {
     ]);
   });
 });
+
+describe('the watchlist', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.resetModules();
+  });
+
+  it('adds a symbol once, in capitals, at the end, takes it off, and toggles it (the search’s star)', async () => {
+    const { useSettings, addToWatchlist, removeFromWatchlist, toggleWatchlist, onWatchlist } = await import('./settingsStore');
+    useSettings.getState().update({ watchlist: ['SPY', 'QQQ'] });
+    addToWatchlist(' pltr ');
+    addToWatchlist('PLTR');
+    expect(useSettings.getState().watchlist).toEqual(['SPY', 'QQQ', 'PLTR']);
+    expect(onWatchlist('pltr')).toBe(true);
+    removeFromWatchlist('qqq');
+    expect(useSettings.getState().watchlist).toEqual(['SPY', 'PLTR']);
+    toggleWatchlist('SPY');
+    toggleWatchlist('AMD');
+    expect(useSettings.getState().watchlist).toEqual(['PLTR', 'AMD']);
+    // Saved like any setting, so a reload (or another tab) has it.
+    expect(JSON.parse(localStorage.getItem(KEY)!).state.watchlist).toEqual(['PLTR', 'AMD']);
+  });
+
+  it('reads the list typed in Data & Settings: split at commas or spaces, in capitals, each once', async () => {
+    const { parseWatchlist } = await import('./settingsStore');
+    expect(parseWatchlist(' spy, qqq  aapl,,SPY\nbrk.b ')).toEqual(['SPY', 'QQQ', 'AAPL', 'BRK.B']);
+    expect(parseWatchlist(' , ')).toEqual([]);
+  });
+});

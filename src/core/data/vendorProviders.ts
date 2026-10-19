@@ -67,11 +67,23 @@ function parseJson<T>(body: string, vendor: string, contentType: string | null):
   }
 }
 
+/**
+ * `text` as a ticker the vendors (and this app's proxy) take, in capitals, or null when it cannot be
+ * one: letters and digits, with '.' or '-' only between them (BRK.B, BF-B), at most 10 characters.
+ * Whether the vendor lists it is only known once its bars are asked for.
+ */
+export function cleanTicker(text: string): string | null {
+  const t = text.trim().toUpperCase();
+  return t.length <= 10 && /^[A-Z0-9]+(?:[.-][A-Z0-9]+)*$/.test(t) ? t : null;
+}
+
 function httpError(status: number, body: string, vendor: string, contentType: string | null = null): DataProviderError {
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
   if (status === 404 && !/json/i.test(contentType ?? '')) return noProxy(vendor);
   if (status === 404) return new DataProviderError(`${vendor}: symbol or data not found.`, 'not_found');
+  // A ticker the vendor does not take (Alpaca answers "invalid symbol: XYZ"): an unknown ticker, not a failed request.
+  if ((status === 400 || status === 422) && /\b(?:invalid|unknown) (?:symbol|ticker)\b/i.test(body)) return new DataProviderError(`${vendor} does not know this ticker.`, 'not_found');
   if (status === 502 || status === 503 || status === 504)
     return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}): ${PROXY_HINT}`, 'network');
   const detail = body.trim().slice(0, 200);

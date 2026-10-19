@@ -14,3 +14,10 @@ export function takeFocusRequest(key: string): boolean {
   requests.delete(key);
   return at !== undefined && Date.now() - at < 60_000;
 }
+
+/**
+ * Cards of Data & Settings that other screens open the page at (the symbol search's "Import a CSV
+ * file" and "Add a Polygon or Alpaca API key"): the card asked for scrolls into view and takes focus
+ * when it mounts, through requestFocus with its name.
+ */
+export type SettingsCard = 'csv-import' | 'api-keys';

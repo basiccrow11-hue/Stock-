@@ -10,7 +10,7 @@ import { Toasts } from "./components/common";
 import { StreakCelebration, StreakModal } from "./components/Streak";
 import { requestAppearanceFocus } from "./components/Appearance";
 import { ErrorBoundary, retryableLazy } from "./components/ErrorBoundary";
-import { requestFocus } from "./services/focusRequest";
+import { requestFocus, type SettingsCard } from "./services/focusRequest";
 // Secondary pages load on first visit to keep the trading screen's initial bundle small. A download
 // that fails (a dropped connection, or a new version of the app replaced the files) can be tried again.
 const BacktestPage = retryableLazy(() => import("./pages/BacktestPage"), "BacktestPage");
@@ -54,6 +54,12 @@ export function App() {
     requestAppearanceFocus();
     setView("settings");
   };
+  // The symbol search's "Import a CSV file" and "Add a Polygon or Alpaca API key": open settings at
+  // that card, which takes focus when it mounts, the same way.
+  const openSettingsAt = (card: SettingsCard) => {
+    requestFocus(card);
+    setView("settings");
+  };
 
   // Practice time for the daily streak: every screen except settings counts.
   useEffect(
@@ -91,6 +97,7 @@ export function App() {
             <ChartPanel
               onNewSession={(mode) => setSetup({ mode })}
               onOpenSettings={openAppearance}
+              onOpenSettingsAt={openSettingsAt}
               active={view === "trade"}
             />
           </ErrorBoundary>

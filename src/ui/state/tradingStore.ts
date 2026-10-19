@@ -12,7 +12,7 @@ import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type E
 import { DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { barEnds } from '../../core/replay/ReplayEngine';
 import { HOURS_DAYS, candleSpeed, cutTime, hhmm, playOnEndDate, randomDay, sessionEndMinute } from '../../core/replay/barReplay';
-import type { HistoricalDataProvider } from '../../core/data/provider';
+import { DataProviderError, type HistoricalDataProvider } from '../../core/data/provider';
 import { DEMO_FIRST_DATE } from '../../core/data/demoProvider';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
 import { SimulationDataProvider } from '../../core/data/simulationProvider';
@@ -359,6 +359,22 @@ async function notListed(provider: HistoricalDataProvider, symbol: string): Prom
   return `${provider === csvProvider ? 'Your imported data' : 'The demo data'} has no ${symbol}. Choose one of: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ', …' : ''}.`;
 }
 
+/** Short names of the data sources that take any ticker typed in (rather than listing theirs), for messages. */
+const VENDOR_NAMES: Record<string, string> = { polygon: 'Polygon', alpaca: 'Alpaca' };
+
+/**
+ * Why `symbol`'s bars from `provider` could not be loaded, as the user should read it. A vendor that has
+ * no bars at all for it (or says it does not know it) was most likely given an unknown or mistyped ticker,
+ * so that is said plainly instead of in the vendor's words; its other errors (a rejected key, the rate
+ * limit, no connection) read as they are. `date`: the day a replay was to start on.
+ */
+function loadFailure(provider: HistoricalDataProvider, symbol: string, e: unknown, date?: string): string {
+  const vendor = VENDOR_NAMES[provider.id];
+  if (vendor && e instanceof DataProviderError && e.kind === 'not_found')
+    return date ? `${vendor} has no bars for ${symbol} around ${date}. Check the ticker, or pick another date.` : `${vendor} has no bars for ${symbol}. Check the ticker.`;
+  return (e as Error).message;
+}
+
 /** Loads the browsing chart's bars for `t`; a newer load, or a session starting, discards it. */
 async function loadBrowse(t: ReturnType<typeof browseTarget>): Promise<void> {
   browseEng.loading?.abort.abort();
@@ -385,7 +401,7 @@ async function loadBrowse(t: ReturnType<typeof browseTarget>): Promise<void> {
     browseEng.failed = t.key;
     browseEng.preview = null;
     browseEng.key = null;
-    setBrowse({ loading: false, error: (e as Error).message, source: null });
+    setBrowse({ loading: false, error: loadFailure(t.provider, t.symbol, e), source: null });
   }
   if (browsing()) emitChart({ type: 'reset' });
 }
@@ -411,6 +427,24 @@ function rememberChart(patch: { providerId?: string; symbol?: string; timeframe?
   const r = getSettings().replay;
   const changed = Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && v !== r[k as keyof typeof patch]));
   if (Object.keys(changed).length) useSettings.getState().updateReplay(changed);
+}
+
+/**
+ * With no session: charts `symbol` (in capitals) from the data source `providerId` (a HISTORICAL_PROVIDERS
+ * id), both in one change, so no load starts for the one without the other (on Polygon or Alpaca every
+ * load spends the visitor's rate limit). Kept for the next visit and the next replay set up. During a
+ * session it does nothing: the session's own symbols are switched with setActiveSymbol.
+ */
+export function browseSymbol(providerId: string, symbol: string): void {
+  const s = useTrading.getState();
+  const next = symbol.trim().toUpperCase();
+  const id = getProvider(providerId).id;
+  if (s.session || !next) return;
+  // Chosen again after it could not be shown: it is tried again.
+  if (s.activeSymbol === next && s.browse.providerId === id) return retryBrowse();
+  useTrading.setState({ activeSymbol: next, selectingBar: false, browse: { ...s.browse, providerId: id, error: null } });
+  rememberChart({ providerId: id, symbol: next });
+  emitChart({ type: 'reset' });
 }
 
 /** The data source of the chart shown with no session (a HISTORICAL_PROVIDERS id); its symbol is set by setActiveSymbol. */
@@ -1267,7 +1301,9 @@ export async function startReplay(options: ReplaySetup & { providerId: string; t
     loaded = await ReplaySession.load(provider, setup, getSettings().execution, id);
   } catch (e) {
     if ((e as Error).name === 'AbortError' || seq !== loadSeq) return false;
-    useTrading.setState({ loading: false, error: (e as Error).message });
+    // A blind replay's date stays hidden, also when it could not be loaded (a random date was picked for it).
+    const message = loadFailure(provider, setup.symbol.toUpperCase(), e, setup.date);
+    useTrading.setState({ loading: false, error: setup.blind ? withoutDates(message) : message });
     return false;
   }
   if (seq !== loadSeq) return false;

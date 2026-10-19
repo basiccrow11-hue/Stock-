@@ -15,7 +15,7 @@
  * there to the target again. Whatever is left on the chart is exactly what the account has seen.
  */
 import { TIMEFRAMES, type Bar, type OrderRequest, type Timeframe, type UnixSeconds } from '../types';
-import type { BarRequest, HistoricalDataProvider } from '../data/provider';
+import { DataProviderError, type BarRequest, type HistoricalDataProvider } from '../data/provider';
 import { aggregateBars } from '../data/aggregate';
 import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from '../broker/config';
 import { SimBroker, type BrokerCheckpoint, type BrokerState, type SubmitResult } from '../broker/SimBroker';
@@ -296,7 +296,8 @@ export class ReplaySession {
         let from = w.date;
         for (let i = 0; i < baseDays; i++) from = prevTradingDay(from);
         const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: w.to }, signal);
-        if (bars.length === 0) throw new Error(`No ${sym} data for ${w.date}. Pick another date or data source.`);
+        // No bars at all over the days asked for: a ticker the source does not have, or a date it has none for.
+        if (bars.length === 0) throw new DataProviderError(`No ${sym} data for ${w.date}. Pick another date or data source.`, 'not_found');
         engines.push(new ReplayEngine({ symbol: sym, start: w.start, end: w.end, baseTimeframe: base, preview: w.preview }, bars));
         const baseStart = exchangeDate(bars.reduce((t, b) => Math.min(t, b.time), Infinity));
         // Data that begins after the first day asked for has nothing earlier to load either.

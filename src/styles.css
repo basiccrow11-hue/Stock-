@@ -651,3 +651,56 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .browse-notes > * { box-shadow: none; margin: 8px 8px 0; }
   .browse-notes > .browse-tip { align-self: flex-start; }
 }
+
+/* Symbol search */
+/* The toolbar's ticker opens the search: flat, like the text it replaces, until hovered. */
+.chart-toolbar .sym-btn { display: inline-flex; align-items: center; gap: 5px; margin-right: 2px; padding-left: 5px; background: transparent; border-color: transparent; }
+.chart-toolbar .sym-btn svg { color: var(--muted); flex: none; }
+.chart-toolbar .sym-btn strong { font-size: 13px; }
+.modal:has(.sym-search) { width: min(520px, 100%); }
+.sym-search { display: flex; flex-direction: column; gap: 10px; }
+.sym-sources { display: flex; width: 100%; }
+.sym-sources button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 5px 4px; }
+.sym-sources .src-name { font-weight: 600; font-size: 12px; }
+.sym-sources .src-state { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.sym-sources button.on .src-state { color: inherit; }
+/* A dot beside the words: green when ready (the words say it too). */
+.sym-sources .src-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--muted); }
+.sym-sources .src-state.ready::before { background: var(--success); border-color: var(--success); }
+.sym-search .sym-query { width: 100%; font-size: 15px; padding: 8px 10px; }
+.sym-note { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); font-size: 13px; }
+.sym-results { list-style: none; margin: 0; padding: 0; max-height: min(48vh, 400px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.sym-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--row-line); }
+.sym-row:last-child { border-bottom: 0; }
+.sym-pick { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; border: 0; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.sym-pick .sym { font-weight: 600; flex: none; min-width: 56px; }
+.sym-pick .nm { min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sym-pick:hover { background: var(--hover); }
+.sym-pick:focus-visible { background: var(--hover); outline: 2px solid var(--accent); outline-offset: -2px; }
+.sym-pick.on { box-shadow: inset 2px 0 0 var(--accent); }
+/* While the box has focus, the row Enter picks. */
+.sym-search:has(.sym-query:focus) .sym-row.next { background: var(--row-selected); }
+.sym-star { flex: none; width: 40px; border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+.sym-star:hover { color: var(--text); background: var(--hover); }
+.sym-star.on { color: var(--warn); }
+.sym-star:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sym-keys { margin: 0; }
+@media (pointer: coarse) {
+  .sym-keys { display: none; }
+  .sym-pick { padding-top: 11px; padding-bottom: 11px; }
+}
+/* The watchlist with no session: + in its head, and × at the end of each row, shown under the pointer
+   or with keyboard focus (always where nothing hovers, a touch screen). Its place is kept either way,
+   so neither the prices nor the rows move. */
+.watch-add { font-size: 16px; line-height: 1; min-width: 26px; }
+.watch-item { display: flex; align-items: center; border-bottom: 1px solid var(--row-line); }
+.watch-item:hover { background: var(--panel-2); }
+.watch-item.on { background: var(--row-selected); box-shadow: inset 2px 0 0 var(--accent); }
+.watch-item .watch-row { flex: 1; min-width: 0; padding-right: 2px; border-bottom: 0; background: none; box-shadow: none; }
+.watch-x { flex: none; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin-right: 5px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; opacity: 0; }
+.watch-item:hover .watch-x, .watch-x:focus-visible { opacity: 1; }
+.watch-x:hover { color: var(--text); border-color: var(--border-2); background: var(--hover); }
+.watch-x:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+@media (hover: none) {
+  .watch-x { width: 32px; height: 32px; opacity: 1; }
+}

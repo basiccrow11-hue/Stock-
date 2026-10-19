@@ -10,6 +10,8 @@ import { ReplayControls } from './ReplayControls';
 import { ReplayMenu } from './ReplayMenu';
 import { EmptyState, useFocusRescue } from './common';
 import { UnfinishedSessions } from './UnfinishedSessions';
+import { SearchIcon, SymbolSearchHost, openSymbolSearch, useTypeToSearch } from './SymbolSearch';
+import type { SettingsCard } from '../services/focusRequest';
 
 const TOOL_ICONS: Record<DrawingTool, string> = { select: '↖', trend: '╱', hline: '─', vline: '│', rect: '▭', sr: '▤', fib: 'ƒ' };
 
@@ -32,7 +34,21 @@ function dismissTip(): void {
   }
 }
 
-export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { onNewSession: (mode: 'replay' | 'sim') => void; onOpenSettings?: () => void; active?: boolean }) {
+/**
+ * The chart with its toolbar and replay controls. `onOpenSettings` opens Data & Settings at Appearance
+ * (Chart style), `onOpenSettingsAt` at another card (the symbol search's ways to bring in real bars).
+ */
+export function ChartPanel({
+  onNewSession,
+  onOpenSettings,
+  onOpenSettingsAt,
+  active = true,
+}: {
+  onNewSession: (mode: 'replay' | 'sim') => void;
+  onOpenSettings?: () => void;
+  onOpenSettingsAt?: (card: SettingsCard) => void;
+  active?: boolean;
+}) {
   const session = useTrading((s) => s.session);
   const symbol = useTrading((s) => s.activeSymbol);
   const timeframe = useTrading((s) => s.timeframe);
@@ -48,12 +64,28 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
   useEffect(() => {
     if (!active) setSelectingBar(false);
   }, [active]);
+  useTypeToSearch(active);
 
   return (
     <section className="panel area-chart">
       {/* One row on a laptop: the drawing tools have their own column along the chart's left edge. */}
       <div className="chart-toolbar">
-        <strong style={{ marginRight: 4 }}>{symbol}</strong>
+        {/* The ticker opens the symbol search (so does typing a letter on the chart). */}
+        <button
+          type="button"
+          className="btn sm sym-btn"
+          aria-haspopup="dialog"
+          aria-label={`${symbol}: search symbols`}
+          title="Symbol search: chart another ticker (or type its first letter on the chart)"
+          onClick={(e) => {
+            // Focused even where a click does not focus a button (Safari), so the search hands focus back to it.
+            e.currentTarget.focus();
+            openSymbolSearch();
+          }}
+        >
+          <SearchIcon />
+          <strong>{symbol}</strong>
+        </button>
         <div className="seg" role="group" aria-label="Timeframe">
           {TIMEFRAMES.map((tf) => (
             <button key={tf} className={tf === timeframe ? 'on' : ''} aria-pressed={tf === timeframe} onClick={() => setTimeframe(tf)} disabled={isSim && tf === '1D'} title={isSim && tf === '1D' ? 'The simulated market has only a few sessions of history' : undefined}>
@@ -104,6 +136,7 @@ export function ChartPanel({ onNewSession, onOpenSettings, active = true }: { on
         )}
       </div>
       <ReplayControls active={active} />
+      <SymbolSearchHost onOpenSettingsAt={onOpenSettingsAt} />
     </section>
   );
 }
@@ -179,6 +212,13 @@ function BrowseNotes({ selecting }: { selecting: boolean }) {
             <div className="row wrap">
               <button className="btn sm" onClick={retryBrowse}>
                 Try again
+              </button>
+              {/* A mistyped ticker is the usual reason. */}
+              <button className="btn sm" onClick={(e) => {
+                e.currentTarget.focus();
+                openSymbolSearch();
+              }}>
+                Search symbols
               </button>
               {provider.id !== 'demo' && (
                 <button className="btn sm" onClick={() => setBrowseSource('demo')}>

@@ -1,6 +1,6 @@
 /** Data sources, CSV import, API keys, execution assumptions, risk and trading rules, backup and restore. */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useSettings } from '../state/settingsStore';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { parseWatchlist, useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import { csvProvider, deleteCsvDataset, onCsvDatasetsChanged, saveCsvDataset } from '../state/dataRegistry';
 import { combineBars, parseCsv, tickerFromFileName, type CsvParseResult } from '../../core/data/csv';
@@ -12,6 +12,28 @@ import { dateTime } from '../services/format';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
 import { AppearanceCard } from '../components/Appearance';
 import { BackupCard } from '../components/BackupCard';
+import { takeFocusRequest, type SettingsCard } from '../services/focusRequest';
+
+/**
+ * A ref for `card`'s root that scrolls it into view and focuses it as it mounts, when another screen
+ * opened the page at it (the symbol search: see SettingsCard), and passes the root on to `inner` (a
+ * useFocusRescue ref). The page loads lazily, so this runs whenever it arrives.
+ */
+function useCardFocus(card: SettingsCard, inner: (root: HTMLDivElement | null) => (() => void) | undefined) {
+  const root = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!takeFocusRequest(card)) return;
+    root.current?.scrollIntoView({ block: 'start' });
+    root.current?.focus({ preventScroll: true });
+  }, [card]);
+  return useCallback(
+    (el: HTMLDivElement | null) => {
+      root.current = el;
+      return inner(el);
+    },
+    [inner],
+  );
+}
 
 /** NumberField handler for a setting that always has a number: an emptied box changes nothing. */
 function num(set: (v: number) => void) {
@@ -97,7 +119,7 @@ function CsvImportCard() {
     : '';
   const combined = useMemo(() => (canAdd && !replace ? combineBars(existing!.bars, parsed!.bars) : null), [canAdd, replace, existing, parsed]);
   // A deleted dataset takes its Delete button with it: focus goes to another dataset's, else the file box.
-  const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('tbody button') ?? card.querySelector<HTMLElement>('input[type=file]'));
+  const cardRef = useCardFocus('csv-import', useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('tbody button') ?? card.querySelector<HTMLElement>('input[type=file]')));
 
   useEffect(() => {
     if (!file) return;
@@ -157,8 +179,8 @@ function CsvImportCard() {
   };
 
   return (
-    <div className="card stack" ref={cardRef}>
-      <h2>Import historical data (CSV)</h2>
+    <div className="card stack" ref={cardRef} id="csv-import" tabIndex={-1} aria-labelledby="csv-import-title">
+      <h2 id="csv-import-title">Import historical data (CSV)</h2>
       <p className="muted small">
         Bring your own real bars, for example an export from your broker, TradingView or a data vendor. Needs columns for time, open, high, low, close and (ideally) volume. Epoch, ISO and US date formats are recognised. Intraday bars give the most realistic fills; 1-minute is best. Data stays in this browser.
       </p>
@@ -299,7 +321,7 @@ function ApiKeysCard() {
   const [passphrase, setPassphrase] = useState('');
   const [stored, setStored] = useState(false);
   // Delete saved keys removes itself (and Unlock): focus goes to Forget session keys.
-  const cardRef = useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('[data-home]'));
+  const cardRef = useCardFocus('api-keys', useFocusRescue<HTMLDivElement>((card) => card.querySelector<HTMLElement>('[data-home]')));
 
   useEffect(() => {
     void hasEncrypted().then(setStored);
@@ -346,8 +368,8 @@ function ApiKeysCard() {
   const mask = (v?: string) => (v ? `••••${v.slice(-4)}` : 'not set');
 
   return (
-    <div className="card stack" ref={cardRef}>
-      <h2>Market data API keys (optional)</h2>
+    <div className="card stack" ref={cardRef} id="api-keys" tabIndex={-1} aria-labelledby="api-keys-title">
+      <h2 id="api-keys-title">Market data API keys (optional)</h2>
       <p className="muted small">
         Keys are never hard-coded and go only to the vendor, through this app&apos;s data proxy (the dev server when you run the app yourself, a server function on the hosted site), which forwards them without storing or logging them. By default they live in memory for this session only. You can save them encrypted with a passphrase. If you run the app yourself, you can instead keep them in <code>.env.local</code> so the browser never sees them (see README).
       </p>
@@ -637,7 +659,9 @@ function OwnRules({ rules, onChange }: { rules: string[]; onChange: (rules: stri
 
 function GeneralCard() {
   const s = useSettings();
-  const [watch, setWatch] = useState(s.watchlist.join(', '));
+  // The list as typed while the field is being edited; otherwise the watchlist as it is now, so a change
+  // made elsewhere (the watchlist panel's + and ×, the symbol search's stars, another tab) shows here.
+  const [watch, setWatch] = useState<string | null>(null);
   return (
     <div className="card stack">
       <h2>General</h2>
@@ -647,12 +671,11 @@ function GeneralCard() {
           <span>Watchlist (comma separated)</span>
           <input
             type="text"
-            value={watch}
+            value={watch ?? s.watchlist.join(', ')}
             onChange={(e) => setWatch(e.target.value)}
             onBlur={() => {
-              const list = [...new Set(watch.split(/[\s,]+/).map((x) => x.trim().toUpperCase()).filter(Boolean))];
-              s.update({ watchlist: list });
-              setWatch(list.join(', '));
+              if (watch !== null) s.update({ watchlist: parseWatchlist(watch) });
+              setWatch(null);
             }}
           />
         </label>
@@ -672,7 +695,6 @@ function GeneralCard() {
           onClick={() => {
             if (!window.confirm('Reset all settings, including theme and chart colours, to their defaults? Your journal, streak, imported data and keys are kept.')) return;
             s.reset();
-            setWatch(useSettings.getState().watchlist.join(', '));
           }}
         >
           Reset settings

@@ -269,3 +269,35 @@ if (typeof window !== 'undefined') {
 export function getSettings(): Settings {
   return useSettings.getState();
 }
+
+// ------------------------------------------------------------------ watchlist
+
+/** The watchlist typed as a list (Data & Settings): tickers split at commas or spaces, in capitals, each once. */
+export function parseWatchlist(text: string): string[] {
+  return [...new Set(text.split(/[\s,]+/).map((x) => x.trim().toUpperCase()).filter(Boolean))];
+}
+
+/** Whether `symbol` is on the watchlist. */
+export function onWatchlist(symbol: string): boolean {
+  return getSettings().watchlist.includes(symbol.trim().toUpperCase());
+}
+
+/** Puts `symbol` (in capitals) at the end of the watchlist, unless it is there already. */
+export function addToWatchlist(symbol: string): void {
+  const sym = symbol.trim().toUpperCase();
+  const list = getSettings().watchlist;
+  if (sym && !list.includes(sym)) useSettings.getState().update({ watchlist: [...list, sym] });
+}
+
+/** Takes `symbol` off the watchlist. */
+export function removeFromWatchlist(symbol: string): void {
+  const sym = symbol.trim().toUpperCase();
+  const list = getSettings().watchlist;
+  if (list.includes(sym)) useSettings.getState().update({ watchlist: list.filter((x) => x !== sym) });
+}
+
+/** Adds `symbol` to the watchlist, or takes it off if it is there (the star in the symbol search). */
+export function toggleWatchlist(symbol: string): void {
+  if (onWatchlist(symbol)) removeFromWatchlist(symbol);
+  else addToWatchlist(symbol);
+}

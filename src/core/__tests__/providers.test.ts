@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { combineBars, parseCsv, parseTimestamp, tickerFromFileName } from '../data/csv';
 import { CsvDataProvider } from '../data/csvProvider';
-import { AlpacaProvider, PolygonProvider } from '../data/vendorProviders';
+import { AlpacaProvider, PolygonProvider, cleanTicker } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
 import { isDriven, type DrivenStreamingProvider, type StreamUpdate } from '../data/provider';
 import { et } from './helpers';
@@ -331,6 +331,23 @@ describe('vendor providers (mocked HTTP)', () => {
     // Anything else that is not JSON is still reported as a bad vendor response.
     const junk = (async () => new Response('upstream said no', { status: 200, headers: { 'content-type': 'text/plain' } })) as unknown as typeof fetch;
     await expect(new PolygonProvider(() => ({ polygonApiKey: 'k123' }), '/api/polygon', junk).getBars(req)).rejects.toMatchObject({ kind: 'invalid' });
+  });
+
+  it('reads a ticker the vendor does not know as an unknown ticker, and its other refusals as they are', async () => {
+    const req = { symbol: 'XYZQ', from: 1736935200, to: 1736958600 };
+    const answer = (status: number, body: string) => (async () => new Response(body, { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    // Alpaca refuses a symbol it does not take with 422 "invalid symbol"; Polygon may say "unknown ticker".
+    await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(422, '{"code":42210000,"message":"invalid symbol: XYZQ"}')).getBars(req)).rejects.toMatchObject({ kind: 'not_found' });
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', answer(400, '{"status":"ERROR","error":"Unknown ticker XYZQ"}')).getBars(req)).rejects.toMatchObject({ kind: 'not_found' });
+    // Any other bad request keeps the vendor's words, and a key or rate limit refusal reads as one.
+    await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(422, '{"message":"invalid timeframe"}')).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringContaining('invalid timeframe') });
+    await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(403, '{"message":"forbidden"}')).getBars(req)).rejects.toMatchObject({ kind: 'auth', message: 'Alpaca rejected the API key (HTTP 403). Check it in Data & Settings.' });
+    await expect(new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', answer(429, '{"status":"ERROR"}')).getBars(req)).rejects.toMatchObject({ kind: 'rate_limit', message: 'Polygon rate limit reached. Wait a minute and try again.' });
+  });
+
+  it('takes as a ticker only what the vendors (and the data proxy) take, in capitals', () => {
+    expect([' pltr ', 'brk.b', 'BF-B', 'A', 'SPY'].map(cleanTicker)).toEqual(['PLTR', 'BRK.B', 'BF-B', 'A', 'SPY']);
+    expect(['', 'S&P', 'A..B', '-AB', 'AB.', 'AB CD', 'ABCDEFGHIJK', 'X/Y'].map(cleanTicker)).toEqual([null, null, null, null, null, null, null, null]);
   });
 
   it('Alpaca: sends key headers and pages with next_page_token', async () => {
