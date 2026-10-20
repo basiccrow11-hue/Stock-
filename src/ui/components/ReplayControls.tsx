@@ -181,13 +181,14 @@ function MoreControls({ now, start, finished, ordered }: { now: number; start: n
 
 /**
  * A badge of the replay row, in full (`full`) or, where the row is short of room, shortened (`short`):
- * the full text stays in its title and for screen readers.
+ * the full text stays in its title and for screen readers. `shortTitle`: the shortened text's own
+ * tooltip, when it says more than this badge (REWOUND and END OF REPLAY in one, below).
  */
-function Badge({ tone, full, short, title }: { tone: 'warn' | 'neutral'; full: string; short: string; title: string }) {
+function Badge({ tone, full, short, title, shortTitle }: { tone: 'warn' | 'neutral'; full: string; short: string; title: string; shortTitle?: string }) {
   return (
     <span className={`badge ${tone} replay-badge`} title={title}>
       <span className="badge-full">{full}</span>
-      <span className="badge-short" aria-hidden="true">
+      <span className="badge-short" aria-hidden="true" title={shortTitle}>
         {short}
       </span>
     </span>
@@ -282,10 +283,11 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           {playing ? '❚❚ Pause market' : '▶ Start market'}
         </button>
       )}
-      <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Replay speed (simulated time per real second)">
+      {/* Short labels ("1m/s" rather than "60x · 1m/s"), so the row keeps to one line; the full one is in the title. */}
+      <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title={`${isReplay ? 'Replay' : 'Market'} speed: ${speedLabel(speed)} (simulated time per real second)`}>
         {speeds.map((s) => (
           <option key={s} value={s}>
-            {speedLabel(s)}
+            {speedLabel(s, true)}
           </option>
         ))}
       </select>
@@ -298,8 +300,17 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           {price(quote.last)}
         </span>
       )}
-      {/* Shortened on narrower screens (styles.css), so the row keeps to one line on a laptop. */}
-      {rewinds > 0 && <Badge tone="warn" full={`REWOUND ×${rewinds}`} short={`↺ ×${rewinds}`} title={`REWOUND ×${rewinds}: you rewound this session; results are not blind.`} />}
+      {/* Shortened on narrower screens (styles.css), so the row keeps to one line on a laptop. Both at once
+          shorten to one badge, ↺ ×1 · END: the END badge then gives way, its text kept for screen readers. */}
+      {rewinds > 0 && (
+        <Badge
+          tone="warn"
+          full={`REWOUND ×${rewinds}`}
+          short={`↺ ×${rewinds}${finished ? ' · END' : ''}`}
+          title={`REWOUND ×${rewinds}: you rewound this session; results are not blind.`}
+          shortTitle={finished ? `REWOUND ×${rewinds}: you rewound this session; results are not blind. END OF REPLAY` : undefined}
+        />
+      )}
       {finished && <Badge tone="neutral" full="END OF REPLAY" short="END" title="END OF REPLAY" />}
       {/* A line along the bar's top edge, so it takes no room in the row. Placed against the whole row. */}
       {isReplay && (

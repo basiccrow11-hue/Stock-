@@ -535,10 +535,13 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .replay-badge .badge-full { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .replay-badge .badge-short { display: inline; }
 }
-/* Both at once (a rewound replay at its end) need more room: shortened up to where both fit in full. */
+/* Both at once (a rewound replay at its end) need more room: shortened up to where both fit in full,
+   and into one badge (↺ ×1 · END, the first one's short text), the END badge giving way. It stays for
+   screen readers, out of the row's flow (against .replay-bar), so it takes no room or gap. */
 @media (max-width: 1519px) {
   .replay-bar:has(.replay-badge + .replay-badge) .badge-full { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .replay-bar:has(.replay-badge + .replay-badge) .badge-short { display: inline; }
+  .replay-bar .replay-badge + .replay-badge { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 }
 /* The chart column under 800px wide (a 1280px laptop, a 1024px tablet): tighter, so both bars
    above and below the chart keep to one row. */

@@ -213,20 +213,31 @@ describe('the replay controls', () => {
     const css = readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
     expect(css).toMatch(/\n\.replay-end \{[^}]*flex-wrap: nowrap;[^}]*margin-left: auto;/);
 
+    // The speed in short ("1m/s", not "60x · 1m/s"), to leave the row room; the full label is in its title.
+    const speed = bar.querySelector('select')!;
+    expect([...speed.options].map((o) => o.textContent)).toEqual(['1x', '5x', '10x', '30x', '1m/s', '2m/s', '5m/s', '10m/s', '30m/s', '1h/s', '2h/s', '6.5h/s']);
+    act(() => store.setSpeed(60));
+    expect(speed.title).toBe('Replay speed: 60x · 1m/s (simulated time per real second)');
+
     // A rewound replay at its end: both badges, each in full and shortened (CSS shows one), its full text in the title.
     act(() => store.stepForward());
     await act(async () => store.stepBack());
     await act(async () => undefined);
-    act(() => store.jumpTo(store.useTrading.getState().session!.end!));
     const badges = () => [...bar.querySelectorAll('.replay-badge')].map((b) => [b.querySelector('.badge-full')!.textContent, b.querySelector('.badge-short')!.textContent, b.getAttribute('title')]);
+    expect(badges()).toEqual([['REWOUND ×1', '↺ ×1', 'REWOUND ×1: you rewound this session; results are not blind.']]);
+    act(() => store.jumpTo(store.useTrading.getState().session!.end!));
+    // Shortened, both read as one badge, ↺ ×1 · END, its tooltip naming both.
     expect(badges()).toEqual([
-      ['REWOUND ×1', '↺ ×1', 'REWOUND ×1: you rewound this session; results are not blind.'],
+      ['REWOUND ×1', '↺ ×1 · END', 'REWOUND ×1: you rewound this session; results are not blind.'],
       ['END OF REPLAY', 'END', 'END OF REPLAY'],
     ]);
+    expect(bar.querySelector('.badge-short')!.getAttribute('title')).toBe('REWOUND ×1: you rewound this session; results are not blind. END OF REPLAY');
     expect(bar.querySelector('.badge-short')!.getAttribute('aria-hidden')).toBe('true');
-    // Shortened on laptop screens, and wider ones while both show.
+    // Shortened on laptop screens, and wider ones while both show; then the END badge gives way to the
+    // one ↺ ×1 · END shows, out of the row's flow and kept for screen readers.
     expect(css).toMatch(/@media \(max-width: 1366px\) \{\s*\.replay-badge \.badge-full \{[^}]*clip: rect\(0 0 0 0\)[^}]*\}\s*\.replay-badge \.badge-short \{ display: inline; \}/);
     expect(css).toMatch(/\n\.replay-badge \.badge-short \{ display: none; \}/);
+    expect(css).toMatch(/@media \(max-width: 1519px\) \{[^@]*\.replay-bar \.replay-badge \+ \.replay-badge \{ position: absolute;[^}]*clip: rect\(0 0 0 0\)/);
     act(() => root.unmount());
     await store.endSession();
   });
