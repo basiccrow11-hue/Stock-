@@ -303,6 +303,10 @@ label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 /* The session's progress: a line along the replay bar's top edge. */
 .replay-bar .progress { position: absolute; left: 0; right: 0; top: -1px; height: 3px; background: var(--panel-3); overflow: hidden; }
 .progress > div { height: 100%; background: var(--accent); }
+/* Jump to…, ⋯ and Exit keep together at the right end of the row: short of room, they wrap as one. */
+.replay-end { display: flex; align-items: center; gap: inherit; flex-wrap: nowrap; margin-left: auto; }
+/* REWOUND ×n and END OF REPLAY, shortened where the row is short of room (below). */
+.replay-badge .badge-short { display: none; }
 .jump-pop { width: max-content; max-width: min(360px, calc(100vw - 16px)); }
 
 /* ---------- right column ---------- */
@@ -524,6 +528,17 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
    and below): the last price gives way in the replay bar (it is on the ticket and the price scale). */
 @media (max-width: 1431px) {
   .replay-bar .replay-last { display: none; }
+}
+/* Then the badges are shortened (↺ ×1, END), their full text kept in the title and for screen
+   readers, so the row keeps to one line on a laptop screen with a badge showing. */
+@media (max-width: 1366px) {
+  .replay-badge .badge-full { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .replay-badge .badge-short { display: inline; }
+}
+/* Both at once (a rewound replay at its end) need more room: shortened up to where both fit in full. */
+@media (max-width: 1519px) {
+  .replay-bar:has(.replay-badge + .replay-badge) .badge-full { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .replay-bar:has(.replay-badge + .replay-badge) .badge-short { display: inline; }
 }
 /* The chart column under 800px wide (a 1280px laptop, a 1024px tablet): tighter, so both bars
    above and below the chart keep to one row. */
