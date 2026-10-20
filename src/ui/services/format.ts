@@ -63,10 +63,13 @@ export const CHART_LOCALE: string = (() => {
   }
 })();
 
-/** A replay or market speed: simulated time per real second. */
-export function speedLabel(s: number): string {
-  if (s === 1) return '1x real time';
-  if (s < 60) return `${s}x`;
+/**
+ * A replay or market speed: simulated time per real second. `short`, for the replay row, where room is
+ * scarce: the multiple up to 30x, then only the time per second ("1m/s", one 1-minute candle a second).
+ */
+export function speedLabel(s: number, short = false): string {
   const perSec = s / 60;
-  return `${s}x · ${perSec >= 60 ? `${perSec / 60}h` : `${perSec}m`}/s`;
+  const time = `${perSec >= 60 ? `${perSec / 60}h` : `${perSec}m`}/s`;
+  if (s < 60) return s === 1 && !short ? '1x real time' : `${s}x`;
+  return short ? time : `${s}x · ${time}`;
 }

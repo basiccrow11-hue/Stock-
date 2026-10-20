@@ -4,9 +4,12 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { exchangeDate, exchangeTimeToUnix, isTradingDay, parseHHMM, prevTradingDay } from '../../core/time';
 
+/** The unfinished sessions' summaries the stand-in storage lists (none unless a test sets them). */
+const saved = vi.hoisted(() => ({ summaries: [] as unknown[] }));
 vi.mock('../services/idb', () => ({
   idb: {
     all: async () => [],
+    withPrefix: async (_s: string, prefix: string) => (prefix === 'session-summary:' ? saved.summaries : []),
     set: async () => undefined,
     delete: async () => undefined,
     get: async () => undefined,
@@ -28,7 +31,10 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+  saved.summaries = [];
   const store = await import('../state/tradingStore');
+  // What a test held the chart to (as read from saved sessions this storage keeps no record of) goes with it.
+  store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } }));
   store.setSelectingBar(false);
   await store.endSession();
   store.setBrowseSource('demo');
@@ -41,6 +47,21 @@ afterEach(async () => {
 });
 
 const at = (date: string, time: string) => exchangeTimeToUnix(date, parseHHMM(time));
+
+/** An unfinished replay of `symbols` as the card of unfinished sessions lists it (its record is not kept). */
+function summary(id: string, symbols: string[], blind: boolean, now: number) {
+  return {
+    id,
+    savedAt: Date.now() - 60_000,
+    meta: { id, mode: 'replay', source: 'DEMO', symbols, start: now - 3600, end: now + 3600, startDate: exchangeDate(now), blind, label: `${symbols[0]}${blind ? ' · blind replay' : ''}` },
+    now,
+    closedTrades: 0,
+    openPositions: 0,
+    equity: 25_000,
+    startingBalance: 25_000,
+    finished: false,
+  };
+}
 
 async function mount(active = true) {
   const store = await import('../state/tradingStore');
@@ -334,7 +355,7 @@ describe('the chart with no session', () => {
     const { demoProvider } = await import('../state/dataRegistry');
     const until = at(prevTradingDay(demoProvider.lastDate), '10:05');
     const hold = { id: 'replay_other', providerId: 'demo', symbols: ['SPY', 'QQQ'], until, blind: true, elsewhere: false };
-    // As read from the saved sessions (the stand-in storage here keeps none).
+    // As read from the saved sessions (the stand-in storage here keeps no record of them).
     const holds = (h: (typeof hold)[]) => act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: h } })));
     const card = () => p.host.querySelector<HTMLElement>('.browse-empty');
     holds([hold]);
@@ -344,11 +365,8 @@ describe('the chart with no session', () => {
     expect(p.button('Try again')).toBeUndefined();
     expect(p.host.querySelector('.browse-tip')).toBeNull();
     expect(p.replay().getAttribute('aria-disabled')).toBe('true');
-    // Hiding the unfinished sessions does not show the chart; the card offers them back.
-    act(() => p.button('Hide unfinished sessions')!.click());
-    expect(card()!.textContent).toContain('A blind replay of SPY is unfinished.');
-    act(() => p.button('Show unfinished sessions')!.click());
-    expect(p.button('Hide unfinished sessions')).toBeDefined();
+    // With no unfinished session listed (another tab runs it), nothing is offered to show again.
+    expect(p.button('Show unfinished sessions')).toBeUndefined();
     holds([{ ...hold, elsewhere: true }]);
     expect(card()!.textContent).toContain('A blind replay of SPY is running in another tab. Its chart stays hidden here until that replay ends, as its date does.');
 
@@ -369,7 +387,7 @@ describe('the chart with no session', () => {
     p.unmount();
   }, 30_000);
 
-  it('keeps its notes under the legend\'s first row, however many lines that takes', async () => {
+  it('keeps its notes under the legend\'s first row, however many lines that takes, and under a lower row that reaches under them', async () => {
     // jsdom lays nothing out: the boxes are given here, and the observers called as the browser would.
     const observers: (() => void)[] = [];
     vi.stubGlobal(
@@ -402,11 +420,128 @@ describe('the chart with no session', () => {
     bottom = 138;
     act(() => observers.forEach((o) => o()));
     expect(top()).toBe('46px');
+    bottom = 124;
+    act(() => observers.forEach((o) => o()));
+    expect(top()).toBe('32px');
+
+    // Rows of overlay indicators below it: one that reaches under the notes (Bollinger Bands' three values)
+    // takes them below it; one that ends short of them leaves them where they are.
+    const tip = notes.querySelector<HTMLElement>('.browse-tip')!;
+    vi.spyOn(tip, 'getBoundingClientRect').mockReturnValue({ left: 600, right: 900, width: 300, top: 0, bottom: 0 } as DOMRect);
+    const overlay = (rowBottom: number, right: number) => {
+      const r = document.createElement('div');
+      r.className = 'legend-ind';
+      vi.spyOn(r, 'getBoundingClientRect').mockReturnValue({ bottom: rowBottom, right } as DOMRect);
+      return r;
+    };
+    const sma = overlay(138, 400);
+    await act(async () => void legend.appendChild(sma));
+    expect(top()).toBe('32px');
+    const bb = overlay(152, 640);
+    await act(async () => void legend.appendChild(bb));
+    expect(top()).toBe('60px');
+    // Removing the indicator places them again.
+    await act(async () => bb.remove());
+    expect(top()).toBe('32px');
     await act(async () => legend.remove());
     expect(top()).toBe('8px');
     const css = (await import('node:fs')).readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
     expect(css).toMatch(/\n\.browse-notes \{ position: absolute; top: var\(--clear-of-legend, 30px\);/);
     vi.unstubAllGlobals();
+    p.unmount();
+  }, 30_000);
+
+  it('says why the chart is not drawn under the card of unfinished sessions while that shows, which would cover its middle', async () => {
+    const { demoProvider } = await import('../state/dataRegistry');
+    const until = at(prevTradingDay(demoProvider.lastDate), '10:05');
+    saved.summaries = [summary('replay_spy', ['SPY'], true, until), summary('replay_qqq', ['QQQ'], false, until)];
+    // Shown or not as the browser lays it out (Replay is focused from that, as after Exit).
+    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(function (this: Element) {
+      return (this.closest('[hidden]') ? [] : [new DOMRect(0, 0, 10, 10)]) as unknown as DOMRectList;
+    });
+    const p = await mount();
+    await p.loaded();
+    const hold = { id: 'replay_spy', providerId: 'demo', symbols: ['SPY'], until, blind: true, elsewhere: false };
+    act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
+    const notes = p.host.querySelector<HTMLElement>('.browse-notes')!;
+    const unfinished = () => p.host.querySelector<HTMLElement>('.browse-unfinished')!;
+    const centred = () => p.host.querySelector<HTMLElement>('.browse-empty');
+    const why = () => notes.querySelector<HTMLElement>('.browse-why');
+    await vi.waitFor(() => expect(unfinished().querySelectorAll('.unfinished')).toHaveLength(2));
+    // In the notes, right under the card, as a status; not in the middle, where the card would cover it.
+    expect(why()!.getAttribute('role')).toBe('status');
+    expect(why()!.textContent).toContain('SPY is not charted here for now');
+    expect(why()!.textContent).toContain('A blind replay of SPY is unfinished. Resume or discard it to chart SPY here.');
+    expect(why()!.previousElementSibling).toBe(unfinished());
+    expect(centred()).toBeNull();
+    expect(p.button('Show unfinished sessions')).toBeUndefined();
+
+    // Hidden, the card gives the middle back: the reason goes there, with a way to show the card again,
+    // and focus goes on to it rather than to the page.
+    const hide = p.button('Hide unfinished sessions')!;
+    act(() => hide.focus());
+    act(() => hide.click());
+    expect(unfinished().hidden).toBe(true);
+    expect(why()).toBeNull();
+    expect(centred()!.getAttribute('role')).toBe('status');
+    expect(centred()!.textContent).toContain('A blind replay of SPY is unfinished.');
+    const show = p.button('Show unfinished sessions')!;
+    expect(document.activeElement).toBe(show);
+    // Shown again: focus goes to its first Resume, not to the page.
+    act(() => show.click());
+    expect(unfinished().hidden).toBe(false);
+    expect(centred()).toBeNull();
+    expect(why()).not.toBeNull();
+    expect(document.activeElement).toBe(unfinished().querySelector('.unfinished .btn.primary'));
+    expect(document.activeElement!.textContent).toBe('Resume');
+
+    // Not blind: hiding the card sends focus to Replay, as after Exit.
+    act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } })));
+    expect(why()).toBeNull();
+    act(() => p.button('Hide unfinished sessions')!.click());
+    expect(document.activeElement).toBe(p.replay());
+    // Nor is focus moved when the card comes back by itself, or when what holds the chart changes.
+    act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
+    expect(document.activeElement).toBe(p.replay());
+    act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } })));
+
+    // A chart that could not be had says why the same way: under the card while it shows.
+    p.unmount();
+    const q = await mount();
+    act(() => q.store.useTrading.setState((s) => ({ browse: { ...s.browse, error: 'Polygon has no bars for XYZ. Check the ticker.', loading: false } })));
+    await vi.waitFor(() => expect(q.host.querySelectorAll('.browse-unfinished .unfinished')).toHaveLength(2));
+    const qWhy = q.host.querySelector<HTMLElement>('.browse-notes .browse-why')!;
+    expect(qWhy.getAttribute('role')).toBe('alert');
+    expect(qWhy.textContent).toContain('Polygon has no bars for XYZ. Check the ticker.');
+    expect(q.host.querySelector('.browse-empty')).toBeNull();
+    act(() => q.button('Hide unfinished sessions')!.click());
+    expect(q.host.querySelector('.browse-empty')!.getAttribute('role')).toBe('alert');
+    q.unmount();
+  }, 30_000);
+
+  it('says plainly that the chart has no bars before an unfinished replay’s clock, rather than where they stop', async () => {
+    const p = await mount();
+    await p.loaded();
+    const cap = () => p.host.querySelector('.browse-cap')?.textContent ?? null;
+    const tip = () => p.host.querySelector('.browse-tip');
+    const { demoProvider } = await import('../state/dataRegistry');
+    const until = at(prevTradingDay(demoProvider.lastDate), '10:05');
+    const hold = { id: 'replay_other', providerId: 'demo', symbols: ['SPY'], until, blind: false, elsewhere: false };
+    const holds = (h: (typeof hold)[]) => act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: h } })));
+    holds([hold]);
+    await vi.waitFor(() => expect(cap()).toBe(`Bars shown up to ${exchangeDate(until)} 10:05 ET, where your unfinished SPY replay is.`));
+    expect(tip()).not.toBeNull();
+    // Its clock before the data's first day: nothing to show, and nothing to pick a bar from.
+    const early = at('2018-12-03', '09:32');
+    holds([{ ...hold, until: early }]);
+    await vi.waitFor(() => expect(cap()).toBe('No SPY bars before your unfinished replay’s clock (2018-12-03 09:32 ET).'), { timeout: 20_000 });
+    expect(p.host.querySelector('.browse-cap')!.getAttribute('role')).toBe('status');
+    expect(tip()).toBeNull();
+    holds([{ ...hold, until: early, elsewhere: true }]);
+    await vi.waitFor(() => expect(cap()).toBe('No SPY bars before where the SPY replay running in another tab was last saved (2018-12-03 09:32 ET).'));
+    holds([]);
+    await vi.waitFor(() => expect(cap()).toBeNull());
+    expect(tip()).not.toBeNull();
     p.unmount();
   }, 30_000);
 

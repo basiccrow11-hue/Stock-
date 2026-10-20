@@ -71,10 +71,15 @@ function confirmExit(button: HTMLElement): void {
 function isReplayShortcut(e: KeyboardEvent): boolean {
   if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
   const el = e.target instanceof Element ? e.target : null;
+  const arrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight';
   // The ⋯ panel shows ← and → beside the steps they take: with focus in it, they step there too.
-  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && el?.closest('.more-pop')) return true;
-  // An open toolbar menu keeps the keys, even once focus is no longer inside it.
-  if (document.querySelector('.popover')) return false;
+  if (arrow && el?.closest('.more-pop')) return true;
+  // An open toolbar menu keeps the keys, even once focus is no longer inside it. Not ⋯'s panel for ← and
+  // →: they step while it is open, with focus still on ⋯ after a click (or on the page, where a click
+  // focuses no button, as in Safari), and nothing can be acting behind it, as only one panel is open at a
+  // time (usePopover). Space is still left to the focused control (on ⋯ it closes the panel), and the
+  // checks below still leave fields and dialogs their arrows.
+  if ([...document.querySelectorAll('.popover')].some((pop) => !(arrow && pop.classList.contains('more-pop')))) return false;
   if (!el) return true;
   if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"], [role="combobox"]')) return false;
   if (e.code === 'Space' && el.closest('summary, [role="checkbox"], [role="switch"], [role="option"]')) return false;
@@ -176,13 +181,14 @@ function MoreControls({ now, start, finished, ordered }: { now: number; start: n
 
 /**
  * A badge of the replay row, in full (`full`) or, where the row is short of room, shortened (`short`):
- * the full text stays in its title and for screen readers.
+ * the full text stays in its title and for screen readers. `shortTitle`: the shortened text's own
+ * tooltip, when it says more than this badge (REWOUND and END OF REPLAY in one, below).
  */
-function Badge({ tone, full, short, title }: { tone: 'warn' | 'neutral'; full: string; short: string; title: string }) {
+function Badge({ tone, full, short, title, shortTitle }: { tone: 'warn' | 'neutral'; full: string; short: string; title: string; shortTitle?: string }) {
   return (
     <span className={`badge ${tone} replay-badge`} title={title}>
       <span className="badge-full">{full}</span>
-      <span className="badge-short" aria-hidden="true">
+      <span className="badge-short" aria-hidden="true" title={shortTitle}>
         {short}
       </span>
     </span>
@@ -277,10 +283,11 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           {playing ? '❚❚ Pause market' : '▶ Start market'}
         </button>
       )}
-      <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Replay speed (simulated time per real second)">
+      {/* Short labels ("1m/s" rather than "60x · 1m/s"), so the row keeps to one line; the full one is in the title. */}
+      <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title={`${isReplay ? 'Replay' : 'Market'} speed: ${speedLabel(speed)} (simulated time per real second)`}>
         {speeds.map((s) => (
           <option key={s} value={s}>
-            {speedLabel(s)}
+            {speedLabel(s, true)}
           </option>
         ))}
       </select>
@@ -293,8 +300,17 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           {price(quote.last)}
         </span>
       )}
-      {/* Shortened on narrower screens (styles.css), so the row keeps to one line on a laptop. */}
-      {rewinds > 0 && <Badge tone="warn" full={`REWOUND ×${rewinds}`} short={`↺ ×${rewinds}`} title={`REWOUND ×${rewinds}: you rewound this session; results are not blind.`} />}
+      {/* Shortened on narrower screens (styles.css), so the row keeps to one line on a laptop. Both at once
+          shorten to one badge, ↺ ×1 · END: the END badge then gives way, its text kept for screen readers. */}
+      {rewinds > 0 && (
+        <Badge
+          tone="warn"
+          full={`REWOUND ×${rewinds}`}
+          short={`↺ ×${rewinds}${finished ? ' · END' : ''}`}
+          title={`REWOUND ×${rewinds}: you rewound this session; results are not blind.`}
+          shortTitle={finished ? `REWOUND ×${rewinds}: you rewound this session; results are not blind. END OF REPLAY` : undefined}
+        />
+      )}
       {finished && <Badge tone="neutral" full="END OF REPLAY" short="END" title="END OF REPLAY" />}
       {/* A line along the bar's top edge, so it takes no room in the row. Placed against the whole row. */}
       {isReplay && (

@@ -66,7 +66,8 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
   );
 }
 
-export function UnfinishedSessions() {
+/** The sessions left unfinished, to resume or discard. `onList` hears how many it lists, whenever that changes. */
+export function UnfinishedSessions({ onList }: { onList?: (count: number) => void } = {}) {
   const session = useTrading((s) => s.session);
   const loading = useTrading((s) => s.loading);
   const carryingOn = useTrading((s) => s.carryingOn !== null);
@@ -92,6 +93,7 @@ export function UnfinishedSessions() {
       window.removeEventListener('focus', refresh);
     };
   }, [refresh]);
+  useEffect(() => onList?.(list.length), [list.length, onList]);
   if (!list.length) return null;
   return (
     <section className="card stack unfinished-list" aria-label="Unfinished sessions">
