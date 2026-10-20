@@ -50,11 +50,35 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
   // replay from a date, random or not, would show what comes next in it.
   const hidden = browseHiddenReason();
   const random = randomBarBlocked();
-  // Why the items that are off are off, each said once under them, in words a touch screen shows too (a
-  // title is only seen on hover): mostly one, as a replay that keeps the chart hidden turns all three off.
+  // Why the items that are off are off, each said once, in words a touch screen shows too (a title is only
+  // seen on hover), right after the last item it is about, so it is not read as the reason for an item
+  // under it that works: a replay that keeps the chart hidden turns all three off (one line, after Random
+  // bar), a blind replay or the simulated market only Select bar (a line after it). One about items that
+  // are not next to each other names them.
+  const offs = [
+    { label: 'Select bar', reason: blocked },
+    { label: 'Select date…', reason: hidden },
+    { label: 'Random bar', reason: random },
+  ];
   const reasons = [...new Set([blocked, hidden, random].filter((r): r is string => !!r))];
+  const notes = reasons.map((reason) => {
+    const at = offs.flatMap((o, i) => (o.reason === reason ? [i] : []));
+    const after = at[at.length - 1];
+    const labels = at.map((i) => offs[i].label);
+    const named = after - at[0] === at.length - 1 ? '' : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}: `;
+    return { reason, after, text: named + reason };
+  });
   const noteId = useId();
   const why = (reason: string | null) => (reason ? `${noteId}-${reasons.indexOf(reason)}` : undefined);
+  /** The reasons said right after item `index` of those three. Not items: arrows pass them by, and the items they are about point at them. */
+  const notesAfter = (index: number) =>
+    notes
+      .filter((n) => n.after === index)
+      .map((n) => (
+        <p key={n.reason} id={why(n.reason)} role="none" className="menu-note muted">
+          {n.text}
+        </p>
+      ));
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const [panel, setPanel] = useState<'menu' | 'date'>('menu');
   const replayRef = useRef<HTMLButtonElement>(null);
@@ -128,7 +152,9 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
             },
             { disabled: !!blocked, title: blocked ?? 'Click a bar on the chart to start the replay there', describedBy: why(blocked) },
           )}
+          {notesAfter(0)}
           {item('Select date…', () => setPanel('date'), { disabled: !!hidden, title: hidden ?? 'Start the replay at a date and time', describedBy: why(hidden) })}
+          {notesAfter(1)}
           {item(
             'Random bar',
             () => {
@@ -137,12 +163,7 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
             },
             { disabled: !!random, title: random ?? 'Start at the open of a day picked at random', describedBy: why(random) },
           )}
-          {/* Not an item: arrows pass it by, and the items it is about point at it. */}
-          {reasons.map((r, i) => (
-            <p key={r} id={`${noteId}-${i}`} role="none" className="menu-note muted">
-              {r}
-            </p>
-          ))}
+          {notesAfter(2)}
           {item('Advanced replay setup…', () => {
             close(false);
             onNewSession('replay');
