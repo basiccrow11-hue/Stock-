@@ -735,6 +735,62 @@ describe('unfinished sessions and other tabs', () => {
     await vi.waitFor(() => expect(card.listed()).toEqual([]));
     card.unmount();
   });
+
+  it('sends focus on to Play once a session resumed from the keyboard is in, never to the page, and leaves focus put elsewhere meanwhile', async () => {
+    // Two replays and the simulated market, each left by a tab that closed.
+    const leave = async (start: (store: Awaited<ReturnType<typeof page>>['store']) => Promise<boolean>) => {
+      const a = await page();
+      expect(await start(a.store)).toBe(true);
+      await settle();
+      a.store.pause();
+      await settle();
+      rememberNothing();
+      return a.store.useTrading.getState().session!.id;
+    };
+    const replayId = await leave((store) => store.startReplay(replay));
+    const otherId = await leave((store) => store.startReplay({ ...replay, symbol: 'QQQ' }));
+    const simId = await leave((store) => store.startSim({ config: { seed: 4 }, startingBalance: 25_000, speed: 1 }));
+    const b = await page();
+    // Laid out, as the browser does (Play is focused only when it is on screen).
+    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(function (this: Element) {
+      return (this.closest('[hidden]') ? [] : [new DOMRect(0, 0, 10, 10)]) as unknown as DOMRectList;
+    });
+    const { ChartPanel } = await import('../components/ChartPanel');
+    const panel = render(createElement(ChartPanel, { onNewSession: () => undefined }));
+    const resume = (sym: string) => [...panel.el.querySelectorAll<HTMLElement>('.unfinished-list li')].find((li) => li.querySelector('strong')!.textContent!.startsWith(sym))?.querySelector<HTMLButtonElement>('.btn.primary');
+    const play = () => panel.el.querySelector<HTMLButtonElement>('.replay-bar [data-home="play"]');
+    /** Resume on the row of `sym`, reached with the keyboard: focused, then pressed (Enter clicks it). */
+    const press = async (sym: string) => {
+      await vi.waitFor(() => expect(resume(sym)).toBeTruthy());
+      act(() => resume(sym)!.focus());
+      await act(async () => resume(sym)!.click());
+    };
+    await press('SPY');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(replayId));
+    await act(async () => undefined);
+    expect(play()!.textContent).toContain('Play');
+    expect(document.activeElement).toBe(play());
+    await act(async () => void (await b.store.endSession()));
+
+    // The simulated market: its Start market.
+    await press('Simulated market');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(simId));
+    await act(async () => undefined);
+    expect(play()!.textContent).toContain('Start market');
+    expect(document.activeElement).toBe(play());
+    await act(async () => void (await b.store.endSession()));
+
+    // Focus put on the ticker button while it loads stays there.
+    await press('QQQ');
+    const symbol = panel.el.querySelector<HTMLElement>('.chart-toolbar .sym-btn')!;
+    act(() => symbol.focus());
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(otherId));
+    await act(async () => undefined);
+    expect(play()).not.toBeNull();
+    expect(document.activeElement).toBe(symbol);
+    await act(async () => void (await b.store.endSession()));
+    panel.unmount();
+  });
 });
 
 describe('the Trade screen as a reload carries its session on', () => {

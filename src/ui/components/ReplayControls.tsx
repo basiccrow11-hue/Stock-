@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   REPLAY_SPEEDS,
   SIM_SPEEDS,
@@ -41,6 +41,26 @@ function confirmRewind(target: number | null, restart = false): boolean {
 /** Step back one bar, after the same warning as any rewind. */
 function confirmStepBack(): void {
   if (confirmRewind(stepBackTarget())) stepBack();
+}
+
+/**
+ * The session carried on from the card of unfinished sessions with focus on it (focusPlayOnceIn): once its
+ * row is in, its Play takes focus. That card goes as the session loads, and the focus on its Resume with it.
+ */
+let playFocusFor: string | null = null;
+
+/** Sends focus to Play once session `id`'s row is in (as Exit sends it to Replay); null: not any more. */
+export function focusPlayOnceIn(id: string | null): void {
+  playFocusFor = id;
+}
+
+/**
+ * Where focus goes in the row: Play, else ⋯ (Restart and Step back are behind it, and Play is off at the
+ * end), else the speed. Never to a control in a popover: focus there would keep the panel open behind it,
+ * and Enter on it would act unseen.
+ */
+function rowHome(bar: HTMLElement): HTMLElement | null {
+  return bar.querySelector<HTMLElement>('[data-home="play"]:not(:disabled)') ?? bar.querySelector<HTMLElement>('[data-home="more"]') ?? bar.querySelector<HTMLElement>('select');
 }
 
 /**
@@ -212,14 +232,18 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const spaceTaken = useRef(false);
   const isReplay = session?.mode === 'replay';
   // Restart and Step back disable themselves at the start, Play and the steps at the end: focus then
-  // goes to Play, else ⋯ (Restart and Step back are behind it), else the speed. Never to a control in
-  // a popover: focus there would keep the panel open behind it, and Enter on it would act unseen.
-  const barRef = useFocusRescue<HTMLDivElement>(
-    (bar) =>
-      bar.querySelector<HTMLElement>('[data-home="play"]:not(:disabled)') ??
-      bar.querySelector<HTMLElement>('[data-home="more"]') ??
-      bar.querySelector<HTMLElement>('select'),
-  );
+  // goes to the row's home (rowHome) rather than to the page.
+  const barRef = useFocusRescue<HTMLDivElement>(rowHome);
+  // A session carried on from the card of unfinished sessions with focus on it (focusPlayOnceIn): once
+  // the row is in, focus goes on to Play, not left on the page. Not when it was put elsewhere meanwhile.
+  useLayoutEffect(() => {
+    if (!session || playFocusFor !== session.id) return;
+    playFocusFor = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && !active.closest('.unfinished-list')) return;
+    const bar = [...document.querySelectorAll<HTMLElement>('.replay-bar')].find(isShown);
+    if (bar) rowHome(bar)?.focus({ preventScroll: true });
+  }, [session]);
   // Read when rendering: what the session is, and the browsing chart's bars, decide it.
   const selectBlocked = selectBarBlocked();
 
@@ -279,7 +303,7 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           </button>
         </>
       ) : (
-        <button className={`btn ${playing ? '' : 'primary'}`} onClick={() => (playing ? pause() : play())}>
+        <button className={`btn ${playing ? '' : 'primary'}`} data-home="play" onClick={() => (playing ? pause() : play())}>
           {playing ? '❚❚ Pause market' : '▶ Start market'}
         </button>
       )}

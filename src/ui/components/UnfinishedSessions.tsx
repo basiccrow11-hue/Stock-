@@ -1,6 +1,7 @@
 /** Sessions a reload, a closed tab or a crash left unfinished, to carry on or let go (savedSessions). */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { SourceBadge, focusHome, isShown } from './common';
+import { focusPlayOnceIn } from './ReplayControls';
 import { blindDayLabel, discardSession, resumeSession, unfinishedSessions, useTrading } from '../state/tradingStore';
 import { onSessionFreed, type SessionSummary } from '../services/savedSessions';
 import { CHALLENGES } from '../../core/challenges/challenges';
@@ -34,6 +35,19 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: (focused: boolean) => v
   const money = `${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   // Its challenge attempt, while one is under way (a summary saved before that was noted says only which it started with).
   const challenge = s.meta.challengeId && (s.challengeUnderWay ?? true) ? CHALLENGES.find((c) => c.id === s.meta.challengeId) : undefined;
+  // This card goes as the session loads, and focus on its Resume with it: pressed from the keyboard (or with a
+  // click that focuses it, or none), focus goes on to the replay row's Play once the session is in, never to
+  // the page. One that cannot be carried on is listed again (gone).
+  const resume = () => {
+    const active = document.activeElement;
+    const focused = !active || active === document.body || !!rowRef.current?.contains(active);
+    if (focused) focusPlayOnceIn(s.id);
+    void resumeSession(s.id).then((ok) => {
+      if (ok) return;
+      if (focused) focusPlayOnceIn(null);
+      gone();
+    });
+  };
   const discard = async () => {
     const open = s.openPositions ? ` Its ${plural(s.openPositions, 'open position')} ${s.openPositions === 1 ? 'goes' : 'go'} without a journal entry.` : '';
     const attempt = challenge ? ' Its challenge attempt is kept as abandoned.' : '';
@@ -58,7 +72,7 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: (focused: boolean) => v
         </span>
       </div>
       <div className="row" style={{ gap: 6 }}>
-        <button className="btn primary sm" aria-disabled={busy} onClick={() => !busy && void resumeSession(s.id).then((ok) => !ok && gone())}>
+        <button className="btn primary sm" aria-disabled={busy} onClick={() => !busy && resume()}>
           Resume
         </button>
         <button className="btn sm" aria-disabled={busy} onClick={() => !busy && void discard()}>
