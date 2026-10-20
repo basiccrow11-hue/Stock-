@@ -9,6 +9,7 @@ import type { Bar, Timeframe } from '../../core/types';
 import { aggregateBars } from '../../core/data/aggregate';
 import { exchangeDate, exchangeTimeToUnix, isTradingDay, lastCompletedTradingDay, nextTradingDay, parseHHMM, prevTradingDay } from '../../core/time';
 import { VENDOR_RANDOM_DAYS } from '../../core/replay/barReplay';
+import { HISTORY_DAYS } from '../../core/replay/ReplaySession';
 import { withHistory } from '../chart/chartParts';
 
 vi.mock('../chart/offscreenSnapshot', () => ({ offscreenSnapshot: () => Promise.resolve('data:image/jpeg;base64,BB==') }));
@@ -157,13 +158,48 @@ describe('Bar Replay on Polygon or Alpaca', () => {
     expect(asked.slice(before).filter((a) => a.minutes === 1)).toHaveLength(3);
     await store.endSession();
 
-    // Both days before the listing: it says so, once, and loads no more.
+    // Both days before the listing: it says so, once, and loads no more. The ticker is on the chart, so not
+    // "check the ticker": most likely it had not traded yet. The setup a failed start leaves is the last one's.
+    const { useSettings } = await import('./settingsStore');
+    const setup = useSettings.getState().replay;
     asked = [];
     expect(await store.startRandomBar(() => 0)).toBe(false);
     expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false });
-    expect(store.useTrading.getState().error).toMatch(/^Polygon has no bars for NEWCO around \d{4}-\d\d-\d\d\./);
+    expect(store.useTrading.getState().error).toMatch(
+      /^Polygon has no NEWCO bars around \d{4}-\d\d-\d\d; it may not have traded then\. Press Random bar again, or use Select date… for a later day\.$/,
+    );
+    expect(useSettings.getState().replay).toEqual(setup);
     // Two days tried, each its hours and its bars: no more.
     expect(asked.filter((a) => a.minutes === 1)).toHaveLength(4);
+  }, 120_000);
+
+  it('Random bar tries a later day after one the vendor has no bars on, as a ticker has none before it was listed', async () => {
+    const last = lastCompletedTradingDay(new Date());
+    vi.stubGlobal('fetch', polygon(back(last, 100)));
+    const store = await import('./tradingStore');
+    const { useCredentials } = await import('./credentials');
+    useCredentials.getState().set({ polygonApiKey: 'k' });
+    store.browseSymbol('polygon', 'NEWCO');
+    await chartCandles('NEWCO', '1m');
+    // The middle of the days it picks from (481 of them: 240 back), then the first it has left: the day after it,
+    // not one before the day already found to be before the listing.
+    const picks = [0.5, 0];
+    expect(await store.startRandomBar(() => picks.shift() ?? 0)).toBe(false);
+    expect(store.useTrading.getState().error).toContain(`Polygon has no NEWCO bars around ${back(last, 239)};`);
+  }, 120_000);
+
+  it('Random bar on a chart that loads the longer past picks from that many fewer days, so the past is within reach too', async () => {
+    vi.stubGlobal('fetch', polygon());
+    const store = await import('./tradingStore');
+    const { useCredentials } = await import('./credentials');
+    useCredentials.getState().set({ polygonApiKey: 'k' });
+    store.setTimeframe('1h');
+    store.browseSymbol('polygon', 'MSFT');
+    await chartCandles('MSFT', '1h');
+    expect(await store.startRandomBar(() => 0)).toBe(true);
+    const last = lastCompletedTradingDay(new Date());
+    expect(store.useTrading.getState().now).toBe(at(back(last, VENDOR_RANDOM_DAYS - HISTORY_DAYS), '09:30'));
+    expect(VENDOR_RANDOM_DAYS - HISTORY_DAYS).toBe(280);
   }, 120_000);
 
   it('Random bar starts no earlier than about two years back on a vendor', async () => {

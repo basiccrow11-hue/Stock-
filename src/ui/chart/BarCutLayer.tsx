@@ -12,12 +12,12 @@ import type { Logical } from 'lightweight-charts';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import type { UnixSeconds } from '../../core/types';
 import type { ChartGeometry } from './DrawingLayer';
-import { cutWarning, newestBarRefusal, sessionEndNotice, setSelectingBar, startBarReplay, useTrading } from '../state/tradingStore';
+import { cutWarning, newestBarRefusal, sessionEndNotice, setSelectingBar, startBarReplay, useTrading, type CutNote } from '../state/tradingStore';
 import { modalOpen } from '../components/common';
 
 /** A press that moves further than this (pixels) is a drag, which pans the chart, not a click. */
 const CLICK_SLOP = 6;
-/** How long a refusal (the newest bar) stays in the hint after a click on it (milliseconds). */
+/** How long a refusal (the newest bar, or one nothing follows) stays in the hint after a click on it (milliseconds). */
 const REFUSAL_MS = 4000;
 
 const HINT = {
@@ -48,7 +48,7 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
   const armedRef = useRef<UnixSeconds | null>(null);
   const refusedUntil = useRef(0);
   /** What cutWarning said of the candle last asked about (by its start), so a pointer resting on it asks once. */
-  const warnedRef = useRef<{ time: UnixSeconds; text: string | null } | null>(null);
+  const warnedRef = useRef<{ time: UnixSeconds; note: CutNote | null } | null>(null);
   const coarse = typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
 
   /**
@@ -84,6 +84,12 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
   /** Whether the candle at `index` is the newest of the data, which nothing follows (only known with no session). */
   const isNewest = (index: number) => !useTrading.getState().session && index === geometryRef.current.candles().length - 1;
 
+  /** What select-bar mode says of the candle starting at `time` (cutWarning), asked once while it stays the one asked about. */
+  const noteOn = (time: UnixSeconds): CutNote | null => {
+    if (warnedRef.current?.time !== time) warnedRef.current = { time, note: cutWarning(time) };
+    return warnedRef.current.note;
+  };
+
   /** Puts the line and the shade on the candle under the mouse, or the one a tap picked, and says what a click does there. */
   const place = () => {
     const g = geometryRef.current;
@@ -114,16 +120,13 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
       shade.style.height = `${height}px`;
     }
     const newest = !!at && isNewest(at.index);
-    line.classList.toggle('refused', newest);
-    // Said of a candle before it is picked: only after-hours trading would follow it (cutWarning).
-    let warning: string | null = null;
-    if (at && !newest && (armed !== null || !coarse)) {
-      const time = candles[at.index].time;
-      if (warnedRef.current?.time !== time) warnedRef.current = { time, text: cutWarning(time) };
-      warning = warnedRef.current.text;
-    }
-    const refusal = newest && (armed !== null || performance.now() < refusedUntil.current || !coarse);
-    const text = refusal ? newestBarRefusal() : warning ? (armed !== null ? `${warning} ${HINT.armedAnyway}` : warning) : armed !== null ? (coarse ? HINT.armedTouch : HINT.armed) : coarse ? HINT.touch : HINT.mouse;
+    // Said of a candle before it is picked (cutWarning): that nothing follows it before the replay would end,
+    // which refuses it as the newest is refused, or that only after-hours trading would follow it.
+    const note = at && !newest && (armed !== null || !coarse) ? noteOn(candles[at.index].time) : null;
+    line.classList.toggle('refused', newest || !!note?.refused);
+    const refusal = (newest && (armed !== null || performance.now() < refusedUntil.current || !coarse)) || !!note?.refused;
+    const warning = note && !note.refused ? note.text : null;
+    const text = refusal ? (newest ? newestBarRefusal() : note!.text) : warning ? (armed !== null ? `${warning} ${HINT.armedAnyway}` : warning) : armed !== null ? (coarse ? HINT.armedTouch : HINT.armed) : coarse ? HINT.touch : HINT.mouse;
     if (hint.textContent !== text) hint.textContent = text;
     hint.classList.toggle('refused', refusal);
     hint.classList.toggle('warned', !refusal && !!warning);
@@ -173,7 +176,8 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
         place();
         return;
       }
-      if (isNewest(at.index)) {
+      // The newest candle, or one nothing follows before the replay would end: it says why, and does not start.
+      if (isNewest(at.index) || noteOn(candle.time)?.refused) {
         refusedUntil.current = performance.now() + REFUSAL_MS;
         place();
         return;

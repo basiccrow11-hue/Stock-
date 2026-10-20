@@ -20,13 +20,16 @@ import { afterHoursCloseMinute, exchangeDate, exchangeMinuteOfDay, exchangeTimeT
  * close), where its data ends; a daily candle at that close, so all of its day is in and the next candle is
  * the next day; a candle that is one of the data's own bars (a chart at the data's bar size or finer) where
  * that bar ends. Never before the candle's last bar has ended, whichever comes later (an hourly bar from
- * 13:00 in a 4-hour candle that ends at 13:30). Null when no bar is in that candle.
+ * 13:00 in a 4-hour candle that ends at 13:30). Null when no bar is in that candle. Only the first `count` of
+ * `bars` are looked at (all of them by default), so a replay's own bars can be passed whole, uncopied, with
+ * how many of them the chart shows.
  */
-export function cutTime(start: UnixSeconds, timeframe: Timeframe, bars: readonly Bar[], ends: readonly UnixSeconds[], barTimeframe: Timeframe): UnixSeconds | null {
+export function cutTime(start: UnixSeconds, timeframe: Timeframe, bars: readonly Bar[], ends: readonly UnixSeconds[], barTimeframe: Timeframe, count = bars.length): UnixSeconds | null {
   // A daily candle starts at the 09:30 open, after its day's pre-market bars.
   const from = timeframe === '1D' ? exchangeTimeToUnix(exchangeDate(start), 0) : start;
+  const n = Math.min(count, bars.length);
   let last = -1;
-  for (let i = lastIndexAtOrBefore(bars, from - 1, (b) => b.time) + 1; i < bars.length && candleFor(bars[i].time, timeframe, barTimeframe).start === start; i++) last = i;
+  for (let i = lastIndexAtOrBefore(bars, from - 1, (b) => b.time) + 1; i < n && candleFor(bars[i].time, timeframe, barTimeframe).start === start; i++) last = i;
   if (last < 0) return null;
   const barEnd = ends[last];
   const day = exchangeDate(bars[last].time);
@@ -85,17 +88,22 @@ export const HOURS_DAYS = 5;
  * When the data's sessions end, in minutes of the exchange day: the latest any of `bars` (with `ends`) ends
  * on the HOURS_DAYS trading days up to `day`, as the replay reads a stock's hours from its recent bars
  * (16:00 for regular-hours data, 20:00 with the after-hours). Null when none of `bars` is in those days.
- * A bar replay ends there on its last day, so it never plays an after-hours the data does not have.
+ * A bar replay ends there on its last day, so it never plays an after-hours the data does not have. Only the
+ * first `count` of `bars` are looked at, as in cutTime. A bar never ends before the one before it (barEnds), so
+ * each day's last bar is the one that ends latest that day: one bar is looked at per day, from the last back,
+ * as select-bar mode asks this of each candle the pointer crosses (cutWarning).
  */
-export function sessionEndMinute(bars: readonly Bar[], ends: readonly UnixSeconds[], day: string): number | null {
+export function sessionEndMinute(bars: readonly Bar[], ends: readonly UnixSeconds[], day: string, count = bars.length): number | null {
   let from = day;
   for (let i = 0; i < HOURS_DAYS; i++) from = prevTradingDay(from);
   const since = exchangeTimeToUnix(from, 0);
   const until = exchangeTimeToUnix(nextTradingDay(day), 0);
   let close: number | null = null;
-  for (let i = lastIndexAtOrBefore(bars, since - 1, (b) => b.time) + 1; i < bars.length && bars[i].time < until; i++) {
+  for (let i = Math.min(count, bars.length, lastIndexAtOrBefore(bars, until - 1, (b) => b.time) + 1) - 1; i >= 0 && bars[i].time >= since; ) {
     const end = Math.min(24 * 60, exchangeMinuteOfDay(bars[i].time) + (ends[i] - bars[i].time) / 60);
     close = Math.max(close ?? 0, end);
+    // The last bar of the day before it.
+    i = lastIndexAtOrBefore(bars, exchangeTimeToUnix(exchangeDate(bars[i].time), 0) - 1, (b) => b.time);
   }
   return close;
 }
@@ -122,14 +130,15 @@ export function candleSpeed(timeframe: Timeframe, speeds: readonly number[]): nu
 /**
  * A trading day from `from` to `to` (both included), each as likely as the next, for Random bar: from
  * `days` when the data has gaps (an imported file's days with bars), and not one of `except` (days tried
- * already). Null when there is none.
+ * already, or those it says no to). Null when there is none.
  */
-export function randomDay(from: string, to: string, days?: readonly string[] | null, rand: () => number = Math.random, except?: ReadonlySet<string>): string | null {
+export function randomDay(from: string, to: string, days?: readonly string[] | null, rand: () => number = Math.random, except?: ReadonlySet<string> | ((day: string) => boolean)): string | null {
+  const out = typeof except === 'function' ? except : (d: string) => !!except?.has(d);
   const pool: string[] = [];
   if (days) {
-    for (const d of days) if (d >= from && d <= to && !except?.has(d)) pool.push(d);
+    for (const d of days) if (d >= from && d <= to && !out(d)) pool.push(d);
   } else {
-    for (let d = tradingDayOnOrAfter(from); d <= to; d = nextTradingDay(d)) if (!except?.has(d)) pool.push(d);
+    for (let d = tradingDayOnOrAfter(from); d <= to; d = nextTradingDay(d)) if (!out(d)) pool.push(d);
   }
   return pool.length ? pool[Math.min(pool.length - 1, Math.floor(rand() * pool.length))] : null;
 }
@@ -141,11 +150,28 @@ export function randomDay(from: string, to: string, days?: readonly string[] | n
  */
 export const VENDOR_RANDOM_DAYS = 480;
 
-/** The first day Random bar picks from on a vendor's data that ends on `lastDay` (VENDOR_RANDOM_DAYS). */
-export function vendorRandomFrom(lastDay: string): string {
+/**
+ * The first day Random bar picks from on a vendor's data that ends on `lastDay` (VENDOR_RANDOM_DAYS). A chart
+ * that also loads `historyDays` of history before the day picked (one of 30-minute candles or more) picks from
+ * that many fewer, so its history is within the plan's reach too, and not refused.
+ */
+export function vendorRandomFrom(lastDay: string, historyDays = 0): string {
   let d = lastDay;
-  for (let i = 0; i < VENDOR_RANDOM_DAYS; i++) d = prevTradingDay(d);
+  for (let i = 0; i < VENDOR_RANDOM_DAYS - historyDays; i++) d = prevTradingDay(d);
   return d;
+}
+
+/**
+ * The days a replay that loads `back` trading days of bars before the day it starts and plays on for at most
+ * `ahead` after it would show some of the days `from` to `to` from: `ahead` trading days before `from` to `back`
+ * after `to`, both included.
+ */
+export function daysReaching(from: string, to: string, back: number, ahead: number): { from: string; to: string } {
+  let lo = from;
+  for (let i = 0; i < ahead; i++) lo = prevTradingDay(lo);
+  let hi = to;
+  for (let i = 0; i < back; i++) hi = nextTradingDay(hi);
+  return { from: lo, to: hi };
 }
 
 /**

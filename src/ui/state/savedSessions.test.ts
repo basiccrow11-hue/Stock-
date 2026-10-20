@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { exchangeDate, exchangeTimeToUnix } from '../../core/time';
+import { exchangeDate, exchangeTimeToUnix, nextTradingDay } from '../../core/time';
 import type { JournalEntry } from '../../core/journal';
 import { CHALLENGES } from '../../core/challenges/challenges';
 
@@ -1190,14 +1190,18 @@ describe('the chart with no session beside a replay not finished', () => {
     return store.getBaseBars(symbol);
   }
 
-  /** A replay of SPY (and QQQ on its clock) `back` trading days before the demo data's last, left by a closed tab at 10:05. */
-  async function leftUnfinished(blind = false, back = 2) {
+  /**
+   * A replay of SPY (and QQQ on its clock) `back` trading days before the demo data's last, left by a closed tab
+   * five minutes after its start (10:00, or as `more` says, with the rest of its setup).
+   */
+  async function leftUnfinished(blind = false, back = 2, more: { startTime?: string; endTime?: string; endDate?: (day: string) => string } = {}) {
     const a = await page();
     const { demoProvider } = await import('./dataRegistry');
     const { prevTradingDay } = await import('../../core/time');
     let day = demoProvider.lastDate;
     for (let i = 0; i < back; i++) day = prevTradingDay(day);
-    expect(await a.store.startReplay({ ...replay, date: day, blind, extraSymbols: ['QQQ'] })).toBe(true);
+    const { endDate, ...times } = more;
+    expect(await a.store.startReplay({ ...replay, ...times, ...(endDate ? { endDate: endDate(day) } : {}), date: day, blind, extraSymbols: ['QQQ'] })).toBe(true);
     expect(a.store.useTrading.getState().session!.symbols).toEqual(['SPY', 'QQQ']);
     const id = a.store.useTrading.getState().session!.id;
     for (let i = 0; i < 5; i++) a.store.stepForward();
@@ -1234,30 +1238,98 @@ describe('the chart with no session beside a replay not finished', () => {
     b.store.setTimeframe('1m');
     expect((await browsed(b.store, 'AAPL')).at(-1)!.time).toBe(exchangeTimeToUnix(last, 19 * 60 + 59));
     expect(b.store.browseHoldOn('csv', 'SPY')).toBeNull();
-    // Discarding the session gives the chart shown all its bars at once.
+    // Discarding the session loads the chart shown again, to the end of its data: it had ended on the replay's day.
     expect((await browsed(b.store, 'SPY')).at(-1)!.time + 60).toBe(until);
     expect(await b.store.discardSession(id)).toBe(true);
-    expect(b.store.getBaseBars('SPY').at(-1)!.time).toBe(exchangeTimeToUnix(last, 19 * 60 + 59));
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(exchangeTimeToUnix(last, 19 * 60 + 59));
+    }, { timeout: 10_000 });
     expect((await b.store.browseLastClose('demo', 'QQQ'))!.last).not.toBe(dayBefore.close);
   });
 
-  it('stops its longer past there too, for a replay from before the days its bars are loaded for', async () => {
-    const { day } = await leftUnfinished(false, 40);
+  it('ends on the day of a replay left unfinished from before the days it loads, at that replay’s clock, with its longer past, until it is discarded', async () => {
+    // From 16:55, so its clock is past the regular close of its day.
+    const { id, day, last } = await leftUnfinished(false, 60, { startTime: '16:55', endTime: '20:00' });
     const b = await page();
+    const preview = vi.spyOn((await import('../../core/replay/ReplaySession')).ReplaySession, 'preview');
+    const loads = () => preview.mock.calls.filter(([, setup]) => setup.symbol === 'SPY').length;
     const until = (await b.saved.keptSessions())[0].now;
-    b.store.setTimeframe('1D');
+    expect(until).toBeGreaterThanOrEqual(exchangeTimeToUnix(day, 16 * 60 + 55));
+    expect(until).toBeLessThanOrEqual(exchangeTimeToUnix(day, 17 * 60));
+    // Its 1-minute bars: the days before it and that day up to its clock, not none (the days loaded before the
+    // data's end are all after it), loaded once, for that day.
+    const bars = await browsed(b.store, 'SPY');
+    expect(bars.length).toBeGreaterThan(1000);
+    expect(exchangeDate(bars[0].time) < day).toBe(true);
+    expect(bars.at(-1)!.time + 60).toBe(until);
+    expect(loads()).toBe(1);
+    expect(b.store.browseEndsEarly('SPY')).toBe(true);
+    expect(b.store.selectBarBlocked()).toBeNull();
+    // Hourly candles, with their longer past, up to there too.
+    b.store.setTimeframe('1h');
     await vi.waitFor(() => {
       b.store.getBaseBars('SPY');
-      expect(b.store.getChartHistory('SPY', '1D')?.status).toBe('ready');
+      expect(b.store.getChartHistory('SPY', '1h')?.status).toBe('ready');
     }, { timeout: 10_000 });
-    // Its loaded days are all after the replay's clock: none is shown, and the past stops at that clock, on
-    // the replay's day, as the replay's own chart does.
-    expect(b.store.getBaseBars('SPY')).toEqual([]);
     const { barEndTime } = await import('../../core/replay/ReplayEngine');
-    const h = b.store.getChartHistory('SPY', '1D')!;
+    const h = b.store.getChartHistory('SPY', '1h')!;
     expect(h.bars.length).toBeGreaterThan(100);
     for (const bar of h.bars) expect(barEndTime(bar, h.timeframe)).toBeLessThanOrEqual(until);
-    expect(exchangeDate(h.bars.at(-1)!.time)).toBe(day);
+    expect(b.store.getBaseBars('SPY').at(-1)!.time + 60).toBe(until);
+    // The data's last day is still known as its last, not that day: a cut there at 16:30 plays on into the
+    // regular sessions of the days after it, so it is not one with only after-hours trading left.
+    b.store.setTimeframe('1m');
+    await browsed(b.store, 'SPY');
+    b.store.setSelectingBar(true);
+    expect(b.store.cutWarning(exchangeTimeToUnix(day, 16 * 60 + 30))).toBeNull();
+    b.store.setSelectingBar(false);
+    expect(loads()).toBe(1);
+    // Discarded: the chart loads again, to the end of the data.
+    expect(await b.store.discardSession(id)).toBe(true);
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(exchangeTimeToUnix(last, 19 * 60 + 59));
+    }, { timeout: 10_000 });
+    expect(b.store.browseEndsEarly('SPY')).toBe(false);
+    expect(loads()).toBe(2);
+  });
+
+  it('loads its bars again when a replay running in another tab gets to another day, not as its clock moves on through a day', async () => {
+    const { id, day } = await leftUnfinished(false, 60, { endDate: (d) => nextTradingDay(nextTradingDay(d)) });
+    // Another tab carries it on.
+    locks.elsewhere.add(`stock-replay-session:${id}`);
+    const b = await page();
+    const preview = vi.spyOn((await import('../../core/replay/ReplaySession')).ReplaySession, 'preview');
+    const loads = () => preview.mock.calls.filter(([, setup]) => setup.symbol === 'SPY').length;
+    const bars = await browsed(b.store, 'SPY');
+    expect(b.store.browseHoldOn('demo', 'SPY')).toMatchObject({ elsewhere: true });
+    const until = b.store.browseHoldOn('demo', 'SPY')!.until;
+    expect(exchangeDate(until)).toBe(day);
+    expect(bars.at(-1)!.time + 60).toBe(until);
+    expect(exchangeDate(bars[0].time) < day).toBe(true);
+    expect(loads()).toBe(1);
+    /** That tab plays on to `t`, saves, and tells this one. */
+    const playsTo = async (t: number) => {
+      const kv = db.stores.get('kv')!;
+      const key = `session-summary:${id}`;
+      kv.set(key, { ...(kv.get(key) as object), now: t, savedAt: Date.now() });
+      window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-sessions-changed' }));
+      await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')!.until).toBe(t), { timeout: 3000 });
+      await vi.waitFor(() => {
+        b.store.getBaseBars('SPY');
+        expect(b.store.useTrading.getState().browse.loading).toBe(false);
+        expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(t - 60);
+      }, { timeout: 10_000 });
+    };
+    // On through its day: the bars loaded for that day show it, with none loaded again.
+    await playsTo(exchangeTimeToUnix(day, 15 * 60));
+    await settle();
+    expect(loads()).toBe(1);
+    // On to the next day: loaded again, once, to end there.
+    await playsTo(exchangeTimeToUnix(nextTradingDay(day), 11 * 60));
+    await settle();
+    expect(loads()).toBe(2);
   });
 
   it('is not drawn at all on the symbols of a blind replay left unfinished, whose dates it would show', async () => {
@@ -1300,11 +1372,14 @@ describe('the chart with no session beside a replay not finished', () => {
     expect(until).toBe(exchangeTimeToUnix(day, 600));
     expect(b.store.getBaseBars('SPY').at(-1)!.time + 60).toBe(until);
     expect(b.store.newestBarRefusal()).toBe('This is the last bar shown: the chart stops where the SPY replay in another tab was last saved. Pick an earlier one.');
-    // It ends there: the chart has all its bars again.
+    // It ends there: the chart has all its bars again, loaded again to the end of the data.
     await a.store.endSession();
     window.dispatchEvent(new StorageEvent('storage', { key: null }));
     await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')).toBeNull(), { timeout: 3000 });
-    expect(b.store.getBaseBars('SPY').at(-1)!.time).toBe(end);
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(end);
+    }, { timeout: 10_000 });
 
     // A blind one there: nothing of SPY is shown here, and this page says why.
     expect(await a.store.startReplay({ ...replay, date: day, blind: true })).toBe(true);
@@ -1312,6 +1387,135 @@ describe('the chart with no session beside a replay not finished', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: null }));
     await vi.waitFor(() => expect(b.store.browseHiddenReason()).toBe('A blind replay of SPY is running in another tab. Its chart stays hidden here until that replay ends, as its date does.'), { timeout: 3000 });
     expect(b.store.getBaseBars('SPY')).toEqual([]);
+  });
+
+  it('learns of a replay another tab starts and leaves paused once its save has landed, and of its end once its deletion has', async () => {
+    // A storage event reaches the other tabs only, after the write, and only for a change. Both pages share this
+    // window here: each change to localStorage is passed on as a browser passes it to the other tab.
+    const realSet = Storage.prototype.setItem;
+    const realRemove = Storage.prototype.removeItem;
+    const tell = (key: string) => void setTimeout(() => window.dispatchEvent(new StorageEvent('storage', { key })), 0);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      const changed = this.getItem(key) !== value;
+      realSet.call(this, key, value);
+      if (this === localStorage && changed) tell(key);
+    });
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (this: Storage, key: string) {
+      const changed = this.getItem(key) !== null;
+      realRemove.call(this, key);
+      if (this === localStorage && changed) tell(key);
+    });
+    // Each write to IndexedDB takes a while, as it can, and a read goes alongside them.
+    db.commitMs = 40;
+    db.readMs = { kv: 1 };
+    const a = await page();
+    const { demoProvider } = await import('./dataRegistry');
+    const { prevTradingDay } = await import('../../core/time');
+    const day = prevTradingDay(demoProvider.lastDate);
+    const b = await page();
+    const end = exchangeTimeToUnix(demoProvider.lastDate, 19 * 60 + 59);
+    expect((await browsed(b.store, 'SPY')).at(-1)!.time).toBe(end);
+    // The first tab starts a replay of SPY and leaves it paused: where its clock is gets noted once, as it starts,
+    // before its save is there to read.
+    expect(await a.store.startReplay({ ...replay, date: day })).toBe(true);
+    await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')).toMatchObject({ blind: false, elsewhere: true }), { timeout: 4000 });
+    const until = b.store.browseHoldOn('demo', 'SPY')!.until;
+    expect(until).toBe(exchangeTimeToUnix(day, 600));
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(until - 60);
+    }, { timeout: 10_000 });
+    // It ends: once its save is gone, the chart no longer stops there, and it does not again.
+    await a.store.endSession();
+    await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')).toBeNull(), { timeout: 4000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(b.store.browseHoldOn('demo', 'SPY')).toBeNull();
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.getBaseBars('SPY').at(-1)?.time).toBe(end);
+    }, { timeout: 10_000 });
+  }, 20_000);
+
+  it('starts no replay from a date or a random day on the symbols of a blind replay left unfinished, and the Replay menu says why', async () => {
+    const { day } = await leftUnfinished(true);
+    const b = await page();
+    b.store.setActiveSymbol('QQQ');
+    await vi.waitFor(() => {
+      b.store.getBaseBars('QQQ');
+      expect(b.store.browseHiddenReason()).not.toBeNull();
+    });
+    const why = b.store.browseHiddenReason()!;
+    expect(why).toBe('A blind replay of QQQ is unfinished. Resume or discard it to chart QQQ here.');
+    // Either would show days of that ticker with their dates, its replay's days among them, or near them.
+    expect(await b.store.startRandomBar(() => 0.5)).toBe(false);
+    expect(b.store.useTrading.getState()).toMatchObject({ session: null, loading: false, error: why });
+    b.store.dismissError();
+    expect(await b.store.startReplayAt(day, '10:00')).toBe(false);
+    expect(b.store.useTrading.getState()).toMatchObject({ session: null, loading: false, error: why });
+    b.store.dismissError();
+
+    // The Replay button's menu greys them out and says why; they do nothing. The full setup form is still there.
+    const { ReplayMenu } = await import('../components/ReplayMenu');
+    const opened: string[] = [];
+    const menu = render(createElement(ReplayMenu, { onNewSession: (mode: 'replay' | 'sim') => void opened.push(mode) }));
+    act(() => menu.el.querySelector<HTMLButtonElement>('button[aria-label="More ways to start a replay"]')!.click());
+    const item = (label: string) => [...menu.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((x) => x.textContent === label)!;
+    for (const label of ['Select date…', 'Random bar']) {
+      expect(item(label).getAttribute('aria-disabled'), label).toBe('true');
+      expect(item(label).title, label).toBe(why);
+    }
+    act(() => item('Random bar').click());
+    act(() => item('Select date…').click());
+    await settle();
+    expect(b.store.useTrading.getState()).toMatchObject({ session: null, loading: false, error: null });
+    expect(menu.el.querySelector('[role="dialog"]')).toBeNull();
+    expect(item('Advanced replay setup…').getAttribute('aria-disabled')).toBeNull();
+    // Another ticker's chart is shown, and they are there to use.
+    act(() => b.store.setActiveSymbol('AAPL'));
+    expect(item('Random bar').getAttribute('aria-disabled')).toBeNull();
+    expect(item('Random bar').title).toBe('Start at the open of a day picked at random');
+    expect(item('Select date…').getAttribute('aria-disabled')).toBeNull();
+    menu.unmount();
+  });
+
+  it('Random bar picks no day whose replay would show some of a replay left unfinished on that ticker', async () => {
+    const { day } = await leftUnfinished(false, 2);
+    const b = await page();
+    await browsed(b.store, 'SPY');
+    expect(b.store.browseHoldOn('demo', 'SPY')).not.toBeNull();
+    // The latest days of the data would load that replay's day among the 15 before them, and the 5 before it play
+    // on into it: the latest day it can pick is the one before those.
+    const { prevTradingDay } = await import('../../core/time');
+    let latest = day;
+    for (let i = 0; i < 6; i++) latest = prevTradingDay(latest);
+    expect(await b.store.startRandomBar(() => 0.999999)).toBe(true);
+    expect(b.store.useTrading.getState().now).toBe(exchangeTimeToUnix(latest, 9 * 60 + 30));
+  });
+
+  it('Random bar says why it picks nothing when every day would show some of a replay left unfinished', async () => {
+    const a = await page();
+    const registry = await import('./dataRegistry');
+    const days = ['2024-03-11', '2024-03-12', '2024-03-13', '2024-03-14', '2024-03-15'];
+    const bars = days.flatMap((d) => Array.from({ length: 390 }, (_, i) => ({ time: exchangeTimeToUnix(d, 570 + i), open: 10, high: 10.1, low: 9.9, close: 10, volume: 1000 })));
+    await registry.saveCsvDataset({ symbol: 'ACME', name: 'ACME', baseTimeframe: '1m', importedAt: 1, fileName: 'a.csv', bars });
+    expect(await a.store.startReplay({ ...replay, providerId: 'csv', symbol: 'ACME', date: '2024-03-13' })).toBe(true);
+    a.store.stepForward();
+    await settle();
+    a.store.pause();
+    await settle();
+    window.dispatchEvent(new Event('pagehide'));
+    rememberNothing();
+    const b = await page();
+    await (await import('./dataRegistry')).loadCsvDatasets();
+    b.store.setBrowseSource('csv');
+    await browsed(b.store, 'ACME');
+    expect(b.store.browseHoldOn('csv', 'ACME')).not.toBeNull();
+    expect(await b.store.startRandomBar(() => 0.5)).toBe(false);
+    expect(b.store.useTrading.getState()).toMatchObject({
+      session: null,
+      loading: false,
+      error: 'Every day Random bar could pick would show some of your unfinished ACME replay. Resume or discard it, or use Select date… instead.',
+    });
   });
 });
 

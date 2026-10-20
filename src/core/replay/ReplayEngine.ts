@@ -15,6 +15,7 @@ import { TIMEFRAME_MINUTES } from '../types';
 import { BarAggregator, aggregateBars, candleFor } from '../data/aggregate';
 import { exchangeDate, exchangeTimeToUnix, regularCloseMinute } from '../time';
 import { lastIndexAtOrBefore } from '../util/math';
+import { cutTime, sessionEndMinute } from './barReplay';
 
 export interface ReplayWindow {
   symbol: string;
@@ -227,6 +228,20 @@ export class ReplayEngine {
    */
   revealedEndedBy(t: UnixSeconds): number {
     return Math.min(this.#cursor + 1, lastIndexAtOrBefore(this.#ends, t, (x) => x) + 1);
+  }
+
+  /**
+   * cutTime (barReplay) on the first `count` revealed bars (at most all of them): when a replay cut at the
+   * `timeframe` candle starting at `start` begins, or null when none of those bars is in it. Worked out on the
+   * engine's own bars, none copied, so the chart can ask for every candle the pointer crosses.
+   */
+  cutTime(start: UnixSeconds, timeframe: Timeframe, count = this.revealedCount): UnixSeconds | null {
+    return cutTime(start, timeframe, this.#bars, this.#ends, this.baseTimeframe, Math.min(count, this.#cursor + 1));
+  }
+
+  /** sessionEndMinute (barReplay) on the first `count` revealed bars, as cutTime: when the data's sessions end around `day`. */
+  sessionEndMinute(day: string, count = this.revealedCount): number | null {
+    return sessionEndMinute(this.#bars, this.#ends, day, Math.min(count, this.#cursor + 1));
   }
 
   /** Whether there is a next bar and it completes by `t` (one that ends after the end time is never revealed). */

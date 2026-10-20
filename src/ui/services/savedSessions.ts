@@ -103,6 +103,8 @@ const RECORD = 'session:';
 const SUMMARY = 'session-summary:';
 const CHECKPOINT = 'session-cp:';
 const POSITION = 'stock-replay-session-position:';
+/** Written once a session is saved or deleted (noteSessionsChanged), to tell the other tabs. */
+const CHANGED = 'stock-replay-sessions-changed';
 const TAB = 'stock-replay-tab-session';
 const LOCK = 'stock-replay-session:';
 
@@ -173,6 +175,7 @@ export async function writeSession(s: SavedSession): Promise<void> {
   const before = listedCheckpoints.get(id) ?? [];
   listedCheckpoints.set(id, keys);
   for (const key of before) if (!listed.has(key)) await idb.delete('kv', key);
+  noteSessionsChanged();
 }
 
 /** The session saved under `id`, or null when there is none this version of the app can read whole. */
@@ -236,6 +239,21 @@ export async function deleteSession(id: string): Promise<void> {
   await idb.delete('kv', SUMMARY + id);
   await idb.delete('kv', RECORD + id);
   for (const { key } of await idb.withPrefix<{ key: string }>('kv', `${CHECKPOINT}${id}:`)) await idb.delete('kv', key);
+  noteSessionsChanged();
+}
+
+/**
+ * Tells the other tabs (onPositionsNotedElsewhere) that a session's saved summary was written or deleted, once
+ * it is: where its clock is, noted in localStorage at once, tells them before its summary is there to read, or
+ * still there after its deletion, and a tab that read it then would go on as if nothing had changed. A new
+ * value each time, so each one is told (a value written again unchanged tells no one).
+ */
+function noteSessionsChanged(): void {
+  try {
+    localStorage.setItem(CHANGED, `${Date.now()}:${newId('saved')}`);
+  } catch {
+    /* storage blocked: the other tabs look again when they come into view */
+  }
 }
 
 /** Every unfinished session kept, those a tab is running included. */
@@ -269,12 +287,12 @@ export function notePosition(id: string, p: SessionPosition): void {
 
 /**
  * Calls `fn` when another tab notes where its session's clock has got to, or forgets a session (in
- * localStorage, which tells the other tabs): it started, played, saved or ended one. Returns what stops
- * listening.
+ * localStorage, which tells the other tabs): it started, played, saved or ended one; and once its save or
+ * deletion of one has landed (noteSessionsChanged). Returns what stops listening.
  */
 export function onPositionsNotedElsewhere(fn: () => void): () => void {
   const onStorage = (e: StorageEvent) => {
-    if (e.key === null || e.key.startsWith(POSITION)) fn();
+    if (e.key === null || e.key === CHANGED || e.key.startsWith(POSITION)) fn();
   };
   window.addEventListener('storage', onStorage);
   return () => window.removeEventListener('storage', onStorage);

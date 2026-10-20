@@ -40,7 +40,7 @@ import type { ChartHistory } from '../../core/replay/ReplaySession';
 import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, regularCloseMinute, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
-import { candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
+import { browseEndsEarly, candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
 import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { BarCutLayer } from './BarCutLayer';
@@ -711,13 +711,14 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     }
   }
 
-  function syncScales(force = false): void {
+  function syncScales(force = false): boolean {
     const chart = chartRef.current;
-    if (!chart) return;
+    if (!chart) return false;
     const shown = candlesRef.current.length > 0;
-    if (!force && shown === scalesShownRef.current) return;
+    if (!force && shown === scalesShownRef.current) return false;
     scalesShownRef.current = shown;
     chart.panes().forEach((_, i) => chart.priceScale('right', i).applyOptions({ visible: shown }));
+    return true;
   }
 
   /**
@@ -1076,9 +1077,11 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // (rightEdgeOn), and on this one once the history it waited for is in (pendingEdgeOn). Its window reaches
     // back to a margin before the view, which keeps its width in candles. The first chart drawn opens on the
     // newest candle by itself, but the chart with no session with no view to keep (the first chart in the tab,
-    // another symbol or data source, back from a session) on the day before its last (browseOpening).
+    // another symbol or data source, back from a session) on the day before its last (browseOpening); or, when
+    // it ends on the day of a saved session on it (browseEndsEarly), on its newest candle, where it stops.
     let edge = !drawn ? undefined : same ? pendingEdgeOn(merged.candles, chart, history) : rightEdgeOn(merged.candles, drawn, chart, range, history);
-    if ((edge === undefined || edge === null) && !chart.session && (old.length === 0 || (!!drawn && drawn.session !== chart.session))) edge = browseOpening(merged.candles) ?? edge;
+    if ((edge === undefined || edge === null) && !chart.session && (old.length === 0 || (!!drawn && drawn.session !== chart.session)))
+      edge = merged.candles.length && browseEndsEarly(symbol) ? null : (browseOpening(merged.candles) ?? edge);
     let onScreen = 0;
     let oldest = Infinity;
     if (range && edge !== undefined) onScreen = merged.candles.length - (edge ?? merged.candles.length - 1) + Math.ceil(range.to - range.from);
@@ -1193,6 +1196,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     if (heldRef.current !== null) {
       syncWindowVersion();
       syncOffNewest();
+      syncScalesOnTail();
       emitLegend();
       return;
     }
@@ -1215,7 +1219,17 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       syncPercentBase();
     });
     syncOffNewest();
+    syncScalesOnTail();
     emitLegend();
+  }
+
+  /**
+   * The price scales back once candles come to a chart that had none (a replay started at the first bar of its
+   * data, a symbol whose data begins after the replay's start): with the plot narrower then, what is placed
+   * over it (drawings, the bar picker) is placed again.
+   */
+  function syncScalesOnTail(): void {
+    if (syncScales()) setGeometryVersion((v) => v + 1);
   }
 
   useEffect(() => {
