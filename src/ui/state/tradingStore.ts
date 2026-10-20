@@ -2156,6 +2156,26 @@ const NOTHING_FOLLOWS = {
 };
 
 /**
+ * Why nothing follows a replay of `symbol` that would end on `endDate` (playOnEndDate) from what was picked
+ * (`what`: a bar of the chart, or a moment), the data's days being `days` (noteDataDays): NOTHING_FOLLOWS at
+ * the end of the data; but where it stops before a day imported data has no bars on (`endDate` before its last
+ * day, and the next trading day not among its days), which day that is and the day it goes on from, as the
+ * chart shows candles after it. A vendor's data, with no list of days, never stops early: the plain words.
+ * Select-bar mode (cutWarning) and the start itself (startReplayFrom) both say it so.
+ */
+function nothingFollows(symbol: string, endDate: string, days: { last: string; dates: readonly string[] | null }, what: 'bar' | 'time'): string {
+  const missing = nextTradingDay(endDate);
+  if (!days.dates || endDate >= days.last || days.dates.includes(missing)) return NOTHING_FOLLOWS[what];
+  let next = days.last;
+  for (const d of days.dates) if (d > endDate && d < next) next = d;
+  const until = prevTradingDay(next);
+  const gap = until > missing ? `from ${missing} to ${until}` : `on ${missing}`;
+  return what === 'bar'
+    ? `Your data has no ${symbol} bars ${gap}, so a replay from this bar would end there. Pick an earlier bar, or one from ${next} on.`
+    : `Your data has no ${symbol} bars ${gap}, so a replay from that moment would end there. Pick an earlier date or time, or one from ${next} on.`;
+}
+
+/**
  * How a bar replay of `symbol` from `provider` on a `timeframe` chart plays: the size of the candles the chart
  * draws (the timeframe, or the data's own bars when those are coarser: a daily file on a 1-minute chart),
  * by which it plays on and picks its speed; the trading days it loads before its start, at least as many as
@@ -2197,6 +2217,7 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
   const timeframe = useTrading.getState().timeframe;
   const plan = barReplayPlan(provider, symbol, timeframe);
   const day = exchangeDate(t);
+  let days: { last: string; dates: readonly string[] | null };
   let endDate: string;
   let close: number;
   try {
@@ -2204,8 +2225,9 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
     const reason = provider.unavailableReason() ?? (await notListed(provider, symbol));
     if (reason) return startRefused(reason);
     const last = await lastDataDay(provider, symbol);
-    const dates = await provider.sessionDates?.(symbol);
-    noteDataDays(provider, symbol, last, dates ?? null);
+    const dates = (await provider.sessionDates?.(symbol)) ?? null;
+    noteDataDays(provider, symbol, last, dates);
+    days = { last, dates };
     endDate = playOnEndDate(day, plan.candles, last, dates, plan.maxDays);
     close = await sessionClose(provider, symbol, day, known);
   } catch (e) {
@@ -2213,7 +2235,7 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
     return startRefused((e as Error).message);
   }
   const endTime = hhmm(close);
-  if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(NOTHING_FOLLOWS[what]);
+  if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(nothingFollows(symbol, endDate, days, what));
   const startTime = hhmm((t - exchangeTimeToUnix(day, 0)) / 60);
   const speed = candleSpeed(plan.candles, REPLAY_SPEEDS);
   let retrying = false;
@@ -2225,7 +2247,7 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
   const failed = useTrading.getState().error;
   if (!ok && failed) {
     // The replay's own words for an empty window are about start and end times, which were not asked for here.
-    const message = failed === 'No data between the selected start and end times.' ? NOTHING_FOLLOWS[what] : failed;
+    const message = failed === 'No data between the selected start and end times.' ? nothingFollows(symbol, endDate, days, what) : failed;
     if (useTrading.getState().session) useTrading.setState({ error: null });
     startRefused(message);
   }
@@ -2278,7 +2300,7 @@ export function cutWarning(candleStart: UnixSeconds): CutNote | null {
   const plan = barReplayPlan(provider, symbol, timeframe);
   const day = exchangeDate(t);
   const endDate = playOnEndDate(day, plan.candles, days.last, days.dates, plan.maxDays);
-  if (exchangeTimeToUnix(endDate, parseHHMM(hhmm(known.sessionEnd(day) ?? AFTERHOURS_CLOSE))) <= t) return { text: NOTHING_FOLLOWS.bar, refused: true };
+  if (exchangeTimeToUnix(endDate, parseHHMM(hhmm(known.sessionEnd(day) ?? AFTERHOURS_CLOSE))) <= t) return { text: nothingFollows(symbol, endDate, days, 'bar'), refused: true };
   return onlyAfterHoursFollow(t, endDate) ? { text: CUT_AFTER_HOURS, refused: false } : null;
 }
 
