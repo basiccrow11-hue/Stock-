@@ -368,6 +368,14 @@ export function releaseSession(id: string): void {
 }
 
 /**
+ * Whether this tab holds the lock on session `id` (claimSession): it runs it, or is carrying it on, ending or
+ * discarding it. listSessions leaves such a session out as it does one another tab runs, so this tells them apart.
+ */
+export function heldHere(id: string): boolean {
+  return held.has(id);
+}
+
+/**
  * Calls `fn` once a session another tab is running is let go there (it ended there, or the tab closed or
  * crashed), so the list of unfinished sessions can be looked at again. Returns what stops listening.
  */

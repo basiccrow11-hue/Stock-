@@ -671,6 +671,126 @@ describe('unfinished sessions and other tabs', () => {
     expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([...older].reverse());
     expect(p.store.useTrading.getState().session!.id).toBe(other);
   });
+
+  /**
+   * This tab's card of unfinished sessions (the sessions it names), and the chart of SPY with no session beside
+   * it, which a replay of SPY you have not finished, or one in another tab, keeps from being drawn.
+   */
+  async function besideTheCard(p: Awaited<ReturnType<typeof page>>) {
+    const { UnfinishedSessions } = await import('../components/UnfinishedSessions');
+    const card = render(createElement(UnfinishedSessions));
+    p.store.setActiveSymbol('SPY');
+    // As the chart asks for its bars.
+    p.store.getBaseBars('SPY');
+    return { listed: () => [...card.el.querySelectorAll('li strong')].map((e) => e.textContent), unmount: card.unmount };
+  }
+  /** Another tab's save or deletion of a session, as the browser tells this one. */
+  const told = () => window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-sessions-changed' }));
+  const yours = /^Your SPY replay of 2024-03-12 is unfinished/;
+  const elsewhere = /^A SPY replay is running in another tab/;
+
+  it('offers a replay another tab started after this one opened once that tab closes, as the note on its chart says it is yours to resume', async () => {
+    const b = await page();
+    const card = await besideTheCard(b);
+    await settle();
+    expect(card.listed()).toEqual([]);
+    // Another tab starts a replay of SPY: its save tells this one, which no longer charts SPY.
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(elsewhere), { timeout: 3000 });
+    await settle();
+    expect(card.listed()).toEqual([]);
+    // It closes without ending it: its lock goes with it, and its last save tells this tab.
+    a.store.pause();
+    await settle();
+    locks.mine.delete(`stock-replay-session:${id}`);
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(yours), { timeout: 3000 });
+    await vi.waitFor(() => expect(card.listed()).toEqual(['SPY · 2024-03-12']));
+    card.unmount();
+  });
+
+  it('no longer offers a replay left unfinished once another tab carries it on, as the note on its chart says that tab runs it', async () => {
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    a.store.pause();
+    await settle();
+    rememberNothing();
+    // A tab opened after that one closed offers it.
+    const b = await page();
+    const card = await besideTheCard(b);
+    await vi.waitFor(() => expect(card.listed()).toEqual(['SPY · 2024-03-12']));
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(yours));
+    // Another tab carries it on: its save tells this one.
+    const c = await page();
+    expect(await c.store.resumeSession(id)).toBe(true);
+    await settle();
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(elsewhere), { timeout: 3000 });
+    await vi.waitFor(() => expect(card.listed()).toEqual([]));
+    card.unmount();
+  });
+
+  it('sends focus on to Play once a session resumed from the keyboard is in, never to the page, and leaves focus put elsewhere meanwhile', async () => {
+    // Two replays and the simulated market, each left by a tab that closed.
+    const leave = async (start: (store: Awaited<ReturnType<typeof page>>['store']) => Promise<boolean>) => {
+      const a = await page();
+      expect(await start(a.store)).toBe(true);
+      await settle();
+      a.store.pause();
+      await settle();
+      rememberNothing();
+      return a.store.useTrading.getState().session!.id;
+    };
+    const replayId = await leave((store) => store.startReplay(replay));
+    const otherId = await leave((store) => store.startReplay({ ...replay, symbol: 'QQQ' }));
+    const simId = await leave((store) => store.startSim({ config: { seed: 4 }, startingBalance: 25_000, speed: 1 }));
+    const b = await page();
+    // Laid out, as the browser does (Play is focused only when it is on screen).
+    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(function (this: Element) {
+      return (this.closest('[hidden]') ? [] : [new DOMRect(0, 0, 10, 10)]) as unknown as DOMRectList;
+    });
+    const { ChartPanel } = await import('../components/ChartPanel');
+    const panel = render(createElement(ChartPanel, { onNewSession: () => undefined }));
+    const resume = (sym: string) => [...panel.el.querySelectorAll<HTMLElement>('.unfinished-list li')].find((li) => li.querySelector('strong')!.textContent!.startsWith(sym))?.querySelector<HTMLButtonElement>('.btn.primary');
+    const play = () => panel.el.querySelector<HTMLButtonElement>('.replay-bar [data-home="play"]');
+    /** Resume on the row of `sym`, reached with the keyboard: focused, then pressed (Enter clicks it). */
+    const press = async (sym: string) => {
+      await vi.waitFor(() => expect(resume(sym)).toBeTruthy());
+      act(() => resume(sym)!.focus());
+      await act(async () => resume(sym)!.click());
+    };
+    await press('SPY');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(replayId));
+    await act(async () => undefined);
+    expect(play()!.textContent).toContain('Play');
+    expect(document.activeElement).toBe(play());
+    await act(async () => void (await b.store.endSession()));
+
+    // The simulated market: its Start market.
+    await press('Simulated market');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(simId));
+    await act(async () => undefined);
+    expect(play()!.textContent).toContain('Start market');
+    expect(document.activeElement).toBe(play());
+    await act(async () => void (await b.store.endSession()));
+
+    // Focus put on the ticker button while it loads stays there.
+    await press('QQQ');
+    const symbol = panel.el.querySelector<HTMLElement>('.chart-toolbar .sym-btn')!;
+    act(() => symbol.focus());
+    await vi.waitFor(() => expect(b.store.useTrading.getState().session?.id).toBe(otherId));
+    await act(async () => undefined);
+    expect(play()).not.toBeNull();
+    expect(document.activeElement).toBe(symbol);
+    await act(async () => void (await b.store.endSession()));
+    panel.unmount();
+  });
 });
 
 describe('the Trade screen as a reload carries its session on', () => {
@@ -1536,6 +1656,82 @@ describe('the chart with no session beside a replay not finished', () => {
     expect(b.store.randomBarBlocked()).toBeNull();
     expect(await b.store.startRandomBar(() => 0.999999)).toBe(true);
     expect(b.store.useTrading.getState().now).toBe(exchangeTimeToUnix(demoProvider.lastDate, 9 * 60 + 30));
+  });
+
+  /**
+   * Makes carrying a replay on load its data for a while, until what this returns is called, and then fail as
+   * a vendor's rate limit does. `called`: once the load has begun (the session is this tab's by then).
+   */
+  async function slowFailingResume() {
+    let fail!: () => void;
+    const failing = new Promise<void>((r) => (fail = r));
+    const { ReplaySession } = await import('../../core/replay/ReplaySession');
+    const load = vi.spyOn(ReplaySession, 'resume').mockImplementation(async () => {
+      await failing;
+      throw new Error('Polygon rate limit reached. Wait a minute and try again.');
+    });
+    return { fail, called: () => vi.waitFor(() => expect(load).toHaveBeenCalled()) };
+  }
+
+  it('still says a replay you have not finished is yours to resume or discard when carrying it on fails, though the saved sessions were read meanwhile', async () => {
+    const { id, day } = await leftUnfinished();
+    const b = await page();
+    b.store.setActiveSymbol('SPY');
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    });
+    const resume = await slowFailingResume();
+    const resumed = b.store.resumeSession(id);
+    await resume.called();
+    // The window comes back into view as it loads: the saved sessions are read again. It is not free, as this
+    // tab holds it, but no other tab runs it.
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+    await settle();
+    expect(b.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: false });
+    resume.fail();
+    expect(await resumed).toBe(false);
+    expect(b.store.useTrading.getState()).toMatchObject({ session: null, loading: false, error: 'Polygon rate limit reached. Wait a minute and try again.' });
+    await settle();
+    expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    expect(b.store.randomBarBlocked()).toBe(unfinishedWhy('SPY', day));
+    // And stays so, as its card offers it.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    expect((await b.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
+  });
+
+  it('reads the saved sessions again once carrying a replay on fails, so a read that found it this tab’s and ends after that does not leave it said to run in another tab', async () => {
+    const { id, day } = await leftUnfinished();
+    // A tab that has not read them yet (its chart has not asked for bars).
+    const c = await page();
+    await settle();
+    expect(c.store.useTrading.getState().browse.holds).toEqual([]);
+    const resume = await slowFailingResume();
+    const resumed = c.store.resumeSession(id);
+    await resume.called();
+    // A read starts as it loads (the window comes back into view). It finds the session not free, as this tab
+    // holds it; what data source it is on (read once) comes in only after carrying it on has failed.
+    const gate = () => {
+      let open!: () => void;
+      return { held: new Promise<void>((r) => (open = r)), open: () => open() };
+    };
+    const summaries = gate();
+    const record = gate();
+    db.readMs = { kv: 1 };
+    db.readHeld = { kv: summaries.held };
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(db.reading.size).toBeGreaterThan(0));
+    db.readHeld = { kv: record.held };
+    summaries.open();
+    await settle();
+    resume.fail();
+    expect(await resumed).toBe(false);
+    record.open();
+    await settle();
+    expect(c.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: false });
+    expect(c.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
   });
 });
 

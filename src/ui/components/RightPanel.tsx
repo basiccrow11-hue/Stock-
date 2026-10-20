@@ -1,6 +1,6 @@
 /** Right column: the account in one line, active challenge progress, open positions and the order ticket. */
 import { useMemo } from 'react';
-import { useTrading } from '../state/tradingStore';
+import { browseHiddenBy, useTrading } from '../state/tradingStore';
 import { useChallenges } from '../state/challengeStore';
 import { CHALLENGES } from '../../core/challenges/challenges';
 import { OrderTicket } from './OrderTicket';
@@ -84,9 +84,20 @@ function ChallengeWidget() {
  * has the Replay button; this column only says what it will hold.
  */
 function NoSession({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
+  // While a replay of the chart's ticker you have not finished, or one another tab runs, keeps that chart
+  // from being drawn (browseHiddenBy), Replay is off there: the line says what to do first, as the note on
+  // the chart does. No date, which a blind one hides.
+  const how = useTrading(() => {
+    const by = browseHiddenBy();
+    if (!by) return 'Press Replay above the chart, then click the bar to start from.';
+    if (by.elsewhere) return 'Pick another ticker, or end the replay running in another tab, then press Replay.';
+    return by.mine.length > 1
+      ? 'Resume one of your unfinished replays on the chart, or discard them or pick another ticker, then press Replay.'
+      : 'Resume your unfinished replay on the chart, or discard it or pick another ticker, then press Replay.';
+  });
   return (
     <div className="right-idle">
-      <p>Press Replay above the chart, then click the bar to start from. Your paper account and order ticket appear here.</p>
+      <p>{how} Your paper account and order ticket appear here.</p>
       <p className="right-idle-links">
         <button type="button" className="link-btn" onClick={() => onNewSession('replay')}>
           Advanced replay setup

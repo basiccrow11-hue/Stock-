@@ -164,6 +164,66 @@ describe('the Replay button in the chart toolbar', () => {
     p.unmount();
   }, 30_000);
 
+  it('says why an item of its menu is off right after the last item that reason is about, so it is never read as the reason for one that works', async () => {
+    const p = await mount();
+    const { demoProvider } = await import('../state/dataRegistry');
+    const day = prevTradingDay(demoProvider.lastDate);
+    /** The menu down to Random bar and its lines, as it reads: `[off]` marks an item that is off, `>` a line. */
+    const reads = () => {
+      act(() => p.arrow().click());
+      const all = [...p.menu()!.children];
+      const out = all.slice(0, all.indexOf(p.item('Advanced replay setup…')!)).map((e) => (e.getAttribute('role') === 'menuitem' ? `${e.getAttribute('aria-disabled') ? '[off] ' : ''}${e.textContent}` : `> ${e.textContent}`));
+      // Each item that is off points at the line that says why.
+      const why = Object.fromEntries([...p.menu()!.querySelectorAll('[aria-disabled="true"]')].map((e) => [e.textContent, document.getElementById(e.getAttribute('aria-describedby')!)!.textContent]));
+      act(() => p.arrow().click());
+      return { out, why };
+    };
+
+    // The chart of a ticker not charted before is still loading: only Select bar is off (there is no bar to
+    // pick yet), and says so under it.
+    act(() => p.store.setActiveSymbol('AMD'));
+    expect(reads()).toEqual({ out: ['[off] Select bar', '> The chart is still loading.', 'Select date…', 'Random bar'], why: { 'Select bar': 'The chart is still loading.' } });
+
+    // A blind replay, or the simulated market: Select bar only, so the line is under it, not under Random bar.
+    const blind = 'A blind replay hides its dates, and picking a bar would show them. Exit the replay first.';
+    expect(await p.store.startReplay({ providerId: 'demo', symbol: 'SPY', date: day, startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: true })).toBe(true);
+    await act(async () => undefined);
+    expect(reads()).toEqual({ out: ['[off] Select bar', `> ${blind}`, 'Select date…', 'Random bar'], why: { 'Select bar': blind } });
+    const sim = 'The simulated market has no past data to replay. Exit it first.';
+    expect(await p.store.startSim({ config: { seed: 4 }, startingBalance: 25_000, speed: 1 })).toBe(true);
+    await act(async () => undefined);
+    expect(reads()).toEqual({ out: ['[off] Select bar', `> ${sim}`, 'Select date…', 'Random bar'], why: { 'Select bar': sim } });
+
+    // During a replay of SPY beside another left unfinished: Random bar only, under it.
+    expect(await p.store.startReplay({ providerId: 'demo', symbol: 'SPY', date: day, startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const hold = { id: 'replay_other', providerId: 'demo', symbols: ['SPY'], date: prevTradingDay(day), blind: false, elsewhere: false };
+    /** Holds the chart to `hold`, as read from the saved sessions, once the read a session's start or end asks for is in. */
+    const held = async () => {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+      act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
+    };
+    await held();
+    const random = "Random bar is off while a SPY replay is unfinished: it could pick one of that replay's days, after its clock.";
+    expect(reads()).toEqual({ out: ['Select bar', 'Select date…', '[off] Random bar', `> ${random}`], why: { 'Random bar': random } });
+
+    // With no session, that replay keeps SPY's chart hidden: all three are off for it, said once, after Random bar.
+    await act(async () => void (await p.store.endSession()));
+    await held();
+    const unfinished = `Your SPY replay of ${hold.date} is unfinished, and charting SPY here would show what comes next in it. Resume or discard it to chart SPY here.`;
+    expect(reads()).toEqual({
+      out: ['[off] Select bar', '[off] Select date…', '[off] Random bar', `> ${unfinished}`],
+      why: { 'Select bar': unfinished, 'Select date…': unfinished, 'Random bar': unfinished },
+    });
+
+    // A reason about items that are not next to each other names them.
+    vi.spyOn(p.store, 'selectBarBlocked').mockReturnValue('Not now.');
+    vi.spyOn(p.store, 'browseHiddenReason').mockReturnValue('Not that day.');
+    vi.spyOn(p.store, 'randomBarBlocked').mockReturnValue('Not now.');
+    expect(reads().out).toEqual(['[off] Select bar', '[off] Select date…', '> Not that day.', '[off] Random bar', '> Select bar and Random bar: Not now.']);
+    vi.restoreAllMocks();
+    p.unmount();
+  }, 30_000);
+
   it('Select date checks the day and time as the setup form does, and starts the replay there', async () => {
     const p = await mount();
     const { demoProvider } = await import('../state/dataRegistry');

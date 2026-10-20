@@ -61,6 +61,48 @@ describe('the right column', () => {
     p.unmount();
   });
 
+  it('says what to do first while a replay keeps the chart’s ticker from being drawn, and Replay is off there, naming no date', async () => {
+    const store = await import('../state/tradingStore');
+    const p = await mount();
+    const line = () => p.host.querySelector('.right-idle p')!.textContent;
+    const after = ' Your paper account and order ticket appear here.';
+    // As read from the saved sessions: a replay of SPY you have not finished, or one another tab runs.
+    const hold = { id: 'replay_a', providerId: 'demo', symbols: ['SPY'], date: '2024-03-12', blind: false, elsewhere: false };
+    const other = { ...hold, id: 'replay_b' };
+    const holds = (h: (typeof hold)[]) => act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: h } })));
+    const resume = `Resume your unfinished replay on the chart, or discard it or pick another ticker, then press Replay.${after}`;
+    const elsewhere = `Pick another ticker, or end the replay running in another tab, then press Replay.${after}`;
+    holds([hold]);
+    expect(store.browseHiddenReason()).toMatch(/^Your SPY replay of 2024-03-12 is unfinished/);
+    expect(line()).toBe(resume);
+    holds([hold, other]);
+    expect(line()).toBe(`Resume one of your unfinished replays on the chart, or discard them or pick another ticker, then press Replay.${after}`);
+    holds([{ ...hold, elsewhere: true, date: undefined } as unknown as typeof hold]);
+    expect(store.browseHiddenReason()).toMatch(/^A SPY replay is running in another tab/);
+    expect(line()).toBe(elsewhere);
+    // One of yours beside one in another tab: yours, as the note on the chart says.
+    holds([hold, { ...other, elsewhere: true, date: undefined } as unknown as typeof hold]);
+    expect(store.browseHiddenReason()).toMatch(/^Your SPY replay of 2024-03-12 is unfinished/);
+    expect(line()).toBe(resume);
+    // Blind: the same, with no date. One in another tab keeps the chart hidden whatever yours are, as the note says.
+    const blind = { ...hold, blind: true, date: undefined } as unknown as typeof hold;
+    holds([blind]);
+    expect(store.browseHiddenReason()).toBe('A blind replay of SPY is unfinished. Resume or discard it to chart SPY here.');
+    expect(line()).toBe(resume);
+    holds([blind, { ...blind, id: 'replay_b', elsewhere: true }]);
+    expect(store.browseHiddenReason()).toMatch(/^A blind replay of SPY is running in another tab/);
+    expect(line()).toBe(elsewhere);
+    expect(p.host.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    // The other ways in are still there; another ticker is not held back.
+    expect(p.button('Advanced replay setup')).toBeDefined();
+    act(() => store.setActiveSymbol('QQQ'));
+    expect(line()).toBe(`Press Replay above the chart, then click the bar to start from.${after}`);
+    act(() => store.setActiveSymbol('SPY'));
+    holds([]);
+    expect(line()).toBe(`Press Replay above the chart, then click the bar to start from.${after}`);
+    p.unmount();
+  });
+
   it('shows the starting balance and the open positions, each of which can be closed from there', async () => {
     const store = await import('../state/tradingStore');
     const { money, signedMoney } = await import('../services/format');

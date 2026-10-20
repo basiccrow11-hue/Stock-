@@ -27,6 +27,7 @@ import {
   MAX_SAVED_SESSIONS,
   claimSession,
   deleteSession,
+  heldHere,
   keptSessions,
   listSessions,
   notePosition,
@@ -535,8 +536,9 @@ async function readHolds(): Promise<BrowseHold[]> {
     if (!source) continue;
     // Where its clock is plays no part in what is hidden: the chart is not drawn whatever it is, so another tab
     // playing it on asks nothing of this one (on Polygon or Alpaca, no request). Only one left to resume, not
-    // blind, is named by its day, which does not move.
-    const elsewhere = !freeIds.has(k.id);
+    // blind, is named by its day, which does not move. One this tab holds (being carried on, say) is not
+    // free either, but no other tab runs it: it is still yours to resume or discard, as its card says.
+    const elsewhere = !freeIds.has(k.id) && !heldHere(k.id);
     const date = !m.blind && !elsewhere ? { date: exchangeDate(k.now) } : {};
     out.push({ id: k.id, providerId: getProvider(source).id, symbols: m.symbols.map((x) => String(x).toUpperCase()), ...date, blind: !!m.blind, elsewhere });
   }
@@ -1718,6 +1720,9 @@ export async function resumeSession(id: string): Promise<boolean> {
   const stop = (message?: string): false => {
     if (resuming === id) resuming = null;
     releaseSession(id);
+    // What is held to is read again now it is let go: a read made meanwhile (on coming back to the window,
+    // say) may have found it neither free nor this tab's, as if another tab ran it, and nothing else would.
+    void refreshHolds();
     if (message && seq === loadSeq) useTrading.setState({ loading: false, error: message });
     return false;
   };
@@ -1972,20 +1977,36 @@ export function selectBarBlocked(): string | null {
  * and so is Select bar, as the chart has no bar to pick. Advanced replay setup is the way around it.
  */
 export function browseHiddenReason(): string | null {
-  const s = useTrading.getState();
-  if (s.session || !browsing()) return null;
-  const sym = s.activeSymbol.toUpperCase();
-  const on = holdsOn(getProvider(s.browse.providerId).id, sym);
-  if (!on.length) return null;
-  const blind = on.filter((h) => h.blind);
-  if (blind.length)
-    return blind.some((h) => h.elsewhere) ? `A blind replay of ${sym} is running in another tab. Its chart stays hidden here until that replay ends, as its date does.` : `A blind replay of ${sym} is unfinished. Resume or discard it to chart ${sym} here.`;
+  const by = browseHiddenBy();
+  if (!by) return null;
+  const { symbol: sym, mine } = by;
+  if (by.blind)
+    return by.elsewhere ? `A blind replay of ${sym} is running in another tab. Its chart stays hidden here until that replay ends, as its date does.` : `A blind replay of ${sym} is unfinished. Resume or discard it to chart ${sym} here.`;
   // One left to resume says what to do about it, as its card does; one another tab runs only ends there.
-  const mine = on.filter((h) => !h.elsewhere);
-  if (!mine.length) return `A ${sym} replay is running in another tab, and charting ${sym} here would show what comes next in it. It is charted here again once that replay ends.`;
+  if (by.elsewhere) return `A ${sym} replay is running in another tab, and charting ${sym} here would show what comes next in it. It is charted here again once that replay ends.`;
   if (mine.length === 1)
     return `Your ${mine[0].symbols[0]} replay${mine[0].date ? ` of ${mine[0].date}` : ''} is unfinished, and charting ${sym} here would show what comes next in it. Resume or discard it to chart ${sym} here.`;
   return `${mine.length} of your ${sym} replays are unfinished, and charting ${sym} here would show what comes next in them. Resume or discard them to chart ${sym} here.`;
+}
+
+/**
+ * What keeps the chart with no session from drawing its symbol, as browseHiddenReason words it, or null when
+ * nothing does: the replays of that symbol and data source it is about (the blind ones when there are any,
+ * whose dates are hidden too), `mine` those of them that are yours to resume or discard, and `elsewhere`
+ * when it is one another tab runs, which only ends there: a blind one there whatever yours are, as that
+ * replay's dates stay hidden until it ends, otherwise only when none is yours. The right column says what
+ * to do first from it.
+ */
+export function browseHiddenBy(): { symbol: string; blind: boolean; mine: BrowseHold[]; elsewhere: boolean } | null {
+  const s = useTrading.getState();
+  if (s.session || !browsing()) return null;
+  const symbol = s.activeSymbol.toUpperCase();
+  const on = holdsOn(getProvider(s.browse.providerId).id, symbol);
+  if (!on.length) return null;
+  const blind = on.filter((h) => h.blind);
+  const about = blind.length ? blind : on;
+  const mine = about.filter((h) => !h.elsewhere);
+  return { symbol, blind: blind.length > 0, mine, elsewhere: blind.length ? mine.length < about.length : !mine.length };
 }
 
 /**
