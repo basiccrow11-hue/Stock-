@@ -35,10 +35,11 @@ const back = (date: string, days: number) => {
 let asked: { minutes: number; page: boolean }[] = [];
 
 /**
- * A stand-in for Polygon's aggregates: a bar every so many minutes from 04:00 to 20:00 of each trading day
- * from `listed` on (none before: a ticker listed since), in pages of 50,000 as Polygon sends them.
+ * A stand-in for Polygon's aggregates: a bar every so many minutes from 04:00 to 20:00 (or to `close`, in
+ * minutes) of each trading day from `listed` on (none before: a ticker listed since), in pages of 50,000 as
+ * Polygon sends them.
  */
-function polygon(listed = '2000-01-03') {
+function polygon(listed = '2000-01-03', close = 1200) {
   return vi.fn((input: string) => {
     const u = new URL(input, 'http://x');
     const [, size, fromMs, toMs] = u.pathname.match(/range\/(\d+)\/minute\/(\d+)\/(\d+)/)!;
@@ -51,7 +52,7 @@ function polygon(listed = '2000-01-03') {
     let next: number | null = null;
     outer: for (let d = exchangeDate(from); exchangeTimeToUnix(d, 0) <= to; d = nextTradingDay(d)) {
       if (!isTradingDay(d) || d < listed) continue;
-      for (let m = 240; m < 1200; m += minutes) {
+      for (let m = 240; m < close; m += minutes) {
         const t = exchangeTimeToUnix(d, m);
         if (t < from || t > to) continue;
         if (results.length === 50_000) {
@@ -153,9 +154,9 @@ describe('Bar Replay on Polygon or Alpaca', () => {
     expect(exchangeDate(s.now) > listed).toBe(true);
     expect(s.now).toBe(at(exchangeDate(s.now), '09:30'));
     expect(s.error).toBeNull();
-    // For the day with no bars, a few days before it (for the data's hours) and the replay's bars; then the
-    // other day's replay, on the chart's last day, whose hours the chart shows.
-    expect(asked.slice(before).filter((a) => a.minutes === 1)).toHaveLength(3);
+    // For the day with no bars, the replay's bars, of which there are none; then the other day's replay: one
+    // request each, the data's hours read from the replay's own bars (or, on the chart's last day, the chart's).
+    expect(asked.slice(before).filter((a) => a.minutes === 1)).toHaveLength(2);
     await store.endSession();
 
     // Both days before the listing: it says so, once, and loads no more. The ticker is on the chart, so not
@@ -169,8 +170,51 @@ describe('Bar Replay on Polygon or Alpaca', () => {
       /^Polygon has no NEWCO bars around \d{4}-\d\d-\d\d; it may not have traded then\. Press Random bar again, or use Select date… for a later day\.$/,
     );
     expect(useSettings.getState().replay).toEqual(setup);
-    // Two days tried, each its hours and its bars: no more.
-    expect(asked.filter((a) => a.minutes === 1)).toHaveLength(4);
+    // Two days tried, one request each: no more.
+    expect(asked.filter((a) => a.minutes === 1)).toHaveLength(2);
+  }, 120_000);
+
+  it('asks the vendor once for each day Random bar or Select date tries, reading the data\'s hours from the replay\'s own bars', async () => {
+    // Polygon's free plan answers five requests a minute: the chart, a cut from it and two Random bars fit.
+    vi.stubGlobal('fetch', polygon());
+    const store = await import('./tradingStore');
+    const { useCredentials } = await import('./credentials');
+    const { useSettings } = await import('./settingsStore');
+    useCredentials.getState().set({ polygonApiKey: 'k' });
+    store.browseSymbol('polygon', 'PLTR');
+    const candles = await chartCandles('PLTR', '1m');
+    expect(await store.startBarReplay(candles[candles.length - 1000].time)).toBe(true);
+    await store.endSession();
+    const ends = () => {
+      const s = store.useTrading.getState().session!;
+      return [s.end, useSettings.getState().replay.endTime];
+    };
+    for (const pick of [0.3, 0.6]) {
+      expect(await store.startRandomBar(() => pick)).toBe(true);
+      const { session, error } = store.useTrading.getState();
+      expect(error).toBeNull();
+      // It ends when the data's sessions do, as it would with the hours known before: 20:00 with after-hours bars.
+      expect(ends()).toEqual([at(exchangeDate(session!.end!), '20:00'), '20:00']);
+      await store.endSession();
+    }
+    expect(asked).toHaveLength(4);
+    // Select date on a day the chart does not show: one request too.
+    const day = back(lastCompletedTradingDay(new Date()), 200);
+    expect(await store.startReplayAt(day, '10:00')).toBe(true);
+    expect(store.useTrading.getState().now).toBe(at(day, '10:00'));
+    expect(asked).toHaveLength(5);
+    // The vendor has no bars after 4 p.m. here: the replay ends then, and that is the setup it leaves.
+    await store.endSession();
+    asked = [];
+    vi.stubGlobal('fetch', polygon(undefined, 960));
+    expect(await store.startReplayAt(day, '10:00')).toBe(true);
+    expect(ends()).toEqual([at(exchangeDate(store.useTrading.getState().session!.end!), '16:00'), '16:00']);
+    expect(asked).toHaveLength(1);
+    // A moment after the latest the data's sessions can end has nothing after it, said without asking.
+    await store.endSession();
+    expect(await store.startReplayAt(lastCompletedTradingDay(new Date()), '20:00')).toBe(false);
+    expect(store.useTrading.getState().error).toBe('Nothing follows that moment in the data, so there is nothing to replay. Pick an earlier date or time.');
+    expect(asked).toHaveLength(1);
   }, 120_000);
 
   it('Random bar tries a later day after one the vendor has no bars on, as a ticker has none before it was listed', async () => {

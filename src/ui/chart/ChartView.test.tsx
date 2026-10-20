@@ -1906,11 +1906,12 @@ describe('Bar Replay on the chart', () => {
       const a = await browse('HOLE', '1m', frame);
       const ts = a.chart.ts;
       // The 5th's last candle (15:59): the replay cut there would play to the end of the 5th, and none follows it.
+      // The note says why, as the chart shows candles after it: the data has no bars on the 6th.
       const k = 3 * 390 - 1;
       act(() => store.setSelectingBar(true));
       pointer(a.chart, 'pointermove', ts.logicalToCoordinate(k)!);
       frame();
-      const nothing = 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.';
+      const nothing = 'Your data has no HOLE bars on 2025-03-06, so a replay from this bar would end there. Pick an earlier bar, or one from 2025-03-07 on.';
       expect(hint(a.host)).toBe(nothing);
       expect(cutAt(a.host).refused).toBe(true);
       expect(a.host.querySelector('.bar-cut-hint')!.className).toBe('bar-cut-hint refused');

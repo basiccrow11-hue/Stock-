@@ -163,6 +163,11 @@ function shares(n: number, symbol?: string): string {
 function money(v: number): number {
   return Math.round(v * 1e6) / 1e6;
 }
+const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** "$58,432.84": dollars as the app shows them, with thousands separators. */
+function dollars(v: number): string {
+  return usd.format(v);
+}
 
 /** Point along the intrabar path where an order fires. */
 interface Trigger {
@@ -746,10 +751,40 @@ export class SimBroker {
       if (violation) return fail(violation);
     }
     // A limit (or a stop-limit once its stop fires) may still fill anywhere up to its limit.
-    const needed = o.quantity * (o.type === 'limit' || o.type === 'stop_limit' ? o.limitPrice! : refPrice);
+    const limited = o.type === 'limit' || o.type === 'stop_limit';
+    const px = limited ? o.limitPrice! : refPrice;
+    const needed = o.quantity * px;
     const avail = this.availableBuyingPower() + (own ? this.reservation(own) : 0);
-    if (needed > avail + 0.005) return fail(`Insufficient buying power: need $${needed.toFixed(2)}, have $${avail.toFixed(2)}.`);
+    if (needed > avail + 0.005) {
+      // Said with the price it is checked at, which is not the ticket's estimate (that adds slippage and
+      // market impact): a limit's limit, a stop's stop, else the quote, which a market order (and a stop
+      // already through the market) is checked at with the regular-hours spread it will fill in.
+      // The quote is shown on the tick as the ticket shows the bid and ask (the ask rounded up, the bid down).
+      const buy = actionSide(o.action) === 'buy';
+      const quote = `the ${marketSession(this.s.clock) === 'regular' ? '' : 'regular-hours '}${buy ? 'ask' : 'bid'}`;
+      const basis = limited ? 'the limit' : o.type === 'stop' && !expected.through ? 'the stop' : quote;
+      const onTick = buy ? ceilTick(px) : floorTick(px);
+      const fit = Math.max(0, Math.floor((avail + 0.005) / px));
+      return fail(
+        `Insufficient buying power: ${shares(o.quantity)} at ${Math.abs(onTick - px) < 1e-9 ? '' : 'about '}${formatTick(onTick)} (${basis}) need ${dollars(needed)}; ${dollars(avail)} is available, ${fit ? `enough for ${fit}` : 'not enough for one'}.`,
+      );
+    }
     return { warnings: costed.warnings, quote: expected.quote, price: refPrice };
+  }
+
+  /**
+   * What the buying-power check of an opening order (openingCheck) allows now, for the ticket to say
+   * before submit: the buying power available to a new order and the most shares of this one it covers
+   * (affordableQuantity, at the price the check uses), at `now`, which submit brings the clock up to.
+   * Null when the order is not one buying power limits (a Sell or Cover), or not complete enough to be
+   * checked (no price yet, a limit without its limit price).
+   */
+  buyingPowerFit(input: Omit<OrderRequest, 'quantity'>, now?: UnixSeconds): { available: number; shares: number } | null {
+    return this.at(now, (b) => {
+      const p = b.prepare({ ...input, quantity: 1 });
+      if ('error' in p || !isOpeningAction(p.req.action)) return null;
+      return { available: b.availableBuyingPower(), shares: b.affordableQuantity(p.req) };
+    });
   }
 
   /**

@@ -2085,11 +2085,13 @@ function knownBars(replay: ReplaySession | null, symbol: string, timeframe: Time
 
 /**
  * When the data's sessions end (sessionEndMinute) around `day`, in minutes: from the bars `known` that cover
- * those days, else from bars of them asked of the data source.
+ * those days, else from bars of them asked of the data source. Null for a vendor's bars `known` does not
+ * cover: the replay reads it from its own bars once they load (ReplaySetup.endAtDataClose), rather than spend
+ * a request of the few a free plan answers a minute on finding it out first.
  */
-async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars): Promise<number> {
+async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars): Promise<number | null> {
   const close = known.sessionEnd(day);
-  if (close !== null) return close;
+  if (close !== null || VENDOR_NAMES[provider.id]) return close;
   let from = day;
   for (let i = 0; i < HOURS_DAYS; i++) from = prevTradingDay(from);
   const bars = await provider.getBars({ symbol, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(nextTradingDay(day), 0) });
@@ -2107,6 +2109,26 @@ const NOTHING_FOLLOWS = {
   bar: 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.',
   time: 'Nothing follows that moment in the data, so there is nothing to replay. Pick an earlier date or time.',
 };
+
+/**
+ * Why nothing follows a replay of `symbol` that would end on `endDate` (playOnEndDate) from what was picked
+ * (`what`: a bar of the chart, or a moment), the data's days being `days` (noteDataDays): NOTHING_FOLLOWS at
+ * the end of the data; but where it stops before a day imported data has no bars on (`endDate` before its last
+ * day, and the next trading day not among its days), which day that is and the day it goes on from, as the
+ * chart shows candles after it. A vendor's data, with no list of days, never stops early: the plain words.
+ * Select-bar mode (cutWarning) and the start itself (startReplayFrom) both say it so.
+ */
+function nothingFollows(symbol: string, endDate: string, days: { last: string; dates: readonly string[] | null }, what: 'bar' | 'time'): string {
+  const missing = nextTradingDay(endDate);
+  if (!days.dates || endDate >= days.last || days.dates.includes(missing)) return NOTHING_FOLLOWS[what];
+  let next = days.last;
+  for (const d of days.dates) if (d > endDate && d < next) next = d;
+  const until = prevTradingDay(next);
+  const gap = until > missing ? `from ${missing} to ${until}` : `on ${missing}`;
+  return what === 'bar'
+    ? `Your data has no ${symbol} bars ${gap}, so a replay from this bar would end there. Pick an earlier bar, or one from ${next} on.`
+    : `Your data has no ${symbol} bars ${gap}, so a replay from that moment would end there. Pick an earlier date or time, or one from ${next} on.`;
+}
 
 /**
  * How a bar replay of `symbol` from `provider` on a `timeframe` chart plays: the size of the candles the chart
@@ -2136,49 +2158,72 @@ function dayMayBeTheCause(e: unknown): boolean {
  * Starts a replay of `symbol` from `providerId` at `t` with the chart's timeframe (startReplay), the way
  * Bar Replay starts every replay: it plays on for PLAY_ON_DAYS of the candles the chart draws (barReplayPlan),
  * never past the end of the data or across a day an imported file has no bars for (playOnEndDate), and on
- * its last day to the end of the data's sessions (sessionClose), so it never plays empty hours. As many days
- * before the start as a replay of those candles loads (DEFAULT_LOOKBACK), and no fewer than the chart with no
- * session shows; the default balance; that symbol only; not blind; no challenge; about one candle a second
- * (candleSpeed). Once started, saved as the next replay's setup (settings.replay), as the setup form saves
- * it, so Advanced replay setup opens on it; one that did not start leaves the setup as it was. `known`: the
- * chart's bars, for the data's hours. `what` was picked: a bar of the chart (which keeps its view, see
- * ChartEvent) or a moment. `retry`: says whether the caller takes a failure to load (it tries another day,
- * or says why itself): one it takes is not shown but answered 'retry', the loading note left up.
+ * its last day to the end of the data's sessions (sessionClose, or on a vendor's data that the chart does not
+ * show, read from the replay's own bars as they load: one request for each start), so it never plays empty
+ * hours. As many days before the start as a replay of those candles loads (DEFAULT_LOOKBACK), and no fewer
+ * than the chart with no session shows; the default balance; that symbol only; not blind; no challenge;
+ * about one candle a second (candleSpeed). Once started, saved as the next replay's setup (settings.replay),
+ * as the setup form saves it, so Advanced replay setup opens on it; one that did not start leaves the setup
+ * as it was. `known`: the chart's bars, for the data's hours. `what` was picked: a bar of the chart (which
+ * keeps its view, see ChartEvent) or a moment. `retry`: says whether the caller takes a failure to load (it
+ * tries another day, or says why itself): one it takes is not shown but answered 'retry', the loading note
+ * left up.
  */
 async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: string, known: KnownBars, what: 'bar' | 'time', retry?: (e: unknown) => boolean): Promise<boolean | 'retry'> {
   const provider = getProvider(providerId);
   const timeframe = useTrading.getState().timeframe;
   const plan = barReplayPlan(provider, symbol, timeframe);
   const day = exchangeDate(t);
+  let days: { last: string; dates: readonly string[] | null };
   let endDate: string;
-  let close: number;
+  let close: number | null;
   try {
     if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
     const reason = provider.unavailableReason() ?? (await notListed(provider, symbol));
     if (reason) return startRefused(reason);
     const last = await lastDataDay(provider, symbol);
-    const dates = await provider.sessionDates?.(symbol);
-    noteDataDays(provider, symbol, last, dates ?? null);
+    const dates = (await provider.sessionDates?.(symbol)) ?? null;
+    noteDataDays(provider, symbol, last, dates);
+    days = { last, dates };
     endDate = playOnEndDate(day, plan.candles, last, dates, plan.maxDays);
     close = await sessionClose(provider, symbol, day, known);
   } catch (e) {
     if (retry?.(e)) return 'retry';
     return startRefused((e as Error).message);
   }
-  const endTime = hhmm(close);
-  if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(NOTHING_FOLLOWS[what]);
+  // On a vendor's data whose hours the chart does not show (close null), the replay ends when its own bars'
+  // sessions do: before loading them, only a start after the latest that can be (the after-hours close) is
+  // known to have nothing after it.
+  const endTime = hhmm(close ?? AFTERHOURS_CLOSE);
+  if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(nothingFollows(symbol, endDate, days, what));
   const startTime = hhmm((t - exchangeTimeToUnix(day, 0)) / 60);
   const speed = candleSpeed(plan.candles, REPLAY_SPEEDS);
   let retrying = false;
   const retryOn = retry ? (e: unknown) => (retrying = retry(e)) : undefined;
-  const ok = await startReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, endDate, startingBalance: getSettings().defaultBalance, lookbackDays: plan.lookbackDays, timeframe, speed, blind: false, cut: what === 'bar', retryOn });
+  const ok = await startReplay({
+    providerId: provider.id,
+    symbol,
+    date: day,
+    startTime,
+    endTime,
+    endAtDataClose: close === null || undefined,
+    endDate,
+    startingBalance: getSettings().defaultBalance,
+    lookbackDays: plan.lookbackDays,
+    timeframe,
+    speed,
+    blind: false,
+    cut: what === 'bar',
+    retryOn,
+  });
   if (retrying) return 'retry';
-  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws.
-  if (ok) useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, multiDay: endDate > day, endDate, timeframe, speed });
+  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws; the end
+  // time is the one the replay ends at, read from its bars when it was not known before.
+  if (ok) useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime: eng.replay?.setup.endTime ?? endTime, multiDay: endDate > day, endDate, timeframe, speed });
   const failed = useTrading.getState().error;
   if (!ok && failed) {
     // The replay's own words for an empty window are about start and end times, which were not asked for here.
-    const message = failed === 'No data between the selected start and end times.' ? NOTHING_FOLLOWS[what] : failed;
+    const message = failed === 'No data between the selected start and end times.' ? nothingFollows(symbol, endDate, days, what) : failed;
     if (useTrading.getState().session) useTrading.setState({ error: null });
     startRefused(message);
   }
@@ -2231,7 +2276,7 @@ export function cutWarning(candleStart: UnixSeconds): CutNote | null {
   const plan = barReplayPlan(provider, symbol, timeframe);
   const day = exchangeDate(t);
   const endDate = playOnEndDate(day, plan.candles, days.last, days.dates, plan.maxDays);
-  if (exchangeTimeToUnix(endDate, parseHHMM(hhmm(known.sessionEnd(day) ?? AFTERHOURS_CLOSE))) <= t) return { text: NOTHING_FOLLOWS.bar, refused: true };
+  if (exchangeTimeToUnix(endDate, parseHHMM(hhmm(known.sessionEnd(day) ?? AFTERHOURS_CLOSE))) <= t) return { text: nothingFollows(symbol, endDate, days, 'bar'), refused: true };
   return onlyAfterHoursFollow(t, endDate) ? { text: CUT_AFTER_HOURS, refused: false } : null;
 }
 
@@ -2496,6 +2541,16 @@ export function bracketErrors(req: OrderRequest): string[] {
 export function sizeByRisk(input: Omit<OrderRequest, 'quantity'>, riskPct: number): ReturnType<SimBroker['sizeByRisk']> {
   const now = eng.replay ? eng.replay.now : eng.stream?.clock;
   return broker()?.sizeByRisk(input, riskPct, now) ?? { ok: false, error: 'Start a session first.' };
+}
+
+/**
+ * The buying power available to a new Buy or Short order and the most shares of it that covers, as submit
+ * checks it (SimBroker.buyingPowerFit), at the time submit would place it. Null for a Sell or Cover, or an
+ * order not complete enough to check.
+ */
+export function buyingPowerFit(req: Omit<OrderRequest, 'quantity'>): { available: number; shares: number } | null {
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
+  return broker()?.buyingPowerFit(req, now) ?? null;
 }
 
 /** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */

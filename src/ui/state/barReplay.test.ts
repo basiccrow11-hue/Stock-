@@ -365,11 +365,12 @@ describe('Bar Replay: a replay cut at a candle of the chart', () => {
     expect(await store.startBarReplay(candles.at(-2)!.time)).toBe(true);
   });
 
-  it('says before the click that nothing follows a day’s last candle when the data has no bars the next day, and will not cut there', async () => {
+  it('says before the click which day the data has no bars on after a day’s last candle, and will not cut there', async () => {
     const store = await import('./tradingStore');
     const { csvProvider } = await import('./dataRegistry');
-    // Regular hours only, and no bars on the 6th: the 5th's 15:59 candle is the last before a gap.
-    const days = ['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-07'];
+    // Regular hours only, and no bars on the 6th, the 10th or the 11th: the 5th's and the 7th's 15:59 candles
+    // are the last before a gap.
+    const days = ['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-07', '2025-03-12'];
     const bars: Bar[] = [];
     for (const d of days) for (let m = 570; m < 960; m++) bars.push({ time: exchangeTimeToUnix(d, m), open: 10, high: 10.1, low: 9.9, close: 10, volume: 100 });
     csvProvider.upsert({ symbol: 'HOLE', name: 'HOLE', baseTimeframe: '1m', bars, importedAt: 0, fileName: 'HOLE.csv' });
@@ -377,16 +378,31 @@ describe('Bar Replay: a replay cut at a candle of the chart', () => {
       store.setBrowseSource('csv');
       store.setActiveSymbol('HOLE');
       await chartCandles('HOLE', '1m');
-      const refused = { text: 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.', refused: true };
+      // Not that nothing follows it in the data, which the candles after it contradict: the day it has none on.
+      const refused = { text: 'Your data has no HOLE bars on 2025-03-06, so a replay from this bar would end there. Pick an earlier bar, or one from 2025-03-07 on.', refused: true };
       store.setSelectingBar(true);
       await vi.waitFor(() => expect(store.cutWarning(at('2025-03-05', '15:59'))).toEqual(refused));
       // A minute earlier, one minute of the 5th follows; a day earlier, the 5th does.
       expect(store.cutWarning(at('2025-03-05', '15:58'))).toBeNull();
       expect(store.cutWarning(at('2025-03-04', '15:59'))).toBeNull();
+      // Days on end without bars are named as a span; the data's own end is still just that.
+      expect(store.cutWarning(at('2025-03-07', '15:59'))).toEqual({
+        text: 'Your data has no HOLE bars from 2025-03-10 to 2025-03-11, so a replay from this bar would end there. Pick an earlier bar, or one from 2025-03-12 on.',
+        refused: true,
+      });
+      expect(store.cutWarning(at('2025-03-12', '15:59'))).toEqual({ text: 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.', refused: true });
       // A click there is refused with the same words.
       expect(await store.startBarReplay(at('2025-03-05', '15:59'))).toBe(false);
       expect(store.useTrading.getState().session).toBeNull();
       expect(store.useTrading.getState().error).toBe(refused.text);
+      // So is Select date at the close of that day, in its own words.
+      expect(await store.startReplayAt('2025-03-05', '16:00')).toBe(false);
+      expect(store.useTrading.getState().error).toBe(
+        'Your data has no HOLE bars on 2025-03-06, so a replay from that moment would end there. Pick an earlier date or time, or one from 2025-03-07 on.',
+      );
+      expect(await store.startReplayAt('2025-03-12', '16:00')).toBe(false);
+      expect(store.useTrading.getState().error).toBe('Nothing follows that moment in the data, so there is nothing to replay. Pick an earlier date or time.');
+      expect(store.useTrading.getState().session).toBeNull();
     } finally {
       csvProvider.remove('HOLE');
     }

@@ -19,7 +19,8 @@ import { DataProviderError, type BarRequest, type HistoricalDataProvider } from 
 import { aggregateBars } from '../data/aggregate';
 import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from '../broker/config';
 import { SimBroker, type BrokerCheckpoint, type BrokerState, type SubmitResult } from '../broker/SimBroker';
-import { ReplayEngine, barEndTime } from './ReplayEngine';
+import { ReplayEngine, barEndTime, barEnds } from './ReplayEngine';
+import { hhmm, sessionEndMinute } from './barReplay';
 import {
   AFTERHOURS_CLOSE,
   PREMARKET_OPEN,
@@ -50,6 +51,13 @@ export interface ReplaySetup {
   startTime: string;
   endDate?: string;
   endTime: string;
+  /**
+   * Ends on its last day when the data's sessions end around its first (sessionEndMinute: 16:00, or 20:00
+   * with after-hours bars), read from the bars it loads: `endTime` is not used. Bar Replay asks for this on a
+   * vendor's data whose hours the chart does not show, rather than spend a request of the few a free plan
+   * answers a minute on finding them out first. The loaded session's setup has that time instead.
+   */
+  endAtDataClose?: boolean;
   startingBalance: number;
   /**
    * Trading days of history loaded before the start for chart context and indicator warm-up. Data
@@ -109,6 +117,11 @@ interface LoadWindow {
   to: UnixSeconds;
   lookbackDays: number;
   preview?: boolean;
+  /**
+   * The last day of a replay that ends when its data's sessions do (ReplaySetup.endAtDataClose): `end` is then
+   * the latest that can be, and the end is read from the first symbol's bars.
+   */
+  closeOn?: string;
 }
 
 /** Trading days before the start the history reaches back (a daily chart's lookback, or a longer one asked for). */
@@ -247,13 +260,18 @@ export class ReplaySession {
     const date = tradingDayOnOrBefore(setup.date);
     const start = exchangeTimeToUnix(date, parseHHMM(setup.startTime));
     const endDate = setup.endDate && setup.endDate >= date ? setup.endDate : date;
-    const end = exchangeTimeToUnix(endDate, parseHHMM(setup.endTime));
+    // One that ends when its data's sessions do is loaded up to the latest they end, the after-hours close.
+    const end = exchangeTimeToUnix(endDate, setup.endAtDataClose ? AFTERHOURS_CLOSE : parseHHMM(setup.endTime));
     if (end <= start) throw new Error('End time must be after the start time.');
     const to = Math.max(end, exchangeTimeToUnix(endDate, AFTERHOURS_CLOSE));
 
     const symbols = [symbol, ...(setup.extraSymbols ?? []).map((s) => s.toUpperCase()).filter((s) => s !== symbol)];
-    const { engines, histories, warnings } = await ReplaySession.loadSymbols(provider, symbols, { date, start, end, to, lookbackDays: setup.lookbackDays }, signal);
-    const session = new ReplaySession(engines, { ...setup, symbol, date, endDate }, config, sessionId, provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL');
+    const span = { date, start, end, to, lookbackDays: setup.lookbackDays, closeOn: setup.endAtDataClose ? endDate : undefined };
+    const { engines, histories, warnings, endTime } = await ReplaySession.loadSymbols(provider, symbols, span, signal);
+    // The setup it was loaded with, with the end time it ends at (saved with it, and loaded again on resume).
+    const loaded: ReplaySetup = { ...setup, symbol, date, endDate, endTime: endTime ?? setup.endTime };
+    delete loaded.endAtDataClose;
+    const session = new ReplaySession(engines, loaded, config, sessionId, provider.source === 'DEMO' ? 'DEMO' : 'HISTORICAL');
     session.provider = provider;
     session.histories = histories;
     return { session, warnings };
@@ -282,11 +300,20 @@ export class ReplaySession {
   /**
    * Each of `symbols`' engine over `w` and the record of its history for higher timeframes. Symbols after
    * the first that fail to load are skipped and reported in `warnings`; the first one's failure is thrown.
+   * With `w.closeOn`, every engine ends on that day as the first symbol's sessions do around `w.date`
+   * (`endTime`): what the bars of those days tell, as a replay whose hours the chart shows ends.
    */
-  private static async loadSymbols(provider: HistoricalDataProvider, symbols: string[], w: LoadWindow, signal?: AbortSignal): Promise<{ engines: ReplayEngine[]; histories: Map<string, SymbolHistory>; warnings: string[] }> {
+  private static async loadSymbols(
+    provider: HistoricalDataProvider,
+    symbols: string[],
+    w: LoadWindow,
+    signal?: AbortSignal,
+  ): Promise<{ engines: ReplayEngine[]; histories: Map<string, SymbolHistory>; warnings: string[]; endTime?: string }> {
     const warnings: string[] = [];
     const engines: ReplayEngine[] = [];
     const histories = new Map<string, SymbolHistory>();
+    let end = w.end;
+    let endTime: string | undefined;
     for (const sym of symbols) {
       try {
         const base = provider.baseTimeframe(sym);
@@ -298,7 +325,12 @@ export class ReplaySession {
         const bars = await provider.getBars({ symbol: sym, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: w.to }, signal);
         // No bars at all over the days asked for: a ticker the source does not have, or a date it has none for.
         if (bars.length === 0) throw new DataProviderError(`No ${sym} data for ${w.date}. Pick another date or data source.`, 'not_found');
-        engines.push(new ReplayEngine({ symbol: sym, start: w.start, end: w.end, baseTimeframe: base, preview: w.preview }, bars));
+        if (w.closeOn !== undefined && endTime === undefined) {
+          const sorted = [...bars].sort((a, b) => a.time - b.time);
+          endTime = hhmm(sessionEndMinute(sorted, barEnds(sorted, base), w.date) ?? AFTERHOURS_CLOSE);
+          end = exchangeTimeToUnix(w.closeOn, parseHHMM(endTime));
+        }
+        engines.push(new ReplayEngine({ symbol: sym, start: w.start, end, baseTimeframe: base, preview: w.preview }, bars));
         const baseStart = exchangeDate(bars.reduce((t, b) => Math.min(t, b.time), Infinity));
         // Data that begins after the first day asked for has nothing earlier to load either.
         const dataStart = baseStart > from ? baseStart : null;
@@ -309,7 +341,7 @@ export class ReplaySession {
         warnings.push(`${sym} skipped: ${(e as Error).message}`);
       }
     }
-    return { engines, histories, warnings };
+    return { engines, histories, warnings, endTime };
   }
 
   /**

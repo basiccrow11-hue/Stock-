@@ -5,7 +5,7 @@ import { DemoDataProvider } from '../data/demoProvider';
 import { CsvDataProvider } from '../data/csvProvider';
 import { aggregateBars } from '../data/aggregate';
 import type { BarRequest, HistoricalDataProvider } from '../data/provider';
-import { exchangeDate, nextTradingDay, prevTradingDay } from '../time';
+import { exchangeDate, exchangeMinuteOfDay, nextTradingDay, prevTradingDay } from '../time';
 import { parseCsv } from '../data/csv';
 import { DEFAULT_EXECUTION_CONFIG, ZERO_COST_CONFIG, type ExecutionConfig } from '../broker/config';
 import type { BrokerCheckpoint } from '../broker/SimBroker';
@@ -1347,6 +1347,24 @@ describe('saving a replay and carrying it on later', () => {
     b.restart();
     expect(account(b)).toEqual(account(a));
     expect(b.broker.state.orders).toHaveLength(0);
+  });
+
+  it('ends where its data\'s sessions end when asked to, read from the bars it loads, and carries on so', async () => {
+    // The demo has pre-market and after-hours bars; with only regular hours, its sessions end at 16:00.
+    const regular = providerWith((_, bars) => bars.filter((b) => exchangeMinuteOfDay(b.time) >= 570 && exchangeMinuteOfDay(b.time) < 960));
+    for (const [provider, close] of [
+      [p, '20:00'],
+      [regular, '16:00'],
+    ] as const) {
+      const { session: s } = await ReplaySession.load(provider, { ...setup, endTime: '12:00', endAtDataClose: true, endDate: nextTradingDay(D) }, ZERO_COST_CONFIG, 'c');
+      expect(s.end).toBe(et(nextTradingDay(D), close));
+      expect(s.engineFor('AAPL')!.end).toBe(s.end);
+      // Saved with that time, and not with the request, it loads the same bars again.
+      expect(s.setup.endTime).toBe(close);
+      expect(s.setup).not.toHaveProperty('endAtDataClose');
+      s.jumpTo(et(D, '10:00'));
+      expect((await ReplaySession.resume(provider, s.save(), 'c2')).end).toBe(s.end);
+    }
   });
 
   it('is a copy of the moment it was taken', async () => {
