@@ -671,6 +671,70 @@ describe('unfinished sessions and other tabs', () => {
     expect((await p.store.unfinishedSessions()).map((s) => s.id)).toEqual([...older].reverse());
     expect(p.store.useTrading.getState().session!.id).toBe(other);
   });
+
+  /**
+   * This tab's card of unfinished sessions (the sessions it names), and the chart of SPY with no session beside
+   * it, which a replay of SPY you have not finished, or one in another tab, keeps from being drawn.
+   */
+  async function besideTheCard(p: Awaited<ReturnType<typeof page>>) {
+    const { UnfinishedSessions } = await import('../components/UnfinishedSessions');
+    const card = render(createElement(UnfinishedSessions));
+    p.store.setActiveSymbol('SPY');
+    // As the chart asks for its bars.
+    p.store.getBaseBars('SPY');
+    return { listed: () => [...card.el.querySelectorAll('li strong')].map((e) => e.textContent), unmount: card.unmount };
+  }
+  /** Another tab's save or deletion of a session, as the browser tells this one. */
+  const told = () => window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-sessions-changed' }));
+  const yours = /^Your SPY replay of 2024-03-12 is unfinished/;
+  const elsewhere = /^A SPY replay is running in another tab/;
+
+  it('offers a replay another tab started after this one opened once that tab closes, as the note on its chart says it is yours to resume', async () => {
+    const b = await page();
+    const card = await besideTheCard(b);
+    await settle();
+    expect(card.listed()).toEqual([]);
+    // Another tab starts a replay of SPY: its save tells this one, which no longer charts SPY.
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(elsewhere), { timeout: 3000 });
+    await settle();
+    expect(card.listed()).toEqual([]);
+    // It closes without ending it: its lock goes with it, and its last save tells this tab.
+    a.store.pause();
+    await settle();
+    locks.mine.delete(`stock-replay-session:${id}`);
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(yours), { timeout: 3000 });
+    await vi.waitFor(() => expect(card.listed()).toEqual(['SPY · 2024-03-12']));
+    card.unmount();
+  });
+
+  it('no longer offers a replay left unfinished once another tab carries it on, as the note on its chart says that tab runs it', async () => {
+    const a = await page();
+    expect(await a.store.startReplay(replay)).toBe(true);
+    const id = a.store.useTrading.getState().session!.id;
+    await settle();
+    a.store.pause();
+    await settle();
+    rememberNothing();
+    // A tab opened after that one closed offers it.
+    const b = await page();
+    const card = await besideTheCard(b);
+    await vi.waitFor(() => expect(card.listed()).toEqual(['SPY · 2024-03-12']));
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(yours));
+    // Another tab carries it on: its save tells this one.
+    const c = await page();
+    expect(await c.store.resumeSession(id)).toBe(true);
+    await settle();
+    told();
+    await vi.waitFor(() => expect(b.store.browseHiddenReason()).toMatch(elsewhere), { timeout: 3000 });
+    await vi.waitFor(() => expect(card.listed()).toEqual([]));
+    card.unmount();
+  });
 });
 
 describe('the Trade screen as a reload carries its session on', () => {
