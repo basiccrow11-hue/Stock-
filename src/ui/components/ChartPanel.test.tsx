@@ -392,7 +392,16 @@ describe('the chart with no session', () => {
   }, 30_000);
 
   it('keeps its notes under the legend\'s first row, however many lines that takes, and under a lower row that reaches under them', async () => {
-    // jsdom lays nothing out: the boxes are given here, and the observers called as the browser would.
+    // jsdom lays nothing out: the boxes are given here, and the observers called as the browser would. A row's
+    // text ends where its box does, unless `textEnds` says otherwise.
+    const textEnds = new WeakMap<Node, number>();
+    Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value(this: Range) {
+        const el = this.startContainer as Element;
+        return { right: textEnds.get(el) ?? el.getBoundingClientRect().right } as DOMRect;
+      },
+    });
     const observers: (() => void)[] = [];
     vi.stubGlobal(
       'ResizeObserver',
@@ -432,15 +441,33 @@ describe('the chart with no session', () => {
     // takes them below it; one that ends short of them leaves them where they are.
     const tip = notes.querySelector<HTMLElement>('.browse-tip')!;
     vi.spyOn(tip, 'getBoundingClientRect').mockReturnValue({ left: 600, right: 900, width: 300, top: 0, bottom: 0 } as DOMRect);
-    const overlay = (rowBottom: number, right: number) => {
+    const overlay = (rowBottom: number, right: number, text = right) => {
       const r = document.createElement('div');
       r.className = 'legend-ind';
       vi.spyOn(r, 'getBoundingClientRect').mockReturnValue({ bottom: rowBottom, right } as DOMRect);
+      textEnds.set(r, text);
       return r;
     };
     const sma = overlay(138, 400);
     await act(async () => void legend.appendChild(sma));
     expect(top()).toBe('32px');
+    // Text ending a pixel or three past the notes' left edge is under the card's border, and covers nothing:
+    // the notes stay, rather than drop their foot onto the indicator pane below. Past that, they move.
+    for (const [end, moved] of [
+      [601, false],
+      [603, false],
+      [604, true],
+    ] as const) {
+      const touching = overlay(152, end);
+      await act(async () => void legend.appendChild(touching));
+      expect(top()).toBe(moved ? '60px' : '32px');
+      await act(async () => touching.remove());
+    }
+    // It is the text that counts, not a box that reaches past it.
+    const boxed = overlay(152, 640, 590);
+    await act(async () => void legend.appendChild(boxed));
+    expect(top()).toBe('32px');
+    await act(async () => boxed.remove());
     const bb = overlay(152, 640);
     await act(async () => void legend.appendChild(bb));
     expect(top()).toBe('60px');
@@ -452,6 +479,7 @@ describe('the chart with no session', () => {
     const css = (await import('node:fs')).readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
     expect(css).toMatch(/\n\.browse-notes \{ position: absolute; top: var\(--clear-of-legend, 30px\);/);
     vi.unstubAllGlobals();
+    delete (Range.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
     p.unmount();
   }, 30_000);
 

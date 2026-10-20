@@ -364,13 +364,25 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
   );
 }
 
+/** Pixels a legend row's text may reach past the notes' left edge, under the card's border, without moving them. */
+const LEGEND_TOUCH = 3;
+
+/** Where `el`'s own text ends on screen: its contents' right edge, which a row's box can reach past. */
+function textRight(el: Element): number {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  return range.getBoundingClientRect().right;
+}
+
 /**
  * Keeps the notes over the chart clear of the legend: their top (--clear-of-legend) follows the bottom of
  * its first row (the candle's prices), however many lines that wraps to on a narrow chart, and of the
- * lowest row below it that reaches under the notes (a long indicator row, such as Bollinger Bands' three
- * values). Lower rows that end short of the notes leave them where they are. The legend is watched whole,
- * so adding or removing an indicator places them again. In the one scrolling column they are in the flow
- * above the chart instead (styles.css), and this changes nothing.
+ * lowest row below it whose text reaches under the notes (a long indicator row, such as Bollinger Bands'
+ * three values). Lower rows that end short of the notes leave them where they are, and so does one whose
+ * text ends within LEGEND_TOUCH of their left edge: under the card's border, it covers nothing, and moving
+ * the whole column down for it would put its foot over the indicator pane below. The legend is watched
+ * whole, so adding or removing an indicator places them again. In the one scrolling column they are in the
+ * flow above the chart instead (styles.css), and this changes nothing.
  */
 function useClearOfLegend(ref: RefObject<HTMLDivElement | null>): void {
   useEffect(() => {
@@ -384,8 +396,8 @@ function useClearOfLegend(ref: RefObject<HTMLDivElement | null>): void {
       // The notes' left edge: that of the leftmost note shown (the tip is narrower than the column).
       const shown = [...notes.children].map((c) => c.getBoundingClientRect()).filter((r) => r.width > 0);
       const left = shown.length ? Math.min(...shown.map((r) => r.left)) : notes.getBoundingClientRect().left;
-      const rows = legend?.isConnected ? [...legend.children].map((c) => c.getBoundingClientRect()) : [];
-      const under = rows.filter((r, i) => i === 0 || r.right > left);
+      const rows = legend?.isConnected ? [...legend.children] : [];
+      const under = rows.filter((r, i) => i === 0 || textRight(r) > left + LEGEND_TOUCH).map((r) => r.getBoundingClientRect());
       const below = under.length ? Math.max(...under.map((r) => r.bottom)) - host.getBoundingClientRect().top + 8 : 8;
       notes.style.setProperty('--clear-of-legend', `${Math.max(8, Math.ceil(below))}px`);
     };
