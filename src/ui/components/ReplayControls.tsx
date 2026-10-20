@@ -71,10 +71,15 @@ function confirmExit(button: HTMLElement): void {
 function isReplayShortcut(e: KeyboardEvent): boolean {
   if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
   const el = e.target instanceof Element ? e.target : null;
+  const arrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight';
   // The ⋯ panel shows ← and → beside the steps they take: with focus in it, they step there too.
-  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && el?.closest('.more-pop')) return true;
-  // An open toolbar menu keeps the keys, even once focus is no longer inside it.
-  if (document.querySelector('.popover')) return false;
+  if (arrow && el?.closest('.more-pop')) return true;
+  // An open toolbar menu keeps the keys, even once focus is no longer inside it. Not ⋯'s panel for ← and
+  // →: they step while it is open, with focus still on ⋯ after a click (or on the page, where a click
+  // focuses no button, as in Safari), and nothing can be acting behind it, as only one panel is open at a
+  // time (usePopover). Space is still left to the focused control (on ⋯ it closes the panel), and the
+  // checks below still leave fields and dialogs their arrows.
+  if ([...document.querySelectorAll('.popover')].some((pop) => !(arrow && pop.classList.contains('more-pop')))) return false;
   if (!el) return true;
   if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"], [role="combobox"]')) return false;
   if (e.code === 'Space' && el.closest('summary, [role="checkbox"], [role="switch"], [role="option"]')) return false;

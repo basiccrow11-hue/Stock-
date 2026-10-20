@@ -309,6 +309,52 @@ describe('the replay controls', () => {
     await store.endSession();
   });
 
+  it('step with ← and → while the ⋯ panel is open, focus still on ⋯ or on the page, but not while another menu is', async () => {
+    const store = await import('../state/tradingStore');
+    const { ReplayControls } = await import('./ReplayControls');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '15:50', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(ReplayControls)));
+    const find = (label: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`) ?? [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent!.includes(label))!;
+    const start = store.useTrading.getState().now;
+    const now = () => store.useTrading.getState().now;
+    const key = (target: Element, k: string) => act(() => void target.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: k === ' ' ? 'Space' : k, bubbles: true, cancelable: true })));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const more = find('More replay controls');
+
+    // A click on ⋯ leaves focus on it (Chrome) or on the page (Safari): the arrows its panel shows step all the same.
+    act(() => more.focus());
+    act(() => more.click());
+    expect(host.querySelector('.more-pop')).not.toBeNull();
+    key(more, 'ArrowRight');
+    // The store publishes at most every 90 ms.
+    await vi.waitFor(() => expect(now()).toBe(start + 60));
+    act(() => more.blur());
+    key(document.body, 'ArrowRight');
+    await vi.waitFor(() => expect(now()).toBe(start + 120));
+    key(more, 'ArrowLeft');
+    await act(async () => undefined);
+    await vi.waitFor(() => expect(now()).toBe(start + 60));
+    expect(host.querySelector('.more-pop')).not.toBeNull();
+    // Space is left to the focused control while the panel is open: it does not play.
+    key(more, ' ');
+    expect(store.useTrading.getState().playing).toBe(false);
+
+    // Another menu keeps the keys: with Jump to… open, → steps nothing, on its button or on the page.
+    act(() => find('Jump to…').click());
+    expect(host.querySelector('.more-pop')).toBeNull();
+    expect(host.querySelector('.jump-pop')).not.toBeNull();
+    key(find('Jump to…'), 'ArrowRight');
+    key(document.body, 'ArrowRight');
+    await act(async () => void (await new Promise((r) => setTimeout(r, 200))));
+    expect(now()).toBe(start + 60);
+    act(() => root.unmount());
+    vi.restoreAllMocks();
+    await store.endSession();
+  });
+
   it('give focus to the toolbar’s Replay button after Exit and after the menu’s Select bar, not to the page', async () => {
     const store = await import('../state/tradingStore');
     const { ReplayControls } = await import('./ReplayControls');
