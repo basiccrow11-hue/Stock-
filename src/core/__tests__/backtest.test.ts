@@ -278,7 +278,7 @@ describe('backtester: sizing and brackets that fit the account and the stock', (
     expect(r.fills[0].quantity).toBe(19490);
     // A fixed share count is the user's own: refused when it does not fit.
     const fixed = run(rise(5, 5.1), breakout(5.05, { sizing: { mode: 'shares', shares: 19_607 } }));
-    expect(fixed.signals.find((s) => s.action === 'buy')).toMatchObject({ executed: false, note: 'Insufficient buying power: need $100093.73, have $100000.00.' });
+    expect(fixed.signals.find((s) => s.action === 'buy')).toMatchObject({ executed: false, note: 'Insufficient buying power: 19607 shares at about 5.11 (the ask) need $100,093.73; $100,000.00 is available, enough for 19588.' });
   });
 
   it('places % stops and targets on the sub-dollar tick', () => {

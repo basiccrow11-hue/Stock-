@@ -2578,6 +2578,16 @@ export function sizeByRisk(input: Omit<OrderRequest, 'quantity'>, riskPct: numbe
   return broker()?.sizeByRisk(input, riskPct, now) ?? { ok: false, error: 'Start a session first.' };
 }
 
+/**
+ * The buying power available to a new Buy or Short order and the most shares of it that covers, as submit
+ * checks it (SimBroker.buyingPowerFit), at the time submit would place it. Null for a Sell or Cover, or an
+ * order not complete enough to check.
+ */
+export function buyingPowerFit(req: Omit<OrderRequest, 'quantity'>): { available: number; shares: number } | null {
+  const now = eng.replay ? eng.replay.now : eng.stream?.clock;
+  return broker()?.buyingPowerFit(req, now) ?? null;
+}
+
 /** The most shares of an opening order buying power covers now (SimBroker.affordableQuantity). */
 export function affordableQuantity(req: Pick<OrderRequest, 'symbol' | 'action' | 'type' | 'limitPrice' | 'stopPrice' | 'extendedHours'>): number {
   const now = eng.replay ? eng.replay.now : eng.stream?.clock;

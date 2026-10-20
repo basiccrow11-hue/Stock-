@@ -356,6 +356,45 @@ describe('order validation', () => {
     expect(broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 50 }).ok).toBe(false);
   });
 
+  it('tells the ticket how many shares buying power covers, as submit counts them, and says so when it refuses', () => {
+    // The default balance, $25,000 with $50,000 of buying power, and a stock near $584 with a spread of
+    // 2 bps: its quote is off the tick, and is shown on it as the ticket shows the bid and ask.
+    const at584 = () => setup({ spread: { mode: 'bps', value: 2, minimum: 0, extendedHoursMultiplier: 1 } }, 25_000, 584.27).broker;
+    const refusals: Record<string, string> = {
+      buy: 'Insufficient buying power: 100 shares at about 584.33 (the ask) need $58,432.84; $50,000.00 is available, enough for 85.',
+      short: 'Insufficient buying power: 100 shares at about 584.21 (the bid) need $58,421.16; $50,000.00 is available, enough for 85.',
+    };
+    for (const action of ['buy', 'short'] as const) {
+      const broker = at584();
+      expect(broker.buyingPowerFit({ symbol: S, action, type: 'market' })).toEqual({ available: 50_000, shares: 85 });
+      expect(broker.submit({ symbol: S, action, type: 'market', quantity: 100 })).toMatchObject({ ok: false, error: refusals[action] });
+      expect(broker.submit({ symbol: S, action, type: 'market', quantity: 86 }).ok).toBe(false);
+      expect(broker.submit({ symbol: S, action, type: 'market', quantity: 85 }).ok).toBe(true);
+      // What is left once those are held; the other side of the position is not limited by it.
+      expect(broker.buyingPowerFit({ symbol: S, action, type: 'market' })!.shares).toBeLessThan(2);
+      expect(broker.buyingPowerFit({ symbol: S, action: action === 'buy' ? 'sell' : 'cover', type: 'market' })).toBeNull();
+    }
+    // A limit is checked at its limit, a stop at its stop: the most shares covered agree with submit.
+    const broker = at584();
+    for (const [order, most, words] of [
+      [{ type: 'limit', limitPrice: 590 }, 84, '100 shares at 590.00 (the limit) need $59,000.00'],
+      [{ type: 'stop', stopPrice: 600 }, 83, '100 shares at 600.00 (the stop) need $60,000.00'],
+    ] as const) {
+      const req = { symbol: S, action: 'buy' as const, ...order };
+      expect(broker.buyingPowerFit(req)!.shares).toBe(most);
+      expect(broker.submit({ ...req, quantity: 100 }).error).toBe(`Insufficient buying power: ${words}; $50,000.00 is available, enough for ${most}.`);
+      expect(broker.submit({ ...req, quantity: most + 1 }).ok).toBe(false);
+    }
+    // Not complete enough to check: no answer, rather than a wrong one.
+    expect(broker.buyingPowerFit({ symbol: S, action: 'buy', type: 'limit' })).toBeNull();
+    // Before the open a market order waits for the regular session, and is checked at its spread.
+    const early = new SimBroker({ startingBalance: 10_000, config: { ...ZERO_COST_CONFIG, marginMultiplier: 1 } });
+    early.onBar(S, bar(et(D, '09:00'), 50, 50, 50, 50));
+    expect(early.submit({ symbol: S, action: 'buy', type: 'market', quantity: 201 }).error).toBe(
+      'Insufficient buying power: 201 shares at 50.00 (the regular-hours ask) need $10,050.00; $10,000.00 is available, enough for 200.',
+    );
+  });
+
   it('lets exits overlap, never past the shares held, and cuts the others when one fills', () => {
     const { broker } = setup();
     broker.submit({ symbol: S, action: 'buy', type: 'market', quantity: 10 });
@@ -471,8 +510,9 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
     expect(broker.submit({ symbol: S, action: 'buy', type: 'limit', limitPrice: 55, quantity: 180 }).ok).toBe(true);
     expect(broker.affordableQuantity({ symbol: S, action: 'buy', type: 'market' })).toBe(1);
     const id = broker.state.orders[0].id;
-    expect(broker.modify(id, { limitPrice: 100.1 })).toEqual({ ok: false, error: 'Insufficient buying power: need $18018.00, have $10000.00.' });
-    expect(broker.modify(id, { quantity: 200 })).toEqual({ ok: false, error: 'Insufficient buying power: need $11000.00, have $10000.00.' });
+    // Said in dollars as the app shows them, with the price checked and how many shares the money covers.
+    expect(broker.modify(id, { limitPrice: 100.1 })).toEqual({ ok: false, error: 'Insufficient buying power: 180 shares at 100.10 (the limit) need $18,018.00; $10,000.00 is available, enough for 99.' });
+    expect(broker.modify(id, { quantity: 200 })).toEqual({ ok: false, error: 'Insufficient buying power: 200 shares at 55.00 (the limit) need $11,000.00; $10,000.00 is available, enough for 181.' });
     // 180 x 55.50 = $9,990 fits in the $10,000, the $9,900 the order held back included.
     expect(broker.modify(id, { limitPrice: 55.5 })).toEqual({ ok: true });
     expect(broker.account().cash).toBe(10_000);
@@ -798,7 +838,7 @@ describe('Strict Mode and buying power judge the whole trade, placed or changed'
       ok: true,
       quantity: 100,
       needed: 1000,
-      reason: '101 would be refused: Insufficient buying power: need $10100.00, have $10000.00.',
+      reason: '101 would be refused: Insufficient buying power: 101 shares at 100.00 (the limit) need $10,100.00; $10,000.00 is available, enough for 100.',
     });
     // ... while a market order keeps a little back for the price to move before it fills.
     expect(cash.sizeByRisk({ symbol: S, action: 'buy', type: 'market', stopLoss: 99.9 }, 1)).toMatchObject({

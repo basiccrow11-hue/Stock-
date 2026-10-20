@@ -1,10 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
-import { assessRisk, pctAgainst } from '../../core/risk/risk';
+import { assessRisk, marginWarning, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
 import { marketSession } from '../../core/time';
 import { formatTick, roundToTick } from '../../core/util/math';
-import { bracketErrors, closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
+import { bracketErrors, buyingPowerFit, closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
 import { useSettings } from '../state/settingsStore';
 import { toast } from '../state/toasts';
 import { money, pct, price as fmtPrice, qty as fmtQty, signedMoney, pnlClass } from '../services/format';
@@ -38,6 +38,18 @@ function parse(v: string): number | undefined {
   return v.trim() !== '' && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** The ticket's quantity until one is given: this many shares, or fewer when buying power covers fewer (defaultQuantity). */
+const DEFAULT_QUANTITY = 100;
+
+/**
+ * The quantity a session or symbol starts with when buying power covers `most` shares: DEFAULT_QUANTITY,
+ * or `most` when that is fewer, in tens from 10 up, so a price that moves a little before the press still fits.
+ */
+function defaultQuantity(most: number): number {
+  const n = Math.max(1, Math.min(DEFAULT_QUANTITY, most));
+  return n >= 10 ? Math.floor(n / 10) * 10 : n;
+}
+
 export function OrderTicket() {
   const session = useTrading((s) => s.session);
   const symbol = useTrading((s) => s.activeSymbol);
@@ -55,7 +67,7 @@ export function OrderTicket() {
 
   const [action, setAction] = useState<OrderAction>('buy');
   const [type, setType] = useState<OrderType>('market');
-  const [quantity, setQuantity] = useState('100');
+  const [quantity, setQuantity] = useState(String(DEFAULT_QUANTITY));
   const [limit, setLimit] = useState('');
   const [stop, setStop] = useState('');
   const [sl, setSl] = useState('');
@@ -135,6 +147,24 @@ export function OrderTicket() {
     setTif('day');
     setExt(false);
   }, [sessionId]);
+  // Until a size is given (typed, or set with Size or Use), each session and each symbol starts with the
+  // default quantity cut to what buying power covers at the price then, once that price is in, so the first
+  // order fits even where 100 shares cost more than the default balance's buying power (a $584 SPY on
+  // $50,000). A size given is never changed.
+  const sizeGiven = useRef(false);
+  const defaultedFor = useRef('');
+  useEffect(() => {
+    if (sizeGiven.current || !sessionId || last === undefined) return;
+    const key = `${sessionId}|${symbol}`;
+    if (defaultedFor.current === key) return;
+    defaultedFor.current = key;
+    const covered = buyingPowerFit({ symbol, action: direction === 'long' ? 'buy' : 'short', type: 'market' });
+    if (covered) setQuantity(String(defaultQuantity(covered.shares)));
+  }, [sessionId, symbol, last, direction]);
+  const giveSize = (n: number) => {
+    sizeGiven.current = true;
+    setQuantity(String(n));
+  };
 
   // Estimated fill price for `n` shares, used for risk math: a limit at its limit; a market order or a
   // stop with the spread, slippage and market impact its fill would pay (the broker's own estimate, which
@@ -185,8 +215,17 @@ export function OrderTicket() {
     () => (opening && session ? bracketErrors({ ...request(), quantity: Math.max(1, q) }) : []),
     [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
   );
+  // What buying power covers of this order, as submit checks it: an order it does not cover says so before
+  // the press, with how many shares it does (null for a Sell or Cover, which it does not limit).
+  const fit = useMemo(
+    () => (opening && session ? buyingPowerFit(request()) : null),
+    [opening, session, symbol, action, type, limit, stop, tif, ext, last, now, exec, brokerVersion],
+  );
+  const overPower = !!fit && q > fit.shares;
+  const submitRef = useRef<HTMLButtonElement>(null);
   const bracketId = useId();
   const setId = useId();
+  const powerId = useId();
   // Screen readers hear a blocking bracket error once typing has settled (a second after the last edit
   // to the ticket), and again only when it changes kind: not while a half-typed price is briefly on the
   // wrong side, however slowly it is typed, nor at each new quote while playing.
@@ -227,7 +266,7 @@ export function OrderTicket() {
     const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}${peak}.` : '';
     if (r.reason) toast('info', `Sized to ${r.quantity}, below the ${r.needed} that ${String(+asked.toFixed(2))}% risk would need. ${r.reason}${trade}`, 8000);
     else if (joined) toast('info', `Sized to ${r.quantity}.${trade}`, 6000);
-    setQuantity(String(r.quantity));
+    giveSize(r.quantity);
   };
 
   const targetFromR = (mult: number) => {
@@ -304,7 +343,9 @@ export function OrderTicket() {
   // sight changes an order unnoticed. Extended hours only counts on a limit order, the only kind it changes.
   const optionsSet = [tif === 'gtc' ? 'GTC' : '', ext && type === 'limit' ? 'Ext. hours' : '', tag.trim() ? `Tag: ${tag.trim()}` : ''].filter(Boolean);
   // Read with the button by screen readers: the options set, then why the order can't be placed.
-  const describedBy = [optionsSet.length ? setId : '', ...bracket.map((_, i) => `${bracketId}-${i}`)].filter(Boolean).join(' ');
+  const describedBy = [optionsSet.length ? setId : '', ...bracket.map((_, i) => `${bracketId}-${i}`), overPower ? powerId : ''].filter(Boolean).join(' ');
+  // Over buying power, the order is refused: that is said instead of the warning that it uses margin.
+  const warnings = (risk?.warnings ?? []).filter((w) => !(overPower && w === marginWarning(risk!.positionPctOfEquity)));
   // Quantity has a row of its own, unless one price field (a limit's or a stop's) sits beside it.
   const qtyWide = type === 'market' || type === 'stop_limit';
 
@@ -340,7 +381,16 @@ export function OrderTicket() {
       <div className="grid2">
         <label className={`field${qtyWide ? ' wide' : ''}`}>
           Quantity (shares)
-          <input type="number" min={1} step={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={quantity}
+            onChange={(e) => {
+              sizeGiven.current = true;
+              setQuantity(e.target.value);
+            }}
+          />
         </label>
         {(type === 'stop' || type === 'stop_limit') && (
           <label className="field">
@@ -501,7 +551,7 @@ export function OrderTicket() {
         <div className="sr-only" role="status">
           {bracketSaid}
         </div>
-        {risk?.warnings.map((w) => (
+        {warnings.map((w) => (
           <div key={w} className="alert warn">
             {w}
           </div>
@@ -512,7 +562,27 @@ export function OrderTicket() {
             {optionsSet.join(' · ')}
           </div>
         )}
-        <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={describedBy || undefined}>
+        {/* An order buying power does not cover, said before the press, with the size it does cover. */}
+        {overPower && fit && (
+          <div className="alert error row" style={{ justifyContent: 'space-between' }}>
+            <span id={powerId}>
+              Exceeds buying power ({money(fit.available)}): {fit.shares ? `at most ${fmtQty(fit.shares)} ${fit.shares === 1 ? 'share' : 'shares'}` : 'not even one share fits'}.
+            </span>
+            {fit.shares > 0 && (
+              <button
+                className="btn sm"
+                onClick={() => {
+                  giveSize(fit.shares);
+                  // This line goes with the button pressed: focus goes on to the order, now of that size.
+                  submitRef.current?.focus({ preventScroll: true });
+                }}
+              >
+                Use {fmtQty(fit.shares)}
+              </button>
+            )}
+          </div>
+        )}
+        <button ref={submitRef} className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={describedBy || undefined}>
           {label}
         </button>
         {result && (

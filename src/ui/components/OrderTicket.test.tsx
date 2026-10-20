@@ -203,6 +203,73 @@ describe('the order ticket', () => {
     await store.endSession();
   });
 
+  it('starts with a quantity buying power covers, and says before the press when an order exceeds it, with the size that fits', async () => {
+    const store = await import('../state/tradingStore');
+    // jsdom lays nothing out: an order's result is brought into view as on a phone, where the page scrolls.
+    Element.prototype.scrollIntoView ??= () => undefined;
+    // $8,000 and $16,000 of buying power: less than 100 shares of SPY or QQQ cost.
+    const start = () => store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: ['QQQ'], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 8_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false });
+    expect(await start()).toBe(true);
+    const t = await mountTicket();
+    const qty = () => t.q<HTMLInputElement>('input[type="number"][min="1"]')!;
+    const covered = (symbol: string) => store.buyingPowerFit({ symbol, action: 'buy', type: 'market' })!;
+    const spy = covered('SPY');
+    expect(spy.available).toBe(16_000);
+    expect(spy.shares).toBeGreaterThan(10);
+    expect(spy.shares).toBeLessThan(100);
+    const tens = (n: number) => String(Math.floor(n / 10) * 10);
+    const over = () => [...t.host.querySelectorAll('.ticket-submit .alert.error')].find((a) => a.textContent!.startsWith('Exceeds buying power'));
+    const warnings = () => [...t.host.querySelectorAll('.ticket-submit .alert.warn')].map((a) => a.textContent);
+
+    // Not typed yet: as many as buying power covers, in tens, and nothing says it is too much. Over 100% of
+    // equity it uses margin, which is said.
+    expect(qty().value).toBe(tens(spy.shares));
+    expect(t.button(`BUY ${tens(spy.shares)} SPY MKT`)).toBeDefined();
+    expect(over()).toBeUndefined();
+    expect(warnings().some((w) => w!.endsWith('(uses margin).'))).toBe(true);
+    // Each symbol starts the same way while no size has been given.
+    act(() => store.setActiveSymbol('QQQ'));
+    expect(qty().value).toBe(tens(Math.min(100, covered('QQQ').shares)));
+    act(() => store.setActiveSymbol('SPY'));
+    expect(qty().value).toBe(tens(spy.shares));
+
+    // Typed past it: a red line just above the button says so before the press, with the most it covers,
+    // read with the button, instead of the margin warning, which reads as allowed.
+    enter(qty(), '100');
+    // Typed, it is the user's: another symbol keeps it.
+    act(() => store.setActiveSymbol('QQQ'));
+    expect(qty().value).toBe('100');
+    act(() => store.setActiveSymbol('SPY'));
+    const submit = t.button('BUY 100 SPY MKT')!;
+    expect(over()!.textContent).toBe(`Exceeds buying power ($16,000.00): at most ${spy.shares} shares.Use ${spy.shares}`);
+    expect(over()!.nextElementSibling).toBe(submit);
+    expect(submit.getAttribute('aria-describedby')).toBe(over()!.querySelector('span')!.id);
+    expect(warnings().some((w) => w!.endsWith('(uses margin).'))).toBe(false);
+    // The broker says the same if pressed anyway.
+    act(() => submit.click());
+    expect(submit.nextElementSibling!.textContent).toMatch(/^Insufficient buying power: 100 shares at about [\d.]+ \(the ask\) need \$[\d,.]+; \$16,000\.00 is available, enough for \d+\.$/);
+    expect(store.useTrading.getState().positions).toHaveLength(0);
+
+    // Use takes that size; focus goes on to the order, which fits now.
+    const use = [...over()!.querySelectorAll('button')].find((b) => b.textContent === `Use ${spy.shares}`)!;
+    act(() => use.focus());
+    act(() => use.click());
+    expect(qty().value).toBe(String(spy.shares));
+    expect(over()).toBeUndefined();
+    expect(document.activeElement).toBe(t.button(`BUY ${spy.shares} SPY MKT`));
+
+    // A size given is the user's: neither another symbol nor a new session changes it.
+    enter(qty(), '7');
+    act(() => store.setActiveSymbol('QQQ'));
+    expect(qty().value).toBe('7');
+    await act(async () => void (await start()));
+    expect(qty().value).toBe('7');
+    act(() => t.button('BUY 7 SPY MKT')!.click());
+    expect(store.useTrading.getState().positions).toMatchObject([{ symbol: 'SPY', quantity: 7 }]);
+    t.unmount();
+    await store.endSession();
+  });
+
   it('sums up the estimate in one line above the submit button, with the risk in red over the limit', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');

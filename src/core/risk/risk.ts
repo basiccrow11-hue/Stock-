@@ -91,7 +91,7 @@ export function assessRisk(input: RiskInput): RiskAssessment {
     if (stopLoss === undefined || stopLoss <= 0) warnings.push('No stop loss: your risk on this trade is undefined.');
     if (pctRisk !== null && pctRisk > RISK_WARNING_PCT) warnings.push(`WARNING: This trade risks ${pctRisk.toFixed(1)}% of your account.`);
     if (rewardRiskRatio !== null && rewardRiskRatio < 1) warnings.push(`Reward/risk is ${rewardRiskRatio.toFixed(2)}:1, below 1:1.`);
-    if (positionPctOfEquity > 100) warnings.push(`Position is ${positionPctOfEquity.toFixed(0)}% of equity (uses margin).`);
+    if (positionPctOfEquity > 100) warnings.push(marginWarning(positionPctOfEquity));
   }
 
   return {
@@ -108,6 +108,15 @@ export function assessRisk(input: RiskInput): RiskAssessment {
     errors,
     warnings,
   };
+}
+
+/**
+ * The warning that a position worth `pctOfEquity`% of equity, over 100%, uses margin. Only a warning: the
+ * order is accepted as long as buying power covers it, which the ticket checks with the broker (it says
+ * so instead of this when buying power does not).
+ */
+export function marginWarning(pctOfEquity: number): string {
+  return `Position is ${pctOfEquity.toFixed(0)}% of equity (uses margin).`;
 }
 
 /** Shares to buy/short so that hitting the stop loses `riskPct`% of equity. */
