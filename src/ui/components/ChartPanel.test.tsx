@@ -4,15 +4,18 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { exchangeDate, exchangeTimeToUnix, isTradingDay, parseHHMM, prevTradingDay } from '../../core/time';
 
-/** The unfinished sessions' summaries the stand-in storage lists (none unless a test sets them). */
-const saved = vi.hoisted(() => ({ summaries: [] as unknown[] }));
+/**
+ * The unfinished sessions' summaries the stand-in storage lists, and the records it reads by key (none unless
+ * a test sets them).
+ */
+const saved = vi.hoisted(() => ({ summaries: [] as unknown[], records: {} as Record<string, unknown> }));
 vi.mock('../services/idb', () => ({
   idb: {
     all: async () => [],
     withPrefix: async (_s: string, prefix: string) => (prefix === 'session-summary:' ? saved.summaries : []),
     set: async () => undefined,
     delete: async () => undefined,
-    get: async () => undefined,
+    get: async (_s: string, key: string) => saved.records[key],
     modify: async (_s: string, _k: string, fn: (v: unknown) => unknown) => fn(undefined),
   },
 }));
@@ -32,6 +35,7 @@ beforeAll(() => {
 
 afterEach(async () => {
   saved.summaries = [];
+  saved.records = {};
   const store = await import('../state/tradingStore');
   // What a test held the chart to (as read from saved sessions this storage keeps no record of) goes with it.
   store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } }));
@@ -531,14 +535,23 @@ describe('the chart with no session', () => {
     holds([hold]);
     await vi.waitFor(() => expect(cap()).toBe(`Bars shown up to ${exchangeDate(until)} 10:05 ET, where your unfinished SPY replay is.`));
     expect(tip()).not.toBeNull();
-    // Its clock before the data's first day: nothing to show, and nothing to pick a bar from.
-    const early = at('2018-12-03', '09:32');
+    // Its clock at the data's first bar (a replay started there): nothing to show, and nothing to pick a bar
+    // from. The chart then loads the bars up to that day, and reads the saved sessions again as it does: kept
+    // here, as the store reads them.
+    const { DEMO_FIRST_DATE } = await import('../../core/data/demoProvider');
+    const early = at(DEMO_FIRST_DATE, '04:00');
+    saved.summaries = [summary(hold.id, ['SPY'], false, early)];
+    saved.records = { [`session:${hold.id}`]: { summary: { id: hold.id }, replay: { providerId: 'demo' } } };
     holds([{ ...hold, until: early }]);
-    await vi.waitFor(() => expect(cap()).toBe('No SPY bars before your unfinished replay’s clock (2018-12-03 09:32 ET).'), { timeout: 20_000 });
+    await vi.waitFor(() => expect(cap()).toBe(`No SPY bars before your unfinished replay’s clock (${DEMO_FIRST_DATE} 04:00 ET).`), { timeout: 20_000 });
     expect(p.host.querySelector('.browse-cap')!.getAttribute('role')).toBe('status');
     expect(tip()).toBeNull();
+    expect(p.store.selectBarBlocked()).not.toBeNull();
+    // The same day, so the same bars: only the words change.
     holds([{ ...hold, until: early, elsewhere: true }]);
-    await vi.waitFor(() => expect(cap()).toBe('No SPY bars before where the SPY replay running in another tab was last saved (2018-12-03 09:32 ET).'));
+    await vi.waitFor(() => expect(cap()).toBe(`No SPY bars before where the SPY replay running in another tab was last saved (${DEMO_FIRST_DATE} 04:00 ET).`));
+    saved.summaries = [];
+    saved.records = {};
     holds([]);
     await vi.waitFor(() => expect(cap()).toBeNull());
     expect(tip()).not.toBeNull();
