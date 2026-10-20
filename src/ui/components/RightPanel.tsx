@@ -86,9 +86,10 @@ function ChallengeWidget() {
 function NoSession({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
   // While a replay of the chart's ticker you have not finished, or one another tab runs, keeps that chart
   // from being drawn (browseHiddenBy), Replay is off there: the line says what to do first, as the note on
-  // the chart does. No date, which a blind one hides.
-  const how = useTrading(() => {
-    const by = browseHiddenBy();
+  // the chart does. No date, which a blind one hides. Not while a replay loads: one being resumed holds its
+  // ticker until it is in, and the line would say to resume the replay already on its way.
+  const how = useTrading((s) => {
+    const by = s.loading ? null : browseHiddenBy();
     if (!by) return 'Press Replay above the chart, then click the bar to start from.';
     if (by.elsewhere) return 'Pick another ticker, or end the replay running in another tab, then press Replay.';
     return by.mine.length > 1

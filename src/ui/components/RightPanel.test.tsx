@@ -75,6 +75,11 @@ describe('the right column', () => {
     holds([hold]);
     expect(store.browseHiddenReason()).toMatch(/^Your SPY replay of 2024-03-12 is unfinished/);
     expect(line()).toBe(resume);
+    // While a replay loads (this one being resumed holds its ticker until it is in), not "resume it".
+    act(() => store.useTrading.setState({ loading: true }));
+    expect(line()).toBe(`Press Replay above the chart, then click the bar to start from.${after}`);
+    act(() => store.useTrading.setState({ loading: false }));
+    expect(line()).toBe(resume);
     holds([hold, other]);
     expect(line()).toBe(`Resume one of your unfinished replays on the chart, or discard them or pick another ticker, then press Replay.${after}`);
     holds([{ ...hold, elsewhere: true, date: undefined } as unknown as typeof hold]);
