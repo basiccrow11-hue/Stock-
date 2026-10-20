@@ -139,19 +139,36 @@ function nameStarts(name: string, lower: string): boolean {
 }
 
 /**
- * `extra`, rows for the ticker typed in that the chosen source does not list (Use XYZ, or the same ticker
- * from another source), placed among that source's matches (`rows`, best first). First, as an exact match
- * would be, unless the text starts a listed name or a word of one and starts no listed ticker ("apple",
- * "tesla"): that is most likely the company, not a ticker of its own, so those names come first and the
- * extra rows right after them. Only the start of a name or word counts: "ON" is in Amazon, but it is a
- * ticker of its own.
+ * `extra`, rows for the ticker typed in that the chosen source does not list, placed among that source's
+ * matches (`rows`, best first). Only the start of a ticker, a name or a word in a name counts below: "ON"
+ * is in Amazon, but it is a ticker of its own.
+ *
+ * - The chosen vendor's own Use XYZ (no `from`) comes first, as an exact match would, unless the text
+ *   starts a listed name or a word of one and starts no listed ticker ("apple", "tesla"): that is most
+ *   likely the company, not a ticker of its own, so those names come first and Use XYZ right after them.
+ *   A vendor has every ticker, so "AM" is as likely meant as AMZN.
+ * - The ticker from your imported data (`from`, not `use`) comes first: it is the ticker typed, exactly,
+ *   and one you brought in yourself.
+ * - A guess from another source ("Use XYZ" from Polygon or Alpaca, offered on the demo or your imported
+ *   data) comes after the chosen source's tickers and names that start with the text, and first only when
+ *   there are none (PLTR on the demo). The source you picked lists its tickers, so "msf" there is a start
+ *   of MSFT, not a request for a ticker MSF from elsewhere that spends a vendor's rate limit.
  */
-export function placeExtraRows<T extends { symbol: string; name: string }>(rows: readonly T[], extra: readonly T[], query: string): T[] {
+export function placeExtraRows<T extends { symbol: string; name: string; use?: boolean; from?: string }>(rows: readonly T[], extra: readonly T[], query: string): T[] {
   if (!extra.length) return [...rows];
   const q = query.trim();
-  if (rows.some((r) => r.symbol.startsWith(q.toUpperCase()))) return [...extra, ...rows];
-  const named = rows.filter((r) => nameStarts(r.name, q.toLowerCase()));
-  return [...named, ...extra, ...rows.filter((r) => !named.includes(r))];
+  const tickers = rows.filter((r) => r.symbol.startsWith(q.toUpperCase()));
+  const named = rows.filter((r) => !tickers.includes(r) && nameStarts(r.name, q.toLowerCase()));
+  const own = extra.filter((r) => !r.from);
+  const imported = extra.filter((r) => r.from && !r.use);
+  const guesses = extra.filter((r) => r.from && r.use);
+  let out = [...rows];
+  if (own.length) out = tickers.length ? [...own, ...out] : [...named, ...own, ...out.filter((r) => !named.includes(r))];
+  if (guesses.length) {
+    const ahead = [...tickers, ...named];
+    out = [...ahead, ...guesses, ...out.filter((r) => !ahead.includes(r))];
+  }
+  return [...imported, ...out];
 }
 
 /** The sources a ticker the chosen one cannot chart is looked for in, in this order (as the watchlist looks). */

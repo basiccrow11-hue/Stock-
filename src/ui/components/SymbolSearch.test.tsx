@@ -316,6 +316,55 @@ describe('the symbol search', () => {
     }
   });
 
+  it('on the demo or imported data, keeps a listed ticker that starts with the text ahead of another source’s guess', async () => {
+    const { csvProvider } = await import('../state/dataRegistry');
+    const { useCredentials } = await import('../state/credentials');
+    useCredentials.setState({ creds: { polygonApiKey: 'k', alpacaKeyId: 'id', alpacaSecret: 'sec' } });
+    csvProvider.upsert({ symbol: 'MS', name: 'MS', baseTimeframe: '1D', bars: [{ time: 1_710_250_200, open: 1, high: 1, low: 1, close: 1, volume: 1 }], importedAt: 0, fileName: 'MS.csv' });
+    try {
+      const p = await mount();
+      await p.open();
+      expect(p.sources()[0]).toEqual(['Demo', 'Ready', 'true']);
+      // "msf" is the start of the demo's MSFT, not a ticker MSF to load from Polygon.
+      await p.type('msf');
+      expect(p.rows()).toEqual([
+        ['MSFT', 'Microsoft'],
+        ['Use MSF', 'Load its bars from Polygon'],
+        ['Use MSF', 'Load its bars from Alpaca'],
+      ]);
+      expect(p.row('MSFT').className).toContain('next');
+      await p.type('sp');
+      expect(p.rows()[0]).toEqual(['SPY', 'S&P 500 ETF']);
+      expect(p.row('SPY').className).toContain('next');
+      // A company's name or a word in it holds the guesses back too; a plain substring does not ("on" is in Amazon).
+      await p.type('micro');
+      expect(p.rows().map((r) => r[0])).toEqual(['MSFT', 'Use MICRO', 'Use MICRO']);
+      await p.type('on');
+      expect(p.rows().map((r) => r[0])).toEqual(['Use ON', 'Use ON', 'AMZN']);
+      // Your own imported ticker, typed exactly, stays first: it is no guess.
+      await p.type('ms');
+      expect(p.rows()).toEqual([
+        ['MS', 'From your imported data'],
+        ['MSFT', 'Microsoft'],
+        ['Use MS', 'Load its bars from Polygon'],
+        ['Use MS', 'Load its bars from Alpaca'],
+        ['META', 'Meta Platforms'],
+      ]);
+      await p.type('msf');
+      p.key(p.input(), 'Enter');
+      expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'MSFT', browse: { providerId: 'demo' } });
+      // The same on the imported data's own tab: a start of MS keeps MS ahead of Polygon's guess.
+      await p.open();
+      act(() => p.source('Imported').click());
+      await act(async () => undefined);
+      await p.type('m');
+      expect(p.rows().map((r) => r[0])).toEqual(['MS', 'Use M', 'Use M']);
+      p.unmount();
+    } finally {
+      csvProvider.remove('MS');
+    }
+  });
+
   it('on Polygon or Alpaca, puts a listed company first when its name is typed, and Use XYZ right after it', async () => {
     const { useCredentials } = await import('../state/credentials');
     useCredentials.setState({ creds: { polygonApiKey: 'k' } });
