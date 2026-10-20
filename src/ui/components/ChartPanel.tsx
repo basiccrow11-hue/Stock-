@@ -308,29 +308,47 @@ function useClearOfLegend(ref: RefObject<HTMLDivElement | null>): void {
     const host = notes?.closest<HTMLElement>('.chart-host');
     const wrap = host?.querySelector<HTMLElement>('.chart-wrap');
     if (!notes || !host || !wrap || typeof ResizeObserver === 'undefined') return;
-    let row: HTMLElement | null = null;
+    let legend: HTMLElement | null = null;
+    let watched: Element[] = [];
     const place = () => {
-      const below = row?.isConnected ? row.getBoundingClientRect().bottom - host.getBoundingClientRect().top + 8 : 8;
+      // The notes' left edge: that of the leftmost note shown (the tip is narrower than the column).
+      const shown = [...notes.children].map((c) => c.getBoundingClientRect()).filter((r) => r.width > 0);
+      const left = shown.length ? Math.min(...shown.map((r) => r.left)) : notes.getBoundingClientRect().left;
+      const rows = legend?.isConnected ? [...legend.children].map((c) => c.getBoundingClientRect()) : [];
+      const under = rows.filter((r, i) => i === 0 || r.right > left);
+      const below = under.length ? Math.max(...under.map((r) => r.bottom)) - host.getBoundingClientRect().top + 8 : 8;
       notes.style.setProperty('--clear-of-legend', `${Math.max(8, Math.ceil(below))}px`);
     };
     const ro = new ResizeObserver(place);
-    // The legend comes and goes with the chart's bars: the row watched is the one there now.
+    // Rows come and go with the indicators: each is watched, as the legend's size alone misses a lower row
+    // growing while the first stays the widest.
+    const rows = new MutationObserver(() => watch());
+    // The legend comes and goes with the chart's bars: the one watched is the one there now.
     const watch = () => {
-      const next = wrap.querySelector<HTMLElement>(':scope > .chart-legend:not(.pane-legend) > .legend-row');
-      if (next !== row) {
-        if (row) ro.unobserve(row);
-        row = next;
-        if (row) ro.observe(row);
+      const next = wrap.querySelector<HTMLElement>(':scope > .chart-legend:not(.pane-legend)');
+      if (next !== legend) {
+        rows.disconnect();
+        legend = next;
+        if (legend) rows.observe(legend, { childList: true });
       }
+      const now = legend ? [legend, ...legend.children] : [];
+      for (const el of watched) if (!now.includes(el)) ro.unobserve(el);
+      for (const el of now) if (!watched.includes(el)) ro.observe(el);
+      watched = now;
       place();
     };
     const mo = new MutationObserver(watch);
     mo.observe(wrap, { childList: true });
+    // A note shown or gone moves the notes' left edge.
+    const noted = new MutationObserver(place);
+    noted.observe(notes, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
     ro.observe(host);
     watch();
     return () => {
       ro.disconnect();
       mo.disconnect();
+      rows.disconnect();
+      noted.disconnect();
     };
   }, [ref]);
 }

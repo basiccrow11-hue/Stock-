@@ -369,7 +369,7 @@ describe('the chart with no session', () => {
     p.unmount();
   }, 30_000);
 
-  it('keeps its notes under the legend\'s first row, however many lines that takes', async () => {
+  it('keeps its notes under the legend\'s first row, however many lines that takes, and under a lower row that reaches under them', async () => {
     // jsdom lays nothing out: the boxes are given here, and the observers called as the browser would.
     const observers: (() => void)[] = [];
     vi.stubGlobal(
@@ -402,6 +402,29 @@ describe('the chart with no session', () => {
     bottom = 138;
     act(() => observers.forEach((o) => o()));
     expect(top()).toBe('46px');
+    bottom = 124;
+    act(() => observers.forEach((o) => o()));
+    expect(top()).toBe('32px');
+
+    // Rows of overlay indicators below it: one that reaches under the notes (Bollinger Bands' three values)
+    // takes them below it; one that ends short of them leaves them where they are.
+    const tip = notes.querySelector<HTMLElement>('.browse-tip')!;
+    vi.spyOn(tip, 'getBoundingClientRect').mockReturnValue({ left: 600, right: 900, width: 300, top: 0, bottom: 0 } as DOMRect);
+    const overlay = (rowBottom: number, right: number) => {
+      const r = document.createElement('div');
+      r.className = 'legend-ind';
+      vi.spyOn(r, 'getBoundingClientRect').mockReturnValue({ bottom: rowBottom, right } as DOMRect);
+      return r;
+    };
+    const sma = overlay(138, 400);
+    await act(async () => void legend.appendChild(sma));
+    expect(top()).toBe('32px');
+    const bb = overlay(152, 640);
+    await act(async () => void legend.appendChild(bb));
+    expect(top()).toBe('60px');
+    // Removing the indicator places them again.
+    await act(async () => bb.remove());
+    expect(top()).toBe('32px');
     await act(async () => legend.remove());
     expect(top()).toBe('8px');
     const css = (await import('node:fs')).readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
