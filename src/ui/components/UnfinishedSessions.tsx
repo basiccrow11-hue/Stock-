@@ -1,6 +1,6 @@
 /** Sessions a reload, a closed tab or a crash left unfinished, to carry on or let go (savedSessions). */
-import { useCallback, useEffect, useState } from 'react';
-import { SourceBadge } from './common';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { SourceBadge, focusHome, isShown } from './common';
 import { blindDayLabel, discardSession, resumeSession, unfinishedSessions, useTrading } from '../state/tradingStore';
 import { onSessionFreed, type SessionSummary } from '../services/savedSessions';
 import { CHALLENGES } from '../../core/challenges/challenges';
@@ -25,8 +25,11 @@ function where(s: SessionSummary): string {
   return `${m.blind ? blindDayLabel(s.now, m.startDate) : exchangeDate(s.now)} ${time}${s.finished ? ' (end reached)' : ''}`;
 }
 
-function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
+/** `onGone`: the session may no longer be listed; `focused`, whether focus was in its row (on its buttons). */
+function Row({ s, onGone }: { s: SessionSummary; onGone: (focused: boolean) => void }) {
   const [busy, setBusy] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
+  const gone = () => onGone(!!rowRef.current?.contains(document.activeElement));
   const pnl = s.equity - s.startingBalance;
   const money = `${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   // Its challenge attempt, while one is under way (a summary saved before that was noted says only which it started with).
@@ -38,10 +41,10 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
     setBusy(true);
     await discardSession(s.id).catch(() => false);
     setBusy(false);
-    onGone();
+    gone();
   };
   return (
-    <li className="unfinished">
+    <li className="unfinished" ref={rowRef}>
       <div className="stack" style={{ gap: 2, minWidth: 0 }}>
         <div className="row wrap" style={{ gap: 6 }}>
           <strong>{s.meta.label}</strong>
@@ -55,7 +58,7 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: () => void }) {
         </span>
       </div>
       <div className="row" style={{ gap: 6 }}>
-        <button className="btn primary sm" aria-disabled={busy} onClick={() => !busy && void resumeSession(s.id).then((ok) => !ok && onGone())}>
+        <button className="btn primary sm" aria-disabled={busy} onClick={() => !busy && void resumeSession(s.id).then((ok) => !ok && gone())}>
           Resume
         </button>
         <button className="btn sm" aria-disabled={busy} onClick={() => !busy && void discard()}>
@@ -94,14 +97,40 @@ export function UnfinishedSessions({ onList }: { onList?: (count: number) => voi
     };
   }, [refresh]);
   useEffect(() => onList?.(list.length), [list.length, onList]);
+  // A row discarded (or whose session failed to resume) while focus was on its buttons takes them with it:
+  // once the list without it is in, focus goes on to the Resume of the row now in its place (or the one
+  // before it, at the end), else, with none left, the toolbar's Replay button, never to the page. Only then:
+  // the list looked at again in the background (coming back to the tab) moves nothing.
+  const refocus = useRef<{ id: string; index: number } | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  useLayoutEffect(() => {
+    const was = refocus.current;
+    if (!was) return;
+    refocus.current = null;
+    // Still listed (another tab runs it, so it was not discarded): its button still has focus.
+    if (list.some((s) => s.id === was.id)) return;
+    // Focus moved on meanwhile (a click elsewhere) is left where it is.
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const resumes = [...(listRef.current?.querySelectorAll<HTMLElement>(':scope > li .btn.primary') ?? [])];
+    const target = resumes[Math.min(was.index, resumes.length - 1)] ?? [...document.querySelectorAll<HTMLElement>('.replay-btn')].find(isShown);
+    if (target) target.focus({ preventScroll: true });
+    else focusHome();
+  }, [list]);
   if (!list.length) return null;
   return (
     <section className="card stack unfinished-list" aria-label="Unfinished sessions">
       <h3>{list.length === 1 ? 'Unfinished session' : 'Unfinished sessions'}</h3>
       <p className="small muted">Carry on where you left off, paused, or discard it.</p>
-      <ul>
-        {list.map((s) => (
-          <Row key={s.id} s={s} onGone={refresh} />
+      <ul ref={listRef}>
+        {list.map((s, index) => (
+          <Row
+            key={s.id}
+            s={s}
+            onGone={(focused) => {
+              if (focused) refocus.current = { id: s.id, index };
+              refresh();
+            }}
+          />
         ))}
       </ul>
     </section>
