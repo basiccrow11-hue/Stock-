@@ -60,7 +60,8 @@ describe('the chart with no session (browsing)', () => {
     off();
     expect(resets).toContain('reset');
     expect(candles.at(-1)!.time).toBe(at(demoProvider.lastDate, '19:59'));
-    expect(exchangeDate(candles[0].time)).toBe(back(demoProvider.lastDate, 5));
+    // As many days as a replay loads at most, so one load serves every timeframe.
+    expect(exchangeDate(candles[0].time)).toBe(back(demoProvider.lastDate, 15));
     const s = store.useTrading.getState();
     expect(s.browse).toMatchObject({ providerId: 'demo', loading: false, error: null, source: 'DEMO' });
     // No session: no quotes, account, positions or orders, no clock, nothing plays and nothing can be traded.
@@ -142,6 +143,39 @@ describe('the chart with no session (browsing)', () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(store.getBaseBars('AAPL').length).toBeGreaterThan(0);
       expect(store.useTrading.getState()).toMatchObject({ activeSymbol: 'AAPL', browse: { loading: false, error: null } });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('the chart with no session after a session', () => {
+  it('loads again a chart that had failed, once a session on its ticker ends', async () => {
+    const store = await import('./tradingStore');
+    const { demoProvider } = await import('./dataRegistry');
+    const { DataProviderError } = await import('../../core/data/provider');
+    const { ReplaySession } = await import('../../core/replay/ReplaySession');
+    const real = ReplaySession.preview.bind(ReplaySession);
+    let fail = true;
+    const spy = vi.spyOn(ReplaySession, 'preview').mockImplementation(async (provider, setup, signal) => {
+      if (fail) throw new DataProviderError('Polygon rate limit reached. Wait a minute and try again.', 'rate_limit');
+      return real(provider, setup, signal);
+    });
+    try {
+      store.setActiveSymbol('QQQ');
+      store.getBaseBars('QQQ');
+      await vi.waitFor(() => expect(store.useTrading.getState().browse.error).toMatch(/rate limit/));
+      // Not tried again by itself meanwhile (each try would spend the rate limit).
+      store.getBaseBars('QQQ');
+      expect(spy).toHaveBeenCalledTimes(1);
+      fail = false;
+      // A replay of it started another way (Select date, Random bar, the full form), then Exit.
+      expect(await store.startReplayAt(back(demoProvider.lastDate, 3), '10:00')).toBe(true);
+      await store.endSession();
+      expect((await chartCandles('QQQ', '1m')).length).toBeGreaterThan(0);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(store.useTrading.getState().browse).toMatchObject({ loading: false, error: null });
+      expect(store.selectBarBlocked()).toBeNull();
     } finally {
       spy.mockRestore();
     }
@@ -246,6 +280,74 @@ describe('Bar Replay: a replay cut at a candle of the chart', () => {
     store.setTimeframe('15m');
     expect(store.useTrading.getState().speed).toBe(60);
     useSettings.getState().updateReplay({ blind: false });
+  });
+
+  it('plays on and picks its speed by the candles the chart draws: a file of daily bars on a 1-minute chart replays as a daily chart', async () => {
+    const store = await import('./tradingStore');
+    const { useSettings } = await import('./settingsStore');
+    const { csvProvider } = await import('./dataRegistry');
+    const bars: Bar[] = [];
+    for (let d = '2023-01-03'; d <= '2024-12-31'; d = nextTradingDay(d)) bars.push({ time: at(d, '09:30'), open: 10, high: 10.5, low: 9.5, close: 10, volume: 1000 });
+    csvProvider.upsert({ symbol: 'DAYS', name: 'DAYS', baseTimeframe: '1D', bars, importedAt: 0, fileName: 'DAYS.csv' });
+    try {
+      store.setBrowseSource('csv');
+      store.setActiveSymbol('DAYS');
+      store.setTimeframe('1m');
+      await chartCandles('DAYS', '1m');
+      const day = '2023-06-01';
+      expect(await store.startReplayAt(day, '16:00')).toBe(true);
+      let end = day;
+      for (let i = 0; i < 250; i++) end = nextTradingDay(end);
+      const s = store.useTrading.getState();
+      // A daily candle a second, a year of them on: not a 1-minute chart's five days at 60x.
+      expect(s.speed).toBe(23_400);
+      expect(exchangeDate(s.session!.end!)).toBe(end);
+      // The chart and the setup keep their timeframe.
+      expect(s.timeframe).toBe('1m');
+      expect(useSettings.getState().replay).toMatchObject({ timeframe: '1m', speed: 23_400, endDate: end });
+    } finally {
+      csvProvider.remove('DAYS');
+    }
+  });
+
+  it('warns of a cut with only after-hours trading left before the replay ends, and of a market order that cannot fill in it', async () => {
+    const store = await import('./tradingStore');
+    const { demoProvider } = await import('./dataRegistry');
+    const last = demoProvider.lastDate;
+    const prev = prevTradingDay(last);
+    await chartCandles('SPY', '1m');
+    const warned = "Only after-hours trading follows this bar: market orders won't fill. Pick an earlier bar.";
+    // What select-bar mode says of a candle before it is clicked: once the data's last day is known.
+    store.setSelectingBar(true);
+    await vi.waitFor(() => expect(store.cutWarning(at(last, '16:30'))).toBe(warned));
+    // The last regular minute's candle ends at the close: the replay cut there starts after hours.
+    expect(store.cutWarning(at(last, '15:59'))).toBe(warned);
+    expect(store.cutWarning(at(last, '15:58'))).toBeNull();
+    // The day before plays on into the last day's regular session.
+    expect(store.cutWarning(at(prev, '19:00'))).toBeNull();
+    store.setSelectingBar(false);
+
+    const queued = 'Market is not in regular hours. The order will work from the next regular session.';
+    expect(await store.startBarReplay(at(prev, '19:00'))).toBe(true);
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1 }).warnings).toContain(queued);
+    await store.endSession();
+    expect(await store.startBarReplay(at(last, '16:30'))).toBe(true);
+    const r = store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.warnings).toContain(store.QUEUED_PAST_END);
+    expect(r.warnings).not.toContain(queued);
+    expect(store.QUEUED_PAST_END).toBe(
+      'Market is not in regular hours, and this replay ends before the next regular session, so the order will not fill in this replay. To trade after hours, use a Limit order with Extended hours (under More options).',
+    );
+    // A limit with extended hours works in it.
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'limit', limitPrice: 1, quantity: 1, extendedHours: true }).warnings).not.toContain(store.QUEUED_PAST_END);
+    await store.endSession();
+    // So does closing a position, which a market order closes.
+    expect(await store.startBarReplay(at(last, '15:58'))).toBe(true);
+    expect(store.submitOrder({ symbol: 'SPY', action: 'buy', type: 'market', quantity: 1 }).ok).toBe(true);
+    for (let i = 0; i < 3; i++) store.stepForward();
+    expect(store.useTrading.getState().positions).toHaveLength(1);
+    expect(store.closePosition('SPY').warnings).toEqual([store.QUEUED_PAST_END]);
   });
 
   it('will not cut at the newest candle of the data: nothing follows it', async () => {

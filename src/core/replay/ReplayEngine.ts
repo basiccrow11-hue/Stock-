@@ -221,6 +221,14 @@ export class ReplayEngine {
     return Math.max(this.#firstSessionIndex - 1, lastIndexAtOrBefore(this.#ends, t, (x) => x)) + 1;
   }
 
+  /**
+   * How many of the revealed bars had ended by `t`. The chart with no session stops where a saved session on
+   * its symbol has got to (tradingStore's BrowseHold): it shows the first these many of a preview's bars.
+   */
+  revealedEndedBy(t: UnixSeconds): number {
+    return Math.min(this.#cursor + 1, lastIndexAtOrBefore(this.#ends, t, (x) => x) + 1);
+  }
+
   /** Whether there is a next bar and it completes by `t` (one that ends after the end time is never revealed). */
   nextBarCompletesBy(t: UnixSeconds): boolean {
     return this.#cursor + 1 < this.#bars.length && this.#ends[this.#cursor + 1] <= t;

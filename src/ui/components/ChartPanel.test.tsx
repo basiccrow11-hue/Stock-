@@ -16,7 +16,10 @@ vi.mock('../services/idb', () => ({
 vi.mock('../chart/offscreenSnapshot', () => ({ offscreenSnapshot: async () => 'data:image/jpeg;base64,BB==' }));
 // The chart draws on a canvas jsdom does not have (its part of Bar Replay is tested in ChartView.test.tsx);
 // the toolbar and the notes around it are what is tested here.
-vi.mock('../chart/ChartView', () => ({ ChartView: () => null }));
+vi.mock('../chart/ChartView', async () => {
+  const { createElement } = await import('react');
+  return { ChartView: () => createElement('div', { className: 'chart-wrap' }) };
+});
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -43,10 +46,13 @@ async function mount(active = true) {
   const store = await import('../state/tradingStore');
   const { ChartPanel } = await import('./ChartPanel');
   const asked: string[] = [];
+  /** The cards of Data & Settings the panel opened the page at. */
+  const opened: string[] = [];
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
-  const render = (on: boolean) => act(() => root.render(createElement(ChartPanel, { onNewSession: (mode: string) => void asked.push(mode), active: on })));
+  const render = (on: boolean) =>
+    act(() => root.render(createElement(ChartPanel, { onNewSession: (mode: string) => void asked.push(mode), onOpenSettingsAt: (card: string) => void opened.push(card), active: on })));
   render(active);
   const buttons = () => [...host.querySelectorAll<HTMLButtonElement>('button')];
   const button = (text: string) => buttons().find((b) => b.getAttribute('aria-label') === text || b.textContent!.trim() === text);
@@ -65,7 +71,7 @@ async function mount(active = true) {
     );
     await act(async () => undefined);
   };
-  return { host, store, asked, button, replay, arrow, menu, item, loaded, render, unmount: () => act(() => root.unmount()) };
+  return { host, store, asked, opened, button, replay, arrow, menu, item, loaded, render, unmount: () => act(() => root.unmount()) };
 }
 
 /** Types `value` into a field as the user does. */
@@ -247,7 +253,7 @@ describe('the chart with no session', () => {
     expect(p.replay().getAttribute('aria-disabled')).toBe('true');
     expect(p.host.querySelector('.browse-tip')).toBeNull();
     act(() => p.button('Use the demo data')!.click());
-    expect(p.store.useTrading.getState().browse.providerId).toBe('demo');
+    expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'IWM', browse: { providerId: 'demo' } });
     await p.loaded();
     expect(p.host.querySelector('.browse-empty')).toBeNull();
 
@@ -259,6 +265,148 @@ describe('the chart with no session', () => {
     });
     expect(p.button('Use the demo data')).toBeUndefined();
     expect(p.button('Try again')).toBeDefined();
+    p.unmount();
+  }, 30_000);
+
+  it('charts the demo’s copy of a ticker, or SPY, from the demo data button, and opens Data & Settings at the card that brings in what is missing', async () => {
+    const p = await mount();
+    const { useSettings } = await import('../state/settingsStore');
+    const card = () => p.host.querySelector('.browse-empty')?.textContent ?? '';
+    // A Polygon ticker the demo does not have, with no key: the key's card, or the demo's SPY.
+    act(() => p.store.browseSymbol('polygon', 'PLTR'));
+    await vi.waitFor(() => {
+      p.store.getBaseBars('PLTR');
+      expect(card()).toContain('Add a Polygon API key in Data & Settings.');
+    });
+    expect(p.button('Import a CSV file')).toBeUndefined();
+    act(() => p.button('Add a Polygon API key')!.click());
+    expect(p.opened).toEqual(['api-keys']);
+    const use = p.button('Use the demo data')!;
+    use.focus();
+    act(() => use.click());
+    expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'SPY', browse: { providerId: 'demo', error: null } });
+    expect(useSettings.getState().replay).toMatchObject({ providerId: 'demo', symbol: 'SPY' });
+    // Focus goes on to the ticker's button, not to the page.
+    expect(document.activeElement).toBe(p.host.querySelector('.chart-toolbar .sym-btn'));
+    await p.loaded();
+    expect(card()).toBe('');
+
+    act(() => p.store.browseSymbol('alpaca', 'NVDA'));
+    await vi.waitFor(() => {
+      p.store.getBaseBars('NVDA');
+      expect(p.button('Add an Alpaca API key')).toBeDefined();
+    });
+    act(() => p.button('Use the demo data')!.click());
+    expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'NVDA', browse: { providerId: 'demo' } });
+    await p.loaded();
+
+    // Imported data with none imported: the import card.
+    act(() => p.store.browseSymbol('csv', 'QQQ'));
+    await vi.waitFor(() => {
+      p.store.getBaseBars('QQQ');
+      expect(card()).toContain('No CSV data imported yet.');
+    }, { timeout: 10_000 });
+    expect(p.button('Add a Polygon API key')).toBeUndefined();
+    act(() => p.button('Import a CSV file')!.click());
+    expect(p.opened).toEqual(['api-keys', 'csv-import']);
+    p.unmount();
+  }, 30_000);
+
+  it('hides why a replay did not start while a bar is picked, so the hint on the chart can be read', async () => {
+    const p = await mount();
+    await p.loaded();
+    const newest = p.store.getBaseBars('SPY').at(-1)!.time;
+    await act(async () => void (await p.store.startBarReplay(newest)));
+    const alert = () => p.host.querySelector('.browse-notes [role="alert"]');
+    expect(alert()?.textContent).toContain('Nothing follows this bar in the data yet');
+    act(() => p.replay().click());
+    expect(p.store.useTrading.getState().selectingBar).toBe(true);
+    expect(alert()).toBeNull();
+    // Picking stopped, it is back until dismissed.
+    act(() => p.replay().click());
+    expect(alert()?.textContent).toContain('Nothing follows this bar in the data yet');
+    p.unmount();
+  }, 30_000);
+
+  it('covers the chart of a ticker a blind replay keeps hidden, and says where it stops for a replay that is not blind', async () => {
+    const p = await mount();
+    await p.loaded();
+    const { demoProvider } = await import('../state/dataRegistry');
+    const until = at(prevTradingDay(demoProvider.lastDate), '10:05');
+    const hold = { id: 'replay_other', providerId: 'demo', symbols: ['SPY', 'QQQ'], until, blind: true, elsewhere: false };
+    // As read from the saved sessions (the stand-in storage here keeps none).
+    const holds = (h: (typeof hold)[]) => act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: h } })));
+    const card = () => p.host.querySelector<HTMLElement>('.browse-empty');
+    holds([hold]);
+    expect(card()!.getAttribute('role')).toBe('status');
+    expect(card()!.textContent).toContain('A blind replay of SPY is unfinished. Resume or discard it to chart SPY here.');
+    expect(p.button('Search symbols')).toBeDefined();
+    expect(p.button('Try again')).toBeUndefined();
+    expect(p.host.querySelector('.browse-tip')).toBeNull();
+    expect(p.replay().getAttribute('aria-disabled')).toBe('true');
+    // Hiding the unfinished sessions does not show the chart; the card offers them back.
+    act(() => p.button('Hide unfinished sessions')!.click());
+    expect(card()!.textContent).toContain('A blind replay of SPY is unfinished.');
+    act(() => p.button('Show unfinished sessions')!.click());
+    expect(p.button('Hide unfinished sessions')).toBeDefined();
+    holds([{ ...hold, elsewhere: true }]);
+    expect(card()!.textContent).toContain('A blind replay of SPY is running in another tab. Its chart stays hidden here until that replay ends, as its date does.');
+
+    // Not blind: the chart is drawn up to its clock, and says so.
+    holds([{ ...hold, blind: false }]);
+    expect(card()).toBeNull();
+    const cap = () => p.host.querySelector('.browse-cap')?.textContent ?? null;
+    expect(cap()).toBe(`Bars shown up to ${exchangeDate(until)} 10:05 ET, where your unfinished SPY replay is.`);
+    holds([{ ...hold, blind: false, elsewhere: true }]);
+    expect(cap()).toBe(`Bars shown up to ${exchangeDate(until)} 10:05 ET, where the SPY replay running in another tab was last saved.`);
+    act(() => p.replay().click());
+    expect(cap()).toBeNull();
+    act(() => p.replay().click());
+    // Another ticker is not held back.
+    holds([{ ...hold, blind: false, symbols: ['QQQ'] }]);
+    expect(cap()).toBeNull();
+    holds([]);
+    p.unmount();
+  }, 30_000);
+
+  it('keeps its notes under the legend\'s first row, however many lines that takes', async () => {
+    // jsdom lays nothing out: the boxes are given here, and the observers called as the browser would.
+    const observers: (() => void)[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private fn: () => void) {
+          observers.push(() => this.fn());
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const p = await mount();
+    const notes = p.host.querySelector<HTMLElement>('.browse-notes')!;
+    const top = () => notes.style.getPropertyValue('--clear-of-legend');
+    expect(top()).toBe('8px');
+    const host = p.host.querySelector<HTMLElement>('.chart-host')!;
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({ top: 100 } as DOMRect);
+    // The chart draws its legend: one line of prices.
+    const legend = document.createElement('div');
+    legend.className = 'chart-legend';
+    const row = legend.appendChild(document.createElement('div'));
+    row.className = 'legend-row';
+    let bottom = 124;
+    vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => ({ bottom }) as DOMRect);
+    await act(async () => void p.host.querySelector('.chart-wrap')!.appendChild(legend));
+    expect(top()).toBe('32px');
+    // A narrower chart wraps it onto two lines.
+    bottom = 138;
+    act(() => observers.forEach((o) => o()));
+    expect(top()).toBe('46px');
+    await act(async () => legend.remove());
+    expect(top()).toBe('8px');
+    const css = (await import('node:fs')).readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
+    expect(css).toMatch(/\n\.browse-notes \{ position: absolute; top: var\(--clear-of-legend, 30px\);/);
+    vi.unstubAllGlobals();
     p.unmount();
   }, 30_000);
 

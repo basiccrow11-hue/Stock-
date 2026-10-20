@@ -12,7 +12,7 @@ import type { Logical } from 'lightweight-charts';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import type { UnixSeconds } from '../../core/types';
 import type { ChartGeometry } from './DrawingLayer';
-import { sessionEndNotice, setSelectingBar, startBarReplay, useTrading } from '../state/tradingStore';
+import { cutWarning, newestBarRefusal, sessionEndNotice, setSelectingBar, startBarReplay, useTrading } from '../state/tradingStore';
 import { modalOpen } from '../components/common';
 
 /** A press that moves further than this (pixels) is a drag, which pans the chart, not a click. */
@@ -26,8 +26,15 @@ const HINT = {
   armed: 'Tap this bar again to start the replay there · Esc to cancel',
   // A phone has no Escape key: Replay pressed again stops.
   armedTouch: 'Tap this bar again to start the replay there',
-  newest: 'This is the newest bar: nothing follows it yet. Pick an earlier one.',
+  // After a warning about the bar (cutWarning), which a second tap still starts at.
+  armedAnyway: 'Tap it again to start there anyway.',
 };
+
+/**
+ * Whether a press on the chart only closes something open over it: a toolbar menu or popover (usePopover
+ * closes it on the window's pointerdown, which comes after the chart's own) or a dialog. It picks no bar.
+ */
+const closesSomething = () => modalOpen() || !!document.querySelector('.popover');
 
 export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; version: number }) {
   const shadeRef = useRef<HTMLDivElement>(null);
@@ -40,6 +47,8 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
   /** The candle a first tap picked (its start time), waiting for a second tap. */
   const armedRef = useRef<UnixSeconds | null>(null);
   const refusedUntil = useRef(0);
+  /** What cutWarning said of the candle last asked about (by its start), so a pointer resting on it asks once. */
+  const warnedRef = useRef<{ time: UnixSeconds; text: string | null } | null>(null);
   const coarse = typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
 
   /**
@@ -106,9 +115,18 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
     }
     const newest = !!at && isNewest(at.index);
     line.classList.toggle('refused', newest);
-    const text = newest && (armed !== null || performance.now() < refusedUntil.current || !coarse) ? HINT.newest : armed !== null ? (coarse ? HINT.armedTouch : HINT.armed) : coarse ? HINT.touch : HINT.mouse;
+    // Said of a candle before it is picked: only after-hours trading would follow it (cutWarning).
+    let warning: string | null = null;
+    if (at && !newest && (armed !== null || !coarse)) {
+      const time = candles[at.index].time;
+      if (warnedRef.current?.time !== time) warnedRef.current = { time, text: cutWarning(time) };
+      warning = warnedRef.current.text;
+    }
+    const refusal = newest && (armed !== null || performance.now() < refusedUntil.current || !coarse);
+    const text = refusal ? newestBarRefusal() : warning ? (armed !== null ? `${warning} ${HINT.armedAnyway}` : warning) : armed !== null ? (coarse ? HINT.armedTouch : HINT.armed) : coarse ? HINT.touch : HINT.mouse;
     if (hint.textContent !== text) hint.textContent = text;
-    hint.classList.toggle('refused', text === HINT.newest);
+    hint.classList.toggle('refused', refusal);
+    hint.classList.toggle('warned', !refusal && !!warning);
   };
 
   // The chart moved (a scroll, a zoom, a resize, new candles): the line stays on its candle.
@@ -138,7 +156,8 @@ export function BarCutLayer({ geometry, version }: { geometry: ChartGeometry; ve
       placeSoon();
     };
     const onDown = (e: PointerEvent) => {
-      down = e.button === 0 && e.isPrimary ? { id: e.pointerId, x: e.clientX, y: e.clientY } : null;
+      // A press that only closes a menu or a dialog neither starts a replay nor picks a bar with a finger.
+      down = e.button === 0 && e.isPrimary && !closesSomething() ? { id: e.pointerId, x: e.clientX, y: e.clientY } : null;
     };
     const onUp = (e: PointerEvent) => {
       const still = down?.id === e.pointerId && Math.hypot(e.clientX - down.x, e.clientY - down.y) < CLICK_SLOP;
