@@ -766,7 +766,7 @@ export class SimBroker {
       const onTick = buy ? ceilTick(px) : floorTick(px);
       const fit = Math.max(0, Math.floor((avail + 0.005) / px));
       return fail(
-        `Insufficient buying power: ${shares(o.quantity)} at ${Math.abs(onTick - px) < 1e-9 ? '' : 'about '}${formatTick(onTick)} (${basis}) need ${dollars(needed)}; ${dollars(avail)} is available, ${fit ? `enough for ${fit}` : 'not enough for one'}.`,
+        `${BUYING_POWER_REFUSAL}: ${shares(o.quantity)} at ${Math.abs(onTick - px) < 1e-9 ? '' : 'about '}${formatTick(onTick)} (${basis}) ${o.quantity === 1 ? 'needs' : 'need'} ${dollars(needed)}; ${dollars(avail)} is available, ${fit ? `enough for ${fit}` : 'not enough for one'}.`,
       );
     }
     return { warnings: costed.warnings, quote: expected.quote, price: refPrice };
@@ -2099,6 +2099,12 @@ export class SimBroker {
     }
   }
 }
+
+/**
+ * How submit's refusal of an opening order that buying power does not cover begins (openingCheck): the
+ * ticket, which says so in its own line before the press, knows it by this.
+ */
+export const BUYING_POWER_REFUSAL = 'Insufficient buying power';
 
 export function isOpen(o: Order): boolean {
   return o.status === 'working' || o.status === 'pending' || o.status === 'partially_filled';

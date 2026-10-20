@@ -385,6 +385,12 @@ describe('order validation', () => {
       expect(broker.submit({ ...req, quantity: 100 }).error).toBe(`Insufficient buying power: ${words}; $50,000.00 is available, enough for ${most}.`);
       expect(broker.submit({ ...req, quantity: most + 1 }).ok).toBe(false);
     }
+    // One share needs, as more need.
+    const small = setup({ spread: { mode: 'bps', value: 2, minimum: 0, extendedHoursMultiplier: 1 } }, 200, 584.27).broker;
+    expect(small.buyingPowerFit({ symbol: S, action: 'buy', type: 'market' })).toEqual({ available: 400, shares: 0 });
+    expect(small.submit({ symbol: S, action: 'buy', type: 'market', quantity: 1 }).error).toBe(
+      'Insufficient buying power: 1 share at about 584.33 (the ask) needs $584.33; $400.00 is available, not enough for one.',
+    );
     // Not complete enough to check: no answer, rather than a wrong one.
     expect(broker.buyingPowerFit({ symbol: S, action: 'buy', type: 'limit' })).toBeNull();
     // Before the open a market order waits for the regular session, and is checked at its spread.
