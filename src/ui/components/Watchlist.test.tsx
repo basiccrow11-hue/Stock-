@@ -118,6 +118,34 @@ describe('the watchlist with no session', () => {
     w.unmount();
   }, 30_000);
 
+  it('shows no close past an unfinished replay of the symbol, and none for a blind one', async () => {
+    const store = await import('../state/tradingStore');
+    const { useSettings } = await import('../state/settingsStore');
+    const reg = await import('../state/dataRegistry');
+    const { price } = await import('../services/format');
+    const { exchangeTimeToUnix, prevTradingDay, PREMARKET_OPEN } = await import('../../core/time');
+    useSettings.getState().update({ watchlist: ['SPY', 'QQQ'] });
+    // The saved sessions are read first (none here), then one left unfinished two days back at 10:05 is held to.
+    await store.browseLastClose('demo', 'SPY');
+    const day = prevTradingDay(prevTradingDay(reg.demoProvider.lastDate));
+    const hold = { id: 'replay-left', providerId: 'demo', symbols: ['SPY'], until: exchangeTimeToUnix(day, 605), blind: false, elsewhere: false };
+    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
+    const daily = await reg.demoProvider.getCoarseBars({ symbol: 'SPY', from: exchangeTimeToUnix(prevTradingDay(prevTradingDay(day)), PREMARKET_OPEN), to: exchangeTimeToUnix(day, 0) }, '1D');
+    const dayBefore = daily.at(-1)!;
+    const w = await mount();
+    await vi.waitFor(() => expect(w.items()[1][2]).not.toBe(''));
+    await vi.waitFor(() => expect(w.items()[0][2]!.startsWith(price(dayBefore.close))).toBe(true));
+    // QQQ is not in that replay: its latest close.
+    const last = reg.demoProvider.lastDate;
+    const qqq = await reg.demoProvider.getCoarseBars({ symbol: 'QQQ', from: exchangeTimeToUnix(prevTradingDay(last), PREMARKET_OPEN), to: exchangeTimeToUnix(last, 24 * 60) }, '1D');
+    expect(w.items()[1][2]!.startsWith(price(qqq.at(-1)!.close))).toBe(true);
+    // Blind: no close at all, as the chart beside it is not drawn.
+    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [{ ...hold, blind: true }] } })));
+    await vi.waitFor(() => expect(w.items()[0][2]).toBe(''));
+    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } })));
+    w.unmount();
+  }, 30_000);
+
   it('picks each symbol’s data source: the chart’s own when it has it, else imported, demo, Polygon, Alpaca', async () => {
     const { watchSource } = await import('./Watchlist');
     const { csvProvider } = await import('../state/dataRegistry');

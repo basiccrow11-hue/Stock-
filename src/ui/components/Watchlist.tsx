@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useTrading, setActiveSymbol, browseSymbol } from '../state/tradingStore';
+import { useTrading, setActiveSymbol, browseSymbol, browseHoldOn, browseLastClose, type LastClose } from '../state/tradingStore';
 import { removeFromWatchlist, useSettings } from '../state/settingsStore';
 import { csvProvider, getProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
 import { useCredentials } from '../state/credentials';
@@ -8,8 +8,6 @@ import { EmptyState } from './common';
 import { openSymbolSearch, sourceLabel } from './SymbolSearch';
 import { SIM_STOCKS } from '../../core/sim/SimMarket';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
-import type { HistoricalDataProvider } from '../../core/data/provider';
-import { addDays, exchangeDate, exchangeTimeToUnix, PREMARKET_OPEN, prevTradingDay } from '../../core/time';
 
 /** The simulated market's companies by ticker: the watchlist names each one's kind of stock. */
 const SIM_PROFILES = new Map(SIM_STOCKS.map((p) => [p.symbol, p]));
@@ -35,56 +33,35 @@ function sourceHas(id: string, symbol: string): boolean {
   return true;
 }
 
-interface LastClose {
-  last: number;
-  changePct: number | null;
-}
-
 /**
- * A symbol's last daily close in local data (the demo's or an imported file's) and its change from the
- * close before, by `source|symbol`: worked out once each (a couple of days of bars), and again for
- * imported data once it changes. Polygon and Alpaca are never asked: each would spend the visitor's
- * rate limit.
+ * useLastCloses: each local row's last close (the demo's or imported data; Polygon and Alpaca are never
+ * asked, as each would spend the visitor's rate limit), once worked out by browseLastClose. That stops at
+ * the clock of a replay of the symbol not finished yet, and gives none for a blind one, so a row never
+ * shows a close the chart beside it hides. Each is kept under that clock, so a close worked out before a
+ * replay was left unfinished is never shown once it is.
  */
-const closes = new Map<string, Promise<LastClose | null>>();
-if (typeof window !== 'undefined') onCsvDatasetsChanged(() => [...closes.keys()].filter((k) => k.startsWith('csv|')).forEach((k) => closes.delete(k)));
-
-async function lastClose(provider: HistoricalDataProvider, symbol: string): Promise<LastClose | null> {
-  const range = await provider.availableRange(symbol);
-  if (!range) return null;
-  const last = exchangeDate(range.to);
-  // Imported files can skip days (sessionDates): a few days back finds the close before the last one.
-  let from = last;
-  for (let i = 0; i < (provider.sessionDates ? 5 : 1); i++) from = prevTradingDay(from);
-  const req = { symbol, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(addDays(last, 1), 0) };
-  const days = provider.getCoarseBars ? await provider.getCoarseBars(req, '1D') : [];
-  const end = days[days.length - 1];
-  const prev = days[days.length - 2];
-  if (!end) return null;
-  return { last: end.close, changePct: prev ? (end.close / prev.close - 1) * 100 : null };
-}
-
-/** useLastCloses: each local row's last close, once worked out. */
 function useLastCloses(rows: { symbol: string; source: string }[], csvVersion: number): Record<string, LastClose | null> {
+  const holds = useTrading((s) => s.browse.holds);
   const [known, setKnown] = useState<Record<string, LastClose | null>>({});
-  const local = rows.filter((r) => r.source === 'demo' || r.source === 'csv').map((r) => `${r.source}|${r.symbol}`);
+  const local = rows.filter((r) => r.source === 'demo' || r.source === 'csv').map((r) => closeKey(r.source, r.symbol, holds));
   const keys = local.join(',');
   useEffect(() => {
     let alive = true;
     for (const k of keys ? keys.split(',') : []) {
-      let p = closes.get(k);
-      if (!p) {
-        const [source, symbol] = k.split('|');
-        p = lastClose(getProvider(source), symbol).catch(() => null);
-        closes.set(k, p);
-      }
-      void p.then((c) => alive && setKnown((m) => (m[k] === c ? m : { ...m, [k]: c })));
+      const [source, symbol] = k.split('|');
+      void browseLastClose(source, symbol).then((c) => alive && setKnown((m) => (m[k] === c ? m : { ...m, [k]: c })));
     }
     return () => {
       alive = false;
     };
   }, [keys, csvVersion]);
   return known;
+}
+
+/** Where useLastCloses keeps `symbol`'s close from `source`: by the clock of any unfinished replay of it there. */
+function closeKey(source: string, symbol: string, holds: ReturnType<typeof useTrading.getState>['browse']['holds']): string {
+  const hold = browseHoldOn(source, symbol, holds);
+  return `${source}|${symbol}|${hold ? (hold.blind ? 'blind' : hold.until) : ''}`;
 }
 
 export function Watchlist() {
@@ -178,6 +155,7 @@ function BrowseRows() {
     return { symbol, source, has: sourceHas(source, symbol) };
   });
   const known = useLastCloses(rows, csvVersion);
+  const holds = useTrading((s) => s.browse.holds);
 
   if (!rows.length)
     return (
@@ -195,7 +173,7 @@ function BrowseRows() {
       {rows.map(({ symbol, source, has }, i) => {
         const on = symbol === active && source === getProvider(current).id;
         // Only local data's closes are worked out (useLastCloses).
-        const c = known[`${source}|${symbol}`];
+        const c = known[closeKey(source, symbol, holds)];
         return (
           <div key={symbol} className={`watch-item${on ? ' on' : ''}`}>
             <button
