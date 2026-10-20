@@ -742,7 +742,8 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 .ticket-sides button:not(.sel):hover, .ticket-types button:not(.on):hover { background: var(--hover); }
 .ticket-sides button:focus-visible, .ticket-types button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ticket .grid2 > .wide { grid-column: 1 / -1; }
-/* More options: a quiet row that names what is set inside it while it is closed. */
+/* More options: a quiet row that names what is set inside it while it is closed (.ticket-set names it
+   by the submit button too). */
 .ticket-more > summary { display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer; color: var(--text-2); font-size: 12px; padding: 3px 0; white-space: nowrap; overflow: hidden; border-radius: var(--radius); }
 .ticket-more > summary::-webkit-details-marker { display: none; }
 .ticket-more > summary::before { content: ''; flex-shrink: 0; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 0.12s; margin: 0 2px; }
@@ -758,6 +759,8 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 .ticket-est > div { min-width: 0; }
 .ticket-est dt { font-size: 10px; color: var(--muted); white-space: nowrap; }
 .ticket-est dd { margin: 0; font-size: 12px; white-space: nowrap; }
+/* What More options sets on the order (GTC, extended hours, a tag), just above the button, open or closed. */
+.ticket-set { margin: -2px 0; color: var(--warn); font-size: 12px; overflow-wrap: anywhere; }
 /* The bottom panel with no session: its tabs and one line, so the chart keeps the room. */
 .area-bottom.idle { height: auto; }
 .area-bottom.idle > .panel-body { flex: none; padding: 8px 14px; }

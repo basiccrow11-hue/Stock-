@@ -175,7 +175,8 @@ export function BottomPanel({ onOpenJournal }: { onOpenJournal: (entryId: string
       </div>
       <div className="panel-body" id={bodyId} hidden={collapsed}>
         {collapsed ? null : !session ? (
-          <p className="dock-idle">No session yet. Its positions, orders, fills, closed trades, journal and log show here.</p>
+          // True before the first session and after one ends, and says where a session's trades went.
+          <p className="dock-idle">No session running. A session’s positions, orders, fills and log show here; finished trades are on the Journal page.</p>
         ) : shown === 'positions' ? (
           <PositionsTab />
         ) : shown === 'orders' ? (

@@ -65,6 +65,6 @@ describe('the README', () => {
     }
     expect(orders).toContain('**More options** holds the rest');
     expect(css).toMatch(/\.area-bottom\.idle \{ height: auto; \}/);
-    expect(paragraph('Chart')).toContain('Before a session it is only its tabs and one line');
+    expect(paragraph('Chart')).toContain('With no session running, before the first or after one ends, it is only its tabs and one line');
   });
 });

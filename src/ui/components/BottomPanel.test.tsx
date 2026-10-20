@@ -121,7 +121,7 @@ describe('the bottom panel', () => {
     again.unmount();
   });
 
-  it('is only its tabs and one line before a session, so the chart keeps the room, and takes its own height again once one starts', async () => {
+  it('is only its tabs and one line with no session running, so the chart keeps the room, and takes its own height again once one starts', async () => {
     const store = await import('../state/tradingStore');
     await store.endSession();
     localStorage.setItem(KEY, JSON.stringify({ height: 300 }));
@@ -134,7 +134,8 @@ describe('the bottom panel', () => {
       // Nothing to resize, and no empty-state box: one muted line.
       expect(p.handle()).toBeNull();
       expect(p.body().querySelector('.empty')).toBeNull();
-      expect(p.body().textContent).toBe('No session yet. Its positions, orders, fills, closed trades, journal and log show here.');
+      const idle = 'No session running. A session’s positions, orders, fills and log show here; finished trades are on the Journal page.';
+      expect(p.body().textContent).toBe(idle);
       // Every tab is still there, and it still collapses to them.
       expect([...p.host.querySelectorAll('.tabs button:not(.dock-toggle)')].map((b) => b.textContent)).toEqual(['Positions', 'Orders', 'Fills', 'Closed trades', 'Journal', 'Activity log']);
       expect(p.toggle.getAttribute('aria-expanded')).toBe('true');
@@ -144,6 +145,10 @@ describe('the bottom panel', () => {
       expect(p.panel.style.getPropertyValue('--bottom-h')).toBe('300px');
       expect(p.handle()).not.toBeNull();
       expect(p.body().textContent).toContain('No open positions');
+      // After it ends, the same line, which is as true then: its trades went to the Journal page.
+      await act(() => store.endSession());
+      expect(p.panel.classList.contains('idle')).toBe(true);
+      expect(p.body().textContent).toBe(idle);
     } finally {
       p.unmount();
       style.remove();
