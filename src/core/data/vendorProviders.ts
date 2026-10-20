@@ -105,8 +105,19 @@ function planRefusal(body: string): boolean {
   return /"status"\s*:\s*"NOT_AUTHORIZED"|plan does(?:n['’]t| not) include|not entitled|upgrade your plan|subscription does not permit/i.test(body);
 }
 
+/**
+ * What a refusal for the plan (planRefusal) reads as: that the plan does not include the data, then the vendor's
+ * own words; or, when those already say so ("Your plan doesn't include this data timeframe. …"), they alone,
+ * naming the vendor, so it is not said twice.
+ */
+function planMessage(body: string, vendor: string): string {
+  const words = vendorWords(body);
+  if (!/\bplan does(?:n['’]t| not) include\b/i.test(words)) return `Your ${vendor} plan doesn't include this data: ${words}`;
+  return /^your plan\b/i.test(words) ? `Your ${vendor} plan${words.slice('your plan'.length)}` : `${vendor}: ${words}`;
+}
+
 function httpError(status: number, body: string, vendor: string, contentType: string | null = null): DataProviderError {
-  if ((status === 401 || status === 403) && planRefusal(body)) return new DataProviderError(`Your ${vendor} plan doesn't include this data: ${vendorWords(body)}`, 'plan');
+  if ((status === 401 || status === 403) && planRefusal(body)) return new DataProviderError(planMessage(body, vendor), 'plan');
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
   if (status === 404 && !/json/i.test(contentType ?? '')) return noProxy(vendor);

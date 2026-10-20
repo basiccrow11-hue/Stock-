@@ -351,10 +351,15 @@ describe('vendor providers (mocked HTTP)', () => {
     const polygon = (status: number, body: string) => new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', answer(status, body)).getBars(req);
     const alpaca = (status: number, body: string) => new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(status, body)).getBars(req);
     const caught = (p: Promise<unknown>) => p.then(() => null, (e: DataProviderError) => e);
-    // Polygon's free plan has two years of history: the key works, the plan stops short of the date.
+    // Polygon's free plan has two years of history: the key works, the plan stops short of the date. Its own
+    // words say so, and are not said twice.
     await expect(polygon(403, '{"status":"NOT_AUTHORIZED","request_id":"r1","message":"Your plan doesn\'t include this data timeframe. Please upgrade your plan at https://polygon.io/pricing"}')).rejects.toMatchObject({
       kind: 'plan',
-      message: "Your Polygon plan doesn't include this data: Your plan doesn't include this data timeframe. Please upgrade your plan at https://polygon.io/pricing",
+      message: "Your Polygon plan doesn't include this data timeframe. Please upgrade your plan at https://polygon.io/pricing",
+    });
+    await expect(polygon(403, '{"status":"NOT_AUTHORIZED","message":"The plan does not include minute bars."}')).rejects.toMatchObject({
+      kind: 'plan',
+      message: 'Polygon: The plan does not include minute bars.',
     });
     // Alpaca's free plan has no recent SIP data.
     await expect(alpaca(403, '{"code":40310000,"message":"subscription does not permit querying recent SIP data"}')).rejects.toMatchObject({
