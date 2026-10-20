@@ -3,7 +3,7 @@ import { combineBars, parseCsv, parseTimestamp, tickerFromFileName } from '../da
 import { CsvDataProvider } from '../data/csvProvider';
 import { AlpacaProvider, PolygonProvider, cleanTicker } from '../data/vendorProviders';
 import { SimulationDataProvider } from '../data/simulationProvider';
-import { isDriven, type DrivenStreamingProvider, type StreamUpdate } from '../data/provider';
+import { isDriven, type DataProviderError, type DrivenStreamingProvider, type StreamUpdate } from '../data/provider';
 import { et } from './helpers';
 import { formatExchangeDateTime } from '../time';
 
@@ -343,6 +343,33 @@ describe('vendor providers (mocked HTTP)', () => {
     await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(422, '{"message":"invalid timeframe"}')).getBars(req)).rejects.toMatchObject({ kind: 'network', message: expect.stringContaining('invalid timeframe') });
     await expect(new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(403, '{"message":"forbidden"}')).getBars(req)).rejects.toMatchObject({ kind: 'auth', message: 'Alpaca rejected the API key (HTTP 403). Check it in Data & Settings.' });
     await expect(new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', answer(429, '{"status":"ERROR"}')).getBars(req)).rejects.toMatchObject({ kind: 'rate_limit', message: 'Polygon rate limit reached. Wait a minute and try again.' });
+  });
+
+  it('tells a plan that does not include the data apart from a rejected key, in the vendor’s words, and never shows a key', async () => {
+    const req = { symbol: 'PLTR', from: 1736935200, to: 1736958600 };
+    const answer = (status: number, body: string) => (async () => new Response(body, { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const polygon = (status: number, body: string) => new PolygonProvider(() => ({ polygonApiKey: 'k' }), '/api/polygon', answer(status, body)).getBars(req);
+    const alpaca = (status: number, body: string) => new AlpacaProvider(() => ({ alpacaKeyId: 'id', alpacaSecret: 'sec' }), '/api/alpaca', answer(status, body)).getBars(req);
+    const caught = (p: Promise<unknown>) => p.then(() => null, (e: DataProviderError) => e);
+    // Polygon's free plan has two years of history: the key works, the plan stops short of the date.
+    await expect(polygon(403, '{"status":"NOT_AUTHORIZED","request_id":"r1","message":"Your plan doesn\'t include this data timeframe. Please upgrade your plan at https://polygon.io/pricing"}')).rejects.toMatchObject({
+      kind: 'plan',
+      message: "Your Polygon plan doesn't include this data: Your plan doesn't include this data timeframe. Please upgrade your plan at https://polygon.io/pricing",
+    });
+    // Alpaca's free plan has no recent SIP data.
+    await expect(alpaca(403, '{"code":40310000,"message":"subscription does not permit querying recent SIP data"}')).rejects.toMatchObject({
+      kind: 'plan',
+      message: "Your Alpaca plan doesn't include this data: subscription does not permit querying recent SIP data",
+    });
+    // A key the vendor does not know, or none, is a rejected key.
+    await expect(polygon(401, '{"status":"ERROR","request_id":"r2","error":"Unknown API Key"}')).rejects.toMatchObject({ kind: 'auth', message: 'Polygon rejected the API key (HTTP 401). Check it in Data & Settings.' });
+    await expect(polygon(403, '')).rejects.toMatchObject({ kind: 'auth' });
+    // Whatever the vendor says, a key in an address it quotes is not repeated.
+    const plan = await caught(polygon(403, '{"status":"NOT_AUTHORIZED","message":"Not entitled to https://api.polygon.io/v2/aggs/ticker/PLTR?apiKey=SECRET123&limit=5"}'));
+    expect(plan).toMatchObject({ kind: 'plan', message: "Your Polygon plan doesn't include this data: Not entitled to https://api.polygon.io/v2/aggs/ticker/PLTR" });
+    const other = await caught(polygon(500, 'upstream failed for /v2/aggs?apiKey=SECRET123 (token=abc)'));
+    expect(other!.kind).toBe('network');
+    expect(other!.message).toBe('Polygon request failed (HTTP 500): upstream failed for /v2/aggs?apiKey=… (token=…)');
   });
 
   it('takes as a ticker only what the vendors (and the data proxy) take, in capitals', () => {

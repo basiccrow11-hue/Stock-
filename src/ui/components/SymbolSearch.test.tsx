@@ -246,6 +246,105 @@ describe('the symbol search', () => {
     p.unmount();
   });
 
+  it('offers a ticker the chosen source does not have from another one that can chart it, first and named, before sending you to import it', async () => {
+    const { csvProvider } = await import('../state/dataRegistry');
+    const { useCredentials } = await import('../state/credentials');
+    const { useSettings } = await import('../state/settingsStore');
+    csvProvider.upsert({ symbol: 'GME', name: 'GME', baseTimeframe: '1D', bars: [{ time: 1_710_250_200, open: 1, high: 1, low: 1, close: 1, volume: 1 }], importedAt: 0, fileName: 'GME.csv' });
+    try {
+      const p = await mount();
+      // Imported already: on the demo, which does not have it, the search offers it from your imported data.
+      await p.open();
+      expect(p.sources()[0]).toEqual(['Demo', 'Ready', 'true']);
+      await p.type('gme');
+      expect(p.rows()).toEqual([['GME', 'From your imported data']]);
+      expect(p.dialog()!.querySelector('.sym-row.next .sym')!.textContent).toBe('GME');
+      expect(p.dialog()!.querySelector('.sym-note')).toBeNull();
+      p.key(p.input(), 'Enter');
+      expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'GME', browse: { providerId: 'csv' } });
+
+      // With keys set, any ticker from Polygon and Alpaca, each named; your own file first. A pick charts from that row's source.
+      act(() => useCredentials.setState({ creds: { polygonApiKey: 'k', alpacaKeyId: 'id', alpacaSecret: 'sec' } }));
+      act(() => p.store.browseSymbol('demo', 'SPY'));
+      await p.open();
+      await p.type('gme');
+      expect(p.rows()).toEqual([
+        ['GME', 'From your imported data'],
+        ['Use GME', 'Load its bars from Polygon'],
+        ['Use GME', 'Load its bars from Alpaca'],
+      ]);
+      await p.type('pltr');
+      expect(p.rows()).toEqual([
+        ['Use PLTR', 'Load its bars from Polygon'],
+        ['Use PLTR', 'Load its bars from Alpaca'],
+      ]);
+      act(() => p.dialog()!.querySelectorAll<HTMLButtonElement>('.sym-pick')[1].click());
+      expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'PLTR', browse: { providerId: 'alpaca' } });
+      // A company's name is not taken for a ticker: the demo's Apple first, Enter charting it there.
+      act(() => p.store.browseSymbol('demo', 'SPY'));
+      await p.open();
+      await p.type('apple');
+      expect(p.rows()).toEqual([
+        ['AAPL', 'Apple'],
+        ['Use APPLE', 'Load its bars from Polygon'],
+        ['Use APPLE', 'Load its bars from Alpaca'],
+      ]);
+      p.key(p.input(), 'Enter');
+      expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'AAPL', browse: { providerId: 'demo' } });
+
+      // The watchlist's +: the ticker picked from your imported data goes on the list and is charted from there.
+      useSettings.getState().update({ watchlist: ['SPY'] });
+      act(() => useCredentials.setState({ creds: {} }));
+      const { openSymbolSearch } = await import('./SymbolSearch');
+      act(() => openSymbolSearch({ adding: true }));
+      await act(async () => undefined);
+      await p.type('gme');
+      expect(p.rows()).toEqual([['GME', 'From your imported data']]);
+      p.key(p.input(), 'Enter');
+      expect(useSettings.getState().watchlist).toEqual(['SPY', 'GME']);
+      expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'GME', browse: { providerId: 'csv' } });
+
+      // With no key, a vendor is not offered, and only then does the search send you to bring real bars in.
+      act(() => p.store.browseSymbol('demo', 'SPY'));
+      await p.open();
+      await p.type('pltr');
+      expect(p.rows()).toHaveLength(11);
+      expect(p.note()).toContain('To chart PLTR, bring in its real bars:');
+      p.unmount();
+    } finally {
+      csvProvider.remove('GME');
+    }
+  });
+
+  it('on Polygon or Alpaca, puts a listed company first when its name is typed, and Use XYZ right after it', async () => {
+    const { useCredentials } = await import('../state/credentials');
+    useCredentials.setState({ creds: { polygonApiKey: 'k' } });
+    const p = await mount();
+    await p.open();
+    act(() => p.source('Polygon').click());
+    await act(async () => undefined);
+    await p.type('apple');
+    expect(p.rows()).toEqual([
+      ['AAPL', 'Apple'],
+      ['Use APPLE', 'Load its bars from Polygon'],
+    ]);
+    expect(p.row('AAPL').className).toContain('next');
+    await p.type('Tesla');
+    expect(p.rows().map((r) => r[0])).toEqual(['TSLA', 'Use TESLA']);
+    await p.type('platforms');
+    expect(p.rows().map((r) => r[0])).toEqual(['META', 'Use PLATFORMS']);
+    // A ticker of its own stays first: "ON" is inside Amazon, not the start of it or of a word in it,
+    // and "A" and "AM" start listed tickers.
+    await p.type('on');
+    expect(p.rows().map((r) => r[0])).toEqual(['Use ON', 'AMZN']);
+    await p.type('am');
+    expect(p.rows().map((r) => r[0])).toEqual(['Use AM', 'AMZN', 'AMD']);
+    await p.type('apple');
+    p.key(p.input(), 'Enter');
+    expect(p.store.useTrading.getState()).toMatchObject({ activeSymbol: 'AAPL', browse: { providerId: 'polygon' } });
+    p.unmount();
+  });
+
   it('stars a ticker onto the watchlist, and off it', async () => {
     const { useCredentials } = await import('../state/credentials');
     const { useSettings } = await import('../state/settingsStore');

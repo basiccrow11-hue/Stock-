@@ -108,7 +108,8 @@ export function isDriven<E extends StreamEvent>(p: StreamingDataProvider<E>): p 
 export class DataProviderError extends Error {
   constructor(
     message: string,
-    readonly kind: 'auth' | 'network' | 'not_found' | 'rate_limit' | 'invalid' | 'unknown' = 'unknown',
+    /** What went wrong. 'plan': the key works, but the account's plan does not include the data asked for. */
+    readonly kind: 'auth' | 'plan' | 'network' | 'not_found' | 'rate_limit' | 'invalid' | 'unknown' = 'unknown',
   ) {
     super(message);
     this.name = 'DataProviderError';

@@ -6,8 +6,10 @@
  * marked ready or not set up) and charts the one picked from that source. Polygon and Alpaca take any
  * ticker typed in ("Use XYZ"): they have every US listing, and this app cannot ask them for it (its data
  * proxy forwards only their bar endpoints), so a mistyped ticker shows as such once its bars are asked
- * for. The demo and imported data have only their own tickers; for anything else the search says so and
- * opens Data & Settings at the card that brings real bars in.
+ * for. The demo and imported data have only their own tickers; a ticker typed in that the chosen source
+ * does not have is offered from another source that can chart it (your imported data, Polygon or Alpaca
+ * when ready), and only when none can does the search say so and open Data & Settings at the card that
+ * brings real bars in.
  *
  * During a session it lists the session's own symbols to switch between. A session loads its symbols
  * when it starts and they all play on its clock, so another ticker cannot join it: the search says that
@@ -22,7 +24,7 @@ import { cleanTicker } from '../../core/data/vendorProviders';
 import { SIM_STOCKS } from '../../core/sim/SimMarket';
 import { browseSymbol, setActiveSymbol, useTrading } from '../state/tradingStore';
 import { getProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
-import { addToWatchlist, toggleWatchlist, useSettings } from '../state/settingsStore';
+import { addToWatchlist, onWatchlist, toggleWatchlist, useSettings } from '../state/settingsStore';
 import { useCredentials } from '../state/credentials';
 import type { SettingsCard } from '../services/focusRequest';
 import { Modal, keyBelongsElsewhere } from './common';
@@ -103,7 +105,14 @@ export function SearchIcon() {
   );
 }
 
-type Row = { symbol: string; name: string; use?: boolean };
+type Row = {
+  symbol: string;
+  name: string;
+  /** A ticker typed in that a vendor takes without listing it: shown as "Use XYZ". */
+  use?: boolean;
+  /** The data source it charts from, when not the one chosen in the search (a ticker that one does not have). */
+  from?: string;
+};
 
 /**
  * `list`'s entries that match `query`, best first: the ticker itself, tickers that start with it, tickers
@@ -121,6 +130,32 @@ export function matchSymbols<T extends { symbol: string; name: string }>(list: r
     .sort((a, b) => a.r - b.r)
     .map((m) => m.x);
 }
+
+/** Whether `name` has `lower` (in small letters) at its start or at the start of a word in it. */
+function nameStarts(name: string, lower: string): boolean {
+  const n = name.toLowerCase();
+  for (let i = n.indexOf(lower); i >= 0; i = n.indexOf(lower, i + 1)) if (i === 0 || !/[a-z0-9]/.test(n[i - 1])) return true;
+  return false;
+}
+
+/**
+ * `extra`, rows for the ticker typed in that the chosen source does not list (Use XYZ, or the same ticker
+ * from another source), placed among that source's matches (`rows`, best first). First, as an exact match
+ * would be, unless the text starts a listed name or a word of one and starts no listed ticker ("apple",
+ * "tesla"): that is most likely the company, not a ticker of its own, so those names come first and the
+ * extra rows right after them. Only the start of a name or word counts: "ON" is in Amazon, but it is a
+ * ticker of its own.
+ */
+export function placeExtraRows<T extends { symbol: string; name: string }>(rows: readonly T[], extra: readonly T[], query: string): T[] {
+  if (!extra.length) return [...rows];
+  const q = query.trim();
+  if (rows.some((r) => r.symbol.startsWith(q.toUpperCase()))) return [...extra, ...rows];
+  const named = rows.filter((r) => nameStarts(r.name, q.toLowerCase()));
+  return [...named, ...extra, ...rows.filter((r) => !named.includes(r))];
+}
+
+/** The sources a ticker the chosen one cannot chart is looked for in, in this order (as the watchlist looks). */
+const OTHER_SOURCES = ['csv', 'polygon', 'alpaca'] as const;
 
 /** Every source's list of tickers (listSymbols), read again when the imported data changes. */
 function useSymbolLists(): Record<string, SymbolInfo[]> {
@@ -154,7 +189,8 @@ function SymbolSearch({ request, onOpenSettingsAt }: { request: SearchRequest; o
   const session = useTrading((s) => s.session);
   const browseSource = useTrading((s) => s.browse.providerId);
   const activeSymbol = useTrading((s) => s.activeSymbol);
-  const watchlist = useSettings((s) => s.watchlist);
+  // The stars show what is on the watchlist (onWatchlist).
+  useSettings((s) => s.watchlist);
   // Whether Polygon and Alpaca are ready changes with their keys.
   useCredentials((s) => s.creds);
   const lists = useSymbolLists();
@@ -173,9 +209,25 @@ function SymbolSearch({ request, onOpenSettingsAt }: { request: SearchRequest; o
   let all: Row[];
   if (session) all = session.symbols.map((symbol) => ({ symbol, name: SIM_NAMES.get(symbol) ?? lists.csv?.find((x) => x.symbol === symbol)?.name ?? lists.polygon?.find((x) => x.symbol === symbol)?.name ?? '' }));
   else all = state === 'ready' ? (lists[source] ?? []).map(({ symbol, name }) => ({ symbol, name: name === symbol ? '' : name })) : [];
-  let rows = matchSymbols(all, query);
-  // Polygon and Alpaca take any ticker: one typed that is not listed comes first, as an exact match would.
-  if (!session && vendor && state === 'ready' && ticker && !all.some((r) => r.symbol === ticker)) rows = [{ symbol: ticker, name: `Load its bars from ${label}`, use: true }, ...rows];
+  // A ticker typed in that the chosen source does not list. Polygon and Alpaca take any ticker (Use XYZ).
+  // Another source can chart one the demo or your imported data does not have (or one a source not set up
+  // cannot): your imported data when it has it, Polygon and Alpaca when their key is set. Those rows,
+  // each naming its source, are offered with the chosen source's matches (placeExtraRows), so a ticker
+  // that can be charted is never sent to be imported again.
+  const extra: Row[] = [];
+  if (!session && ticker && !all.some((r) => r.symbol === ticker)) {
+    if (vendor && state === 'ready') extra.push({ symbol: ticker, name: `Load its bars from ${label}`, use: true });
+    else
+      for (const id of OTHER_SOURCES) {
+        if (id === source || sourceState(id) !== 'ready') continue;
+        if (id !== 'csv') extra.push({ symbol: ticker, name: `Load its bars from ${sourceLabel(id)}`, use: true, from: id });
+        else {
+          const hit = lists.csv?.find((x) => x.symbol.toUpperCase() === ticker);
+          if (hit) extra.push({ symbol: hit.symbol, name: 'From your imported data', from: id });
+        }
+      }
+  }
+  let rows = placeExtraRows(matchSymbols(all, query), extra, query);
   // Nothing matches: the whole list stays in view under the note saying so, but Enter picks none of it.
   // (A source not set up lists nothing, and its own note says why.)
   const unmatched = typed !== '' && rows.length === 0 && (!!session || state === 'ready');
@@ -183,11 +235,11 @@ function SymbolSearch({ request, onOpenSettingsAt }: { request: SearchRequest; o
   const enterRow = unmatched ? null : (rows[0] ?? null);
   const stars = !session;
 
-  const pick = (symbol: string) => {
-    if (session) setActiveSymbol(symbol);
+  const pick = (row: Row) => {
+    if (session) setActiveSymbol(row.symbol);
     else {
-      if (request.adding) addToWatchlist(symbol);
-      browseSymbol(source, symbol);
+      if (request.adding) addToWatchlist(row.symbol);
+      browseSymbol(row.from ?? source, row.symbol);
     }
     closeSymbolSearch();
   };
@@ -205,7 +257,7 @@ function SymbolSearch({ request, onOpenSettingsAt }: { request: SearchRequest; o
       picks()[0]?.focus();
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (enterRow) pick(enterRow.symbol);
+      if (enterRow) pick(enterRow);
     }
   };
   // Arrows move through the results (Up from the first goes back to the box); typing goes on in the box.
@@ -344,11 +396,11 @@ function SymbolSearch({ request, onOpenSettingsAt }: { request: SearchRequest; o
         {rows.length > 0 && (
           <ul ref={listRef} className="sym-results" aria-label={session ? `${what}’s symbols` : `${label} tickers`} onKeyDown={onListKey}>
             {rows.map((r) => {
-              const current = r.symbol === activeSymbol && (session ? true : source === browseSource);
-              const starred = watchlist.includes(r.symbol);
+              const current = r.symbol === activeSymbol && (session ? true : (r.from ?? source) === browseSource);
+              const starred = onWatchlist(r.symbol);
               return (
-                <li key={`${r.use ? 'use:' : ''}${r.symbol}`} className={`sym-row${r === enterRow ? ' next' : ''}`}>
-                  <button type="button" className={`sym-pick${current ? ' on' : ''}`} aria-current={current || undefined} onClick={() => pick(r.symbol)}>
+                <li key={`${r.from ?? ''}:${r.use ? 'use:' : ''}${r.symbol}`} className={`sym-row${r === enterRow ? ' next' : ''}`}>
+                  <button type="button" className={`sym-pick${current ? ' on' : ''}`} aria-current={current || undefined} onClick={() => pick(r)}>
                     <span className="sym">{r.use ? `Use ${r.symbol}` : r.symbol}</span>
                     {r.name && <span className="nm">{r.name}</span>}
                   </button>

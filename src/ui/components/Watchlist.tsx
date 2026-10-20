@@ -96,7 +96,9 @@ export function Watchlist() {
         <h3>Watchlist</h3>
         <div className="spacer" />
         {session ? (
-          <span className="muted small">{session.symbols.length} symbols</span>
+          <span className="muted small">
+            {session.symbols.length} symbol{session.symbols.length === 1 ? '' : 's'}
+          </span>
         ) : (
           <button
             type="button"
@@ -147,9 +149,11 @@ function SessionRows() {
           </button>
         );
       })}
+      {/* A bar replay has its one symbol: there is nothing to switch to, only the note on editing. */}
       {session.mode === 'replay' && (
         <p className="muted small" style={{ padding: '8px 10px' }}>
-          All symbols here replay on the same clock. Click one (or Tab to it and press Enter) to chart and trade it. Your own watchlist can be edited (+, ×) once the replay ends, or in Data &amp; Settings.
+          {session.symbols.length > 1 && 'All symbols here replay on the same clock. Click one (or Tab to it and press Enter) to chart and trade it. '}
+          Your own watchlist can be edited (+, ×) once the replay ends, or in Data &amp; Settings.
         </p>
       )}
     </>
