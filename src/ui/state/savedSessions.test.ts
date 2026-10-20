@@ -785,7 +785,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     const other = await leaveRunning('11:00');
     locks.elsewhere = new Set([`stock-replay-session:${other}`]);
     app = await openApp();
-    await vi.waitFor(() => expect(app.start()).toContain('SPY is not charted here while your SPY replay of 2024-03-12 is unfinished'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.start()).toContain('Your SPY replay of 2024-03-12 is unfinished'), { timeout: 5000 });
     await settle();
     expect(app.offered.map((o) => o.text).join()).not.toContain('11:00 ET');
     locks.elsewhere.clear();
@@ -819,7 +819,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     await vi.waitFor(() => expect(app.offered).toHaveLength(1), { timeout: 5000 });
     // Offered on the screen that starts a session, which never said it was picking one up (SPY not charted
     // there while it is unfinished).
-    expect(app.start()).toContain('SPY is not charted here while your SPY replay of 2024-03-12 is unfinished');
+    expect(app.start()).toContain('Your SPY replay of 2024-03-12 is unfinished');
     expect(app.offered[0].text).toContain('SPY · 2024-03-12');
     expect(app.store.useTrading.getState().session).toBeNull();
     expect((await app.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
@@ -831,7 +831,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     // The tab running it was duplicated: the copy remembers the session too, but the other tab holds it.
     locks.elsewhere = new Set([`stock-replay-session:${id}`]);
     const app = await openApp();
-    await vi.waitFor(() => expect(app.start()).toContain('A SPY replay is running in another tab, so SPY is not charted here'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.start()).toContain('A SPY replay is running in another tab, and charting SPY here'), { timeout: 5000 });
     await settle();
     const waiting = app.screens.filter((s) => s.includes('Picking up where you left off'));
     expect(waiting.length).toBeGreaterThan(0);
@@ -1217,7 +1217,7 @@ describe('the chart with no session beside a replay not finished', () => {
   }
 
   /** Why the chart is not drawn for a replay of SPY (and `sym` on its clock) of `day` left unfinished. */
-  const unfinishedWhy = (sym: string, day: string) => `${sym} is not charted here while your SPY replay of ${day} is unfinished (it would show what comes next). Resume or discard it to chart ${sym} here.`;
+  const unfinishedWhy = (sym: string, day: string) => `Your SPY replay of ${day} is unfinished, and charting ${sym} here would show what comes next in it. Resume or discard it to chart ${sym} here.`;
 
   it('is not drawn on the symbols and data source of a replay left unfinished, says why, and is drawn to the end of its data once that replay is discarded', async () => {
     const { id, day, last } = await leftUnfinished();
@@ -1280,7 +1280,7 @@ describe('the chart with no session beside a replay not finished', () => {
     await registry.loadCsvDatasets();
     await registry.saveCsvDataset({ ...acme, importedAt: 2, bars: minutes(['2024-06-03', '2024-06-04', '2024-06-05', '2024-06-06', '2024-06-07']) });
     b.store.browseSymbol('csv', 'ACME');
-    const why = 'ACME is not charted here while your ACME replay of 2024-03-13 is unfinished (it would show what comes next). Resume or discard it to chart ACME here.';
+    const why = 'Your ACME replay of 2024-03-13 is unfinished, and charting ACME here would show what comes next in it. Resume or discard it to chart ACME here.';
     await vi.waitFor(() => {
       b.store.getBaseBars('ACME');
       expect(b.store.browseHiddenReason()).toBe(why);
@@ -1324,7 +1324,7 @@ describe('the chart with no session beside a replay not finished', () => {
     const requests = () => vi.mocked(polygonProvider.getBars).mock.calls.length + vi.mocked(polygonProvider.getCoarseBars).mock.calls.length;
     b.store.setTimeframe('1h');
     b.store.browseSymbol('polygon', 'SPY');
-    const why = 'A SPY replay is running in another tab, so SPY is not charted here (it would show what comes next there). It is charted here again once that replay ends.';
+    const why = 'A SPY replay is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.';
     await vi.waitFor(() => {
       b.store.getBaseBars('SPY');
       expect(b.store.browseHiddenReason()).toBe(why);
@@ -1395,7 +1395,7 @@ describe('the chart with no session beside a replay not finished', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: `stock-replay-session-position:${a.store.useTrading.getState().session!.id}` }));
     await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: true }), { timeout: 3000 });
     expect(b.store.getBaseBars('SPY')).toEqual([]);
-    expect(b.store.browseHiddenReason()).toBe('A SPY replay is running in another tab, so SPY is not charted here (it would show what comes next there). It is charted here again once that replay ends.');
+    expect(b.store.browseHiddenReason()).toBe('A SPY replay is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.');
     // It ends there: the chart has all its bars again.
     await a.store.endSession();
     window.dispatchEvent(new StorageEvent('storage', { key: null }));

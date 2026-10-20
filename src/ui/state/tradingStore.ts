@@ -1982,9 +1982,10 @@ export function browseHiddenReason(): string | null {
     return blind.some((h) => h.elsewhere) ? `A blind replay of ${sym} is running in another tab. Its chart stays hidden here until that replay ends, as its date does.` : `A blind replay of ${sym} is unfinished. Resume or discard it to chart ${sym} here.`;
   // One left to resume says what to do about it, as its card does; one another tab runs only ends there.
   const mine = on.filter((h) => !h.elsewhere);
-  if (!mine.length) return `A ${sym} replay is running in another tab, so ${sym} is not charted here (it would show what comes next there). It is charted here again once that replay ends.`;
-  const which = mine.length === 1 ? `your ${mine[0].symbols[0]} replay${mine[0].date ? ` of ${mine[0].date}` : ''} is` : `${mine.length} of your ${sym} replays are`;
-  return `${sym} is not charted here while ${which} unfinished (it would show what comes next). Resume or discard ${mine.length === 1 ? 'it' : 'them'} to chart ${sym} here.`;
+  if (!mine.length) return `A ${sym} replay is running in another tab, and charting ${sym} here would show what comes next in it. It is charted here again once that replay ends.`;
+  if (mine.length === 1)
+    return `Your ${mine[0].symbols[0]} replay${mine[0].date ? ` of ${mine[0].date}` : ''} is unfinished, and charting ${sym} here would show what comes next in it. Resume or discard it to chart ${sym} here.`;
+  return `${mine.length} of your ${sym} replays are unfinished, and charting ${sym} here would show what comes next in them. Resume or discard them to chart ${sym} here.`;
 }
 
 /**
