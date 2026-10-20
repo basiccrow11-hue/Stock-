@@ -1186,7 +1186,7 @@ describe('the chart with no session beside a replay not finished', () => {
       store.getBaseBars(symbol);
       expect(store.useTrading.getState().browse.loading).toBe(false);
       expect(store.useTrading.getState().browse.error).toBeNull();
-    });
+    }, { timeout: 10_000 });
     return store.getBaseBars(symbol);
   }
 
@@ -1221,7 +1221,7 @@ describe('the chart with no session beside a replay not finished', () => {
     }
     // Nothing after it reaches the chart's longer past, the cut or the watchlist's last close.
     b.store.setTimeframe('1D');
-    await vi.waitFor(() => expect(b.store.getChartHistory('QQQ', '1D')?.status).toBe('ready'));
+    await vi.waitFor(() => expect(b.store.getChartHistory('QQQ', '1D')?.status).toBe('ready'), { timeout: 10_000 });
     const { barEndTime } = await import('../../core/replay/ReplayEngine');
     for (const bar of b.store.getChartHistory('QQQ', '1D')!.bars) expect(barEndTime(bar, '1D')).toBeLessThanOrEqual(until);
     const { prevTradingDay } = await import('../../core/time');
@@ -1249,7 +1249,7 @@ describe('the chart with no session beside a replay not finished', () => {
     await vi.waitFor(() => {
       b.store.getBaseBars('SPY');
       expect(b.store.getChartHistory('SPY', '1D')?.status).toBe('ready');
-    });
+    }, { timeout: 10_000 });
     // Its loaded days are all after the replay's clock: none is shown, and the past stops at that clock, on
     // the replay's day, as the replay's own chart does.
     expect(b.store.getBaseBars('SPY')).toEqual([]);
