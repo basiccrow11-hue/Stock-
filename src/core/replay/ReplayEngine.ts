@@ -223,14 +223,6 @@ export class ReplayEngine {
   }
 
   /**
-   * How many of the revealed bars had ended by `t`. The chart with no session stops where a saved session on
-   * its symbol has got to (tradingStore's BrowseHold): it shows the first these many of a preview's bars.
-   */
-  revealedEndedBy(t: UnixSeconds): number {
-    return Math.min(this.#cursor + 1, lastIndexAtOrBefore(this.#ends, t, (x) => x) + 1);
-  }
-
-  /**
    * cutTime (barReplay) on the first `count` revealed bars (at most all of them): when a replay cut at the
    * `timeframe` candle starting at `start` begins, or null when none of those bars is in it. Worked out on the
    * engine's own bars, none copied, so the chart can ask for every candle the pointer crosses.

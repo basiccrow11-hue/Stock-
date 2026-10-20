@@ -3,8 +3,8 @@
  * replay from (select-bar mode: see BarCutLayer); its arrow opens the other ways to start one: at a date,
  * at a random day's open, the full setup form, or the simulated market.
  */
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { barReplaySource, browseHiddenReason, selectBarBlocked, sessionEndNotice, setSelectingBar, startRandomBar, startReplayAt, useTrading } from '../state/tradingStore';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { barReplaySource, browseHiddenReason, randomBarBlocked, selectBarBlocked, sessionEndNotice, setSelectingBar, startRandomBar, startReplayAt, useTrading } from '../state/tradingStore';
 import { getProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { useLiveBlind } from '../state/liveBlind';
@@ -39,15 +39,22 @@ export function toggleSelectBar(): void {
 
 export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
   const selecting = useTrading((s) => s.selectingBar);
-  // What selectBarBlocked and browseHiddenReason read: the session, the browsing chart's bars arriving and the
-  // saved sessions it stops at (browse.holds), its symbol and timeframe.
+  // What selectBarBlocked, browseHiddenReason and randomBarBlocked read: the session, the browsing chart's bars
+  // arriving and the saved sessions that keep it from being drawn (browse.holds), its symbol and timeframe.
   useTrading((s) => s.session);
   useTrading((s) => s.browse);
   useTrading((s) => s.activeSymbol);
   useTrading((s) => s.timeframe);
   const blocked = selectBarBlocked();
-  // A blind replay of the symbol keeps its chart hidden: a replay from a date, random or not, would show its days with their dates.
+  // A replay of the symbol you have not finished (or one in another tab) keeps its chart from being drawn: a
+  // replay from a date, random or not, would show what comes next in it.
   const hidden = browseHiddenReason();
+  const random = randomBarBlocked();
+  // Why the items that are off are off, each said once under them, in words a touch screen shows too (a
+  // title is only seen on hover): mostly one, as a replay that keeps the chart hidden turns all three off.
+  const reasons = [...new Set([blocked, hidden, random].filter((r): r is string => !!r))];
+  const noteId = useId();
+  const why = (reason: string | null) => (reason ? `${noteId}-${reasons.indexOf(reason)}` : undefined);
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const [panel, setPanel] = useState<'menu' | 'date'>('menu');
   const replayRef = useRef<HTMLButtonElement>(null);
@@ -64,11 +71,12 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
     e.preventDefault();
     items[(to + items.length) % items.length].focus();
   };
-  const item = (label: string, onSelect: () => void, opts: { title?: string; disabled?: boolean } = {}) => (
+  const item = (label: string, onSelect: () => void, opts: { title?: string; disabled?: boolean; describedBy?: string } = {}) => (
     <button
       role="menuitem"
       className="menu-item"
       aria-disabled={opts.disabled || undefined}
+      aria-describedby={(opts.disabled && opts.describedBy) || undefined}
       title={opts.title}
       onClick={() => {
         if (opts.disabled) return;
@@ -118,17 +126,23 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
               setSelectingBar(true);
               replayRef.current?.focus({ preventScroll: true });
             },
-            { disabled: !!blocked, title: blocked ?? 'Click a bar on the chart to start the replay there' },
+            { disabled: !!blocked, title: blocked ?? 'Click a bar on the chart to start the replay there', describedBy: why(blocked) },
           )}
-          {item('Select date…', () => setPanel('date'), { disabled: !!hidden, title: hidden ?? 'Start the replay at a date and time' })}
+          {item('Select date…', () => setPanel('date'), { disabled: !!hidden, title: hidden ?? 'Start the replay at a date and time', describedBy: why(hidden) })}
           {item(
             'Random bar',
             () => {
               close();
               if (startConfirmed()) void startRandomBar();
             },
-            { disabled: !!hidden, title: hidden ?? 'Start at the open of a day picked at random' },
+            { disabled: !!random, title: random ?? 'Start at the open of a day picked at random', describedBy: why(random) },
           )}
+          {/* Not an item: arrows pass it by, and the items it is about point at it. */}
+          {reasons.map((r, i) => (
+            <p key={r} id={`${noteId}-${i}`} role="none" className="menu-note muted">
+              {r}
+            </p>
+          ))}
           {item('Advanced replay setup…', () => {
             close(false);
             onNewSession('replay');

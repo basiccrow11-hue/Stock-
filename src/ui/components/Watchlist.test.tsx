@@ -118,31 +118,36 @@ describe('the watchlist with no session', () => {
     w.unmount();
   }, 30_000);
 
-  it('shows no close past an unfinished replay of the symbol, and none for a blind one', async () => {
+  it('shows no close for a symbol a replay not finished keeps the chart from, blind or not, and its close again once it goes', async () => {
     const store = await import('../state/tradingStore');
     const { useSettings } = await import('../state/settingsStore');
     const reg = await import('../state/dataRegistry');
     const { price } = await import('../services/format');
     const { exchangeTimeToUnix, prevTradingDay, PREMARKET_OPEN } = await import('../../core/time');
     useSettings.getState().update({ watchlist: ['SPY', 'QQQ'] });
-    // The saved sessions are read first (none here), then one left unfinished two days back at 10:05 is held to.
-    await store.browseLastClose('demo', 'SPY');
-    const day = prevTradingDay(prevTradingDay(reg.demoProvider.lastDate));
-    const hold = { id: 'replay-left', providerId: 'demo', symbols: ['SPY'], until: exchangeTimeToUnix(day, 605), blind: false, elsewhere: false };
-    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
-    const daily = await reg.demoProvider.getCoarseBars({ symbol: 'SPY', from: exchangeTimeToUnix(prevTradingDay(prevTradingDay(day)), PREMARKET_OPEN), to: exchangeTimeToUnix(day, 0) }, '1D');
-    const dayBefore = daily.at(-1)!;
-    const w = await mount();
-    await vi.waitFor(() => expect(w.items()[1][2]).not.toBe(''));
-    await vi.waitFor(() => expect(w.items()[0][2]!.startsWith(price(dayBefore.close))).toBe(true));
-    // QQQ is not in that replay: its latest close.
     const last = reg.demoProvider.lastDate;
-    const qqq = await reg.demoProvider.getCoarseBars({ symbol: 'QQQ', from: exchangeTimeToUnix(prevTradingDay(last), PREMARKET_OPEN), to: exchangeTimeToUnix(last, 24 * 60) }, '1D');
-    expect(w.items()[1][2]!.startsWith(price(qqq.at(-1)!.close))).toBe(true);
-    // Blind: no close at all, as the chart beside it is not drawn.
-    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [{ ...hold, blind: true }] } })));
-    await vi.waitFor(() => expect(w.items()[0][2]).toBe(''));
+    const close = async (symbol: string) => (await reg.demoProvider.getCoarseBars({ symbol, from: exchangeTimeToUnix(prevTradingDay(last), PREMARKET_OPEN), to: exchangeTimeToUnix(last, 24 * 60) }, '1D')).at(-1)!.close;
+    // The saved sessions are read first (none here), and SPY's close is worked out before a replay of it is left unfinished.
+    expect((await store.browseLastClose('demo', 'SPY'))!.last).toBe(await close('SPY'));
+    const day = prevTradingDay(prevTradingDay(last));
+    const hold = { id: 'replay-left', providerId: 'demo', symbols: ['SPY'], date: day, blind: false, elsewhere: false };
+    act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
+    const [spy, qqq] = [await close('SPY'), await close('QQQ')];
+    const w = await mount();
+    // QQQ is not in that replay: its latest close. SPY has none, not even the one worked out before.
+    await vi.waitFor(() => expect(w.items()[1][2]!.startsWith(price(qqq))).toBe(true));
+    await act(async () => undefined);
+    expect(w.items()[0]).toEqual(['SPY', 'Demo', '']);
+    expect(await store.browseLastClose('demo', 'SPY')).toBeNull();
+    // Blind, or running in another tab: none either.
+    for (const other of [{ ...hold, blind: true, date: undefined }, { ...hold, elsewhere: true }]) {
+      act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [other] } })));
+      await act(async () => undefined);
+      expect(w.items()[0][2]).toBe('');
+    }
+    // Discarded or ended: its close is back.
     act(() => store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [] } })));
+    await vi.waitFor(() => expect(w.items()[0][2]!.startsWith(price(spy))).toBe(true));
     w.unmount();
   }, 30_000);
 

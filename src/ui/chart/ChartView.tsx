@@ -40,7 +40,7 @@ import type { ChartHistory } from '../../core/replay/ReplaySession';
 import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, regularCloseMinute, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
-import { browseEndsEarly, candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
+import { browseShownEnd, candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
 import { CHART_LOCALE, price as fmtPrice } from '../services/format';
 import { DrawingLayer, type ChartGeometry } from './DrawingLayer';
 import { BarCutLayer } from './BarCutLayer';
@@ -79,8 +79,11 @@ export function blindChartShift(sessionId: string): number {
 type CrosshairParam = Pick<MouseEventParams<Time>, 'time' | 'logical' | 'point' | 'paneIndex'>;
 /** The pointer resting on the chart: in its pane's coordinates, and in the window's (clientX, clientY). */
 type Pointer = { x: number; y: number; pane: number; clientX: number; clientY: number };
-/** A chart that was drawn: its symbol, timeframe and session (the session's id, empty for none). */
-type DrawnChart = { symbol: string; timeframe: Timeframe; session: string };
+/**
+ * A chart that was drawn: its symbol, timeframe and session (the session's id, empty for none), and with no
+ * session, the last day of the bars it shows (browseShownEnd; empty while it shows none, and in a session).
+ */
+type DrawnChart = { symbol: string; timeframe: Timeframe; session: string; end: string };
 
 /**
  * Scroll positions each chart has been given and not yet drawn: how many, and the last one, which is where
@@ -102,9 +105,9 @@ function scrollToPosition(chart: IChartApi, position: number): void {
   });
 }
 
-/** Whether `a` and `b` are the same chart: the same symbol, timeframe and session. */
+/** Whether `a` and `b` are the same chart: the same symbol, timeframe and session, and bars to the same day. */
 function sameChart(a: DrawnChart, b: DrawnChart): boolean {
-  return a.symbol === b.symbol && a.timeframe === b.timeframe && a.session === b.session;
+  return a.symbol === b.symbol && a.timeframe === b.timeframe && a.session === b.session && a.end === b.end;
 }
 
 /** The one-column, page-scrolling terminal layout; the same media query as in styles.css. */
@@ -1060,7 +1063,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     historyRef.current = history;
     const merged = withHistory(candles, history, timeframe);
     const drawn = windowKeyRef.current;
-    const chart: DrawnChart = { symbol, timeframe, session: useTrading.getState().session?.id ?? '' };
+    const session = useTrading.getState().session?.id ?? '';
+    const chart: DrawnChart = { symbol, timeframe, session, end: session ? '' : browseShownEnd(symbol) };
     const same = !!drawn && sameChart(drawn, chart);
     // The same chart's view before anything changes (visibleRange: after an earlier redraw this frame, where the
     // position it gave puts it): its right edge as an index among the candles (those held back included), and
@@ -1076,12 +1080,13 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // Where the view's right edge goes (null: on the newest candle) when it is put in place: on another chart
     // (rightEdgeOn), and on this one once the history it waited for is in (pendingEdgeOn). Its window reaches
     // back to a margin before the view, which keeps its width in candles. The first chart drawn opens on the
-    // newest candle by itself, but the chart with no session with no view to keep (the first chart in the tab,
-    // another symbol or data source, back from a session) on the day before its last (browseOpening); or, when
-    // it ends on the day of a saved session on it (browseEndsEarly), on its newest candle, where it stops.
+    // newest candle by itself. The chart with no session opens as it does in a fresh tab, on the day before its
+    // last (browseOpening), whenever it has no view of its bars to keep: the first chart in the tab, another
+    // symbol or data source, back from a session, after it was not drawn (a saved session on its symbol kept it
+    // from that: tradingStore's BrowseHold) or once its bars end on another day (other data imported for it).
     let edge = !drawn ? undefined : same ? pendingEdgeOn(merged.candles, chart, history) : rightEdgeOn(merged.candles, drawn, chart, range, history);
-    if ((edge === undefined || edge === null) && !chart.session && (old.length === 0 || (!!drawn && drawn.session !== chart.session)))
-      edge = merged.candles.length && browseEndsEarly(symbol) ? null : (browseOpening(merged.candles) ?? edge);
+    if (!chart.session && merged.candles.length && (old.length === 0 || (!!drawn && (drawn.session !== chart.session || drawn.end !== chart.end))))
+      edge = browseOpening(merged.candles) ?? (drawn ? null : edge);
     let onScreen = 0;
     let oldest = Infinity;
     if (range && edge !== undefined) onScreen = merged.candles.length - (edge ?? merged.candles.length - 1) + Math.ceil(range.to - range.from);

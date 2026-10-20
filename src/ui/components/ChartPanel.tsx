@@ -1,11 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type RefObject } from 'react';
-import { TIMEFRAMES, type Timeframe } from '../../core/types';
+import { TIMEFRAMES } from '../../core/types';
 import { ChartView } from '../chart/ChartView';
 import { TOOL_LABELS, useDrawings, type DrawingTool } from '../chart/drawings';
-import { browseHiddenReason, browseHoldOn, browseSymbol, dismissError, getBaseBars, getChartHistory, onChartEvent, retryBrowse, setSelectingBar, setTimeframe, useTrading } from '../state/tradingStore';
+import { browseHiddenReason, browseSymbol, dismissError, retryBrowse, setSelectingBar, setTimeframe, useTrading } from '../state/tradingStore';
 import { csvProvider, getProvider } from '../state/dataRegistry';
 import { DEMO_TICKERS } from '../../core/data/demoProvider';
-import { exchangeDate, formatExchangeTime } from '../../core/time';
 import { IndicatorMenu } from './IndicatorMenu';
 import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
@@ -144,42 +143,24 @@ export function ChartPanel({
 }
 
 /**
- * Whether the browsing chart of `symbol`, held back to an unfinished replay's clock (browseCap), has no bar
- * at all before it: neither its loaded bars nor the history before them, once that is in (or not wanted).
- * Not while that history is loading, nor when it failed: there may be bars it did not get.
- */
-function heldChartEmpty(symbol: string, timeframe: Timeframe): boolean {
-  if (getBaseBars(symbol).length) return false;
-  const h = getChartHistory(symbol, timeframe);
-  return !!h && !h.bars.length && (h.status === 'ready' || (h.status === 'idle' && !h.wanted));
-}
-
-/**
  * What the chart with no session says over its top: why the last start failed, the sessions left
- * unfinished to resume or discard, where its bars stop when a saved session on its symbol has not got
- * further (browseHoldOn), and, until dismissed, how to start a replay; why its bars cannot be shown, in its
- * middle, or under the card of unfinished sessions while that shows, as that card would cover the middle
- * of a short chart; and that they are loading. Picking a bar, none of the notes over its top: the hint the
- * chart shows then (BarCutLayer) is in their place.
+ * unfinished to resume or discard (or, once that card is hidden, a button to show it again), and, until
+ * dismissed, how to start a replay; why it is not drawn (a replay of its symbol you have not finished, or
+ * one in another tab: browseHiddenReason) or its bars cannot be shown, in its middle, or under the card of
+ * unfinished sessions while that shows, as that card would cover the middle of a short chart; and that they
+ * are loading. Picking a bar, none of the notes over its top: the hint the chart shows then (BarCutLayer) is
+ * in their place.
  */
 function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOpenSettingsAt?: (card: SettingsCard) => void }) {
   const error = useTrading((s) => s.error);
   const browse = useTrading((s) => s.browse);
   const symbol = useTrading((s) => s.activeSymbol);
-  const timeframe = useTrading((s) => s.timeframe);
-  // Why a blind replay of the symbol keeps its chart from being drawn (its dates would show), or null.
+  // Why a replay of the symbol keeps its chart from being drawn (what comes next in it would show), or null.
   const hidden = useTrading(() => browseHiddenReason());
-  // Where the chart stops for an unfinished (or elsewhere running) replay of the symbol, as `time|elsewhere`.
-  const capKey = useTrading((s) => {
-    const h = browseHoldOn(getProvider(s.browse.providerId).id, s.activeSymbol, s.browse.holds);
-    return h && !h.blind ? `${h.until}|${h.elsewhere ? 1 : 0}` : null;
-  });
   const [tip, setTip] = useState(() => !tipDismissed());
   const [unfinishedHidden, setUnfinishedHidden] = useState(false);
   // How many sessions the card of unfinished sessions lists (none: it is not shown).
   const [listed, setListed] = useState(0);
-  // Whether the chart, held back by an unfinished replay, has no bar before its clock (heldChartEmpty).
-  const [heldEmpty, setHeldEmpty] = useState(false);
   const notesRef = useRef<HTMLDivElement>(null);
   /** Where focus goes once the card of unfinished sessions has been shown again ('card') or hidden ('hidden'). */
   const refocus = useRef<'card' | 'hidden' | null>(null);
@@ -190,14 +171,6 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
     dismissTip();
     setTip(false);
   }, [selecting, tip]);
-  // Read again whenever the chart's bars or its history change (chart events), not only the store.
-  const loadingBars = browse.loading;
-  const failed = !!browse.error;
-  useEffect(() => {
-    const check = () => setHeldEmpty(!!capKey && !loadingBars && !failed && heldChartEmpty(symbol, timeframe));
-    check();
-    return onChartEvent((e) => (e.type === 'reset' || e.type === 'history') && check());
-  }, [capKey, loadingBars, failed, symbol, timeframe]);
   // Showing the card again, or hiding it, removes the button pressed: focus goes on to the card's first
   // Resume, or to Show unfinished sessions (else the toolbar's Replay button, as after Exit), never to
   // the page. Only after those presses.
@@ -216,7 +189,6 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
   }, [unfinishedHidden]);
   const provider = getProvider(browse.providerId);
   const sym = symbol.toUpperCase();
-  const cap = capKey ? { until: Number(capKey.split('|')[0]), elsewhere: capKey.endsWith('|1') } : null;
   // The cards of Data & Settings that bring in what the chart lacks: a key for Polygon or Alpaca, imported bars.
   const vendorKey = provider.id === 'polygon' || provider.id === 'alpaca' ? (provider.unavailableReason() ? provider.id : null) : null;
   const needsImport = provider === csvProvider && (!!provider.unavailableReason() || !csvProvider.list().some((d) => d.symbol.toUpperCase() === sym));
@@ -225,7 +197,20 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
     openSymbolSearch();
   };
   const showUnfinished = !selecting && !unfinishedHidden;
-  // Why the chart is not drawn: a blind replay keeps it hidden, or its bars could not be had.
+  // Brings the card of unfinished sessions back once hidden, while it lists any: one, in the card of why the
+  // chart is not drawn when that shows, else where the card was.
+  const showAgain = !selecting && unfinishedHidden && listed > 0 && (
+    <button
+      className="btn sm browse-show-unfinished"
+      onClick={() => {
+        refocus.current = 'card';
+        setUnfinishedHidden(false);
+      }}
+    >
+      Show unfinished sessions
+    </button>
+  );
+  // Why the chart is not drawn: a replay of its symbol keeps it hidden, or its bars could not be had.
   const why = hidden ? (
     <>
       <strong>{sym} is not charted here for now</strong>
@@ -234,17 +219,7 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
         <button className="btn sm" onClick={searchSymbols}>
           Search symbols
         </button>
-        {unfinishedHidden && listed > 0 && (
-          <button
-            className="btn sm browse-show-unfinished"
-            onClick={() => {
-              refocus.current = 'card';
-              setUnfinishedHidden(false);
-            }}
-          >
-            Show unfinished sessions
-          </button>
-        )}
+        {showAgain}
       </div>
     </>
   ) : browse.error && !browse.loading ? (
@@ -318,19 +293,13 @@ function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOp
             ✕
           </button>
         </div>
+        {!hidden && showAgain}
         {whyInNotes && (
           <div className="card stack browse-why" role={whyRole}>
             {why}
           </div>
         )}
-        {!selecting && cap && !hidden && (
-          <div className="browse-cap" role="status">
-            {heldEmpty
-              ? `No ${sym} bars before ${cap.elsewhere ? `where the ${sym} replay running in another tab was last saved` : 'your unfinished replay’s clock'} (${exchangeDate(cap.until)} ${formatExchangeTime(cap.until)} ET).`
-              : `Bars shown up to ${exchangeDate(cap.until)} ${formatExchangeTime(cap.until)} ET, where ${cap.elsewhere ? `the ${sym} replay running in another tab was last saved` : `your unfinished ${sym} replay is`}.`}
-          </div>
-        )}
-        {!selecting && tip && !browse.error && !hidden && !heldEmpty && (
+        {!selecting && tip && !browse.error && !hidden && (
           <div className="browse-tip">
             <span>
               Press <b>Replay</b>, then click the bar to start from.

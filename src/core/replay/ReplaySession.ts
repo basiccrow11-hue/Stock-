@@ -101,20 +101,6 @@ export async function lastDataDay(provider: HistoricalDataProvider, symbol: stri
   return tradingDayOnOrBefore(range ? exchangeDate(range.to) : lastCompletedTradingDay(now));
 }
 
-/**
- * The last trading day on or before `day` that `provider` has `symbol`'s bars on: that day, or, for data that
- * can skip days (an imported file's sessionDates), the last day before it it has bars on (`day` itself when it
- * has none before).
- */
-async function dayWithBars(provider: HistoricalDataProvider, symbol: string, day: string): Promise<string> {
-  const d = tradingDayOnOrBefore(day);
-  const dates = await provider.sessionDates?.(symbol);
-  if (!dates) return d;
-  let best: string | null = null;
-  for (const x of dates) if (x <= d && (best === null || x > best)) best = x;
-  return best ?? d;
-}
-
 /** Where a replay's clock starts and ends, and up to when its bars are asked for (see ReplaySession.load). */
 interface LoadWindow {
   date: string;
@@ -278,15 +264,11 @@ export class ReplaySession {
    * the bars of that last day and of the trading days a replay with `lookbackDays` loads before its
    * start, every one revealed, and the history for higher timeframes as a replay loads it (chartHistory,
    * loadHistory). For looking at a chart before any replay starts: nothing plays in it, and it is never
-   * traded (its account is its own, and stays empty). With an `endDay` before the data's last day, it ends
-   * at the end of that day instead (of the last day before it with bars, for data with gaps), its days
-   * before it and its history with it: a chart that must show nothing after a moment of that day (a replay
-   * not finished: tradingStore's BrowseHold) has the days before it to show.
+   * traded (its account is its own, and stays empty).
    */
-  static async preview(provider: HistoricalDataProvider, setup: { symbol: string; lookbackDays: number; endDay?: string }, signal?: AbortSignal, now = new Date()): Promise<ReplaySession> {
+  static async preview(provider: HistoricalDataProvider, setup: { symbol: string; lookbackDays: number }, signal?: AbortSignal, now = new Date()): Promise<ReplaySession> {
     const symbol = setup.symbol.toUpperCase();
-    const last = await lastDataDay(provider, symbol, now);
-    const date = setup.endDay !== undefined && setup.endDay < last ? await dayWithBars(provider, symbol, setup.endDay) : last;
+    const date = await lastDataDay(provider, symbol, now);
     // The end of that day: every bar of it has ended by then, whatever its hours.
     const clock = exchangeTimeToUnix(addDays(date, 1), 0);
     const { engines, histories } = await ReplaySession.loadSymbols(provider, [symbol], { date, start: clock, end: clock, to: clock, lookbackDays: setup.lookbackDays, preview: true }, signal);
