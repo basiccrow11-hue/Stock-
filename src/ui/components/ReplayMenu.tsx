@@ -46,6 +46,7 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
   const blocked = selectBarBlocked();
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const [panel, setPanel] = useState<'menu' | 'date'>('menu');
+  const replayRef = useRef<HTMLButtonElement>(null);
 
   // The menu opens with focus on its first item; arrows move through the items.
   useEffect(() => {
@@ -78,6 +79,7 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
     <div ref={boxRef} className="replay-menu" style={{ position: 'relative' }}>
       <div className="split" role="group" aria-label="Replay">
         <button
+          ref={replayRef}
           className={`btn sm replay-btn${selecting ? ' active' : ''}`}
           aria-pressed={selecting}
           aria-disabled={!!blocked || undefined}
@@ -106,8 +108,11 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
           {item(
             'Select bar',
             () => {
+              // Focus goes to the Replay button, not the page body: pressed, it tells a screen reader
+              // that select-bar mode is on, and pressing it again turns the mode off.
               close(false);
               setSelectingBar(true);
+              replayRef.current?.focus({ preventScroll: true });
             },
             { disabled: !!blocked, title: blocked ?? 'Click a bar on the chart to start the replay there' },
           )}

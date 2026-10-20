@@ -21,7 +21,7 @@ import {
 } from '../state/tradingStore';
 import { exchangeDate, exchangeTimeToUnix, formatExchangeTime, parseHHMM } from '../../core/time';
 import { price, speedLabel } from '../services/format';
-import { modalOpen, useFocusRescue } from './common';
+import { focusHome, isShown, modalOpen, useFocusRescue } from './common';
 import { usePopover } from './usePopover';
 import { ScissorsIcon, toggleSelectBar } from './ReplayMenu';
 
@@ -43,10 +43,22 @@ function confirmStepBack(): void {
   if (confirmRewind(stepBackTarget())) stepBack();
 }
 
-/** Ends the session (Exit), after saying what that does to open positions; the chart goes back to browsing. */
-function confirmExit(): void {
+/**
+ * Ends the session (Exit), after saying what that does to open positions; the chart goes back to browsing.
+ * The row goes with the session, ✕ (`button`) included, so focus goes to the toolbar's Replay button,
+ * which starts the next one, rather than to the page body, where screen-reader users lose their place.
+ * Not when the user has already put it somewhere else meanwhile.
+ */
+function confirmExit(button: HTMLElement): void {
   const notice = sessionEndNotice('exit');
-  if (!notice || window.confirm(notice)) void endSession();
+  if (notice && !window.confirm(notice)) return;
+  void endSession().then(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== button) return;
+    const replay = [...document.querySelectorAll<HTMLElement>('.replay-btn')].find(isShown);
+    if (replay) replay.focus({ preventScroll: true });
+    else focusHome();
+  });
 }
 
 /**
@@ -57,9 +69,12 @@ function confirmExit(): void {
  * place a second order. Enter presses a focused button as usual.
  */
 function isReplayShortcut(e: KeyboardEvent): boolean {
-  // An open toolbar menu keeps the keys, even once focus is no longer inside it.
-  if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || document.querySelector('.popover')) return false;
+  if (modalOpen() || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return false;
   const el = e.target instanceof Element ? e.target : null;
+  // The ⋯ panel shows ← and → beside the steps they take: with focus in it, they step there too.
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && el?.closest('.more-pop')) return true;
+  // An open toolbar menu keeps the keys, even once focus is no longer inside it.
+  if (document.querySelector('.popover')) return false;
   if (!el) return true;
   if (el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], .popover, [role="radiogroup"], [role="listbox"], [role="menu"], [role="tablist"], [role="slider"], [role="combobox"]')) return false;
   if (e.code === 'Space' && el.closest('summary, [role="checkbox"], [role="switch"], [role="option"]')) return false;
@@ -139,7 +154,7 @@ function MoreControls({ now, start, finished, ordered }: { now: number; start: n
   const { open, toggle, boxRef, triggerRef, popRef } = usePopover();
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
-      <button ref={triggerRef} className={`btn icon${open ? ' active' : ''}`} onClick={toggle} aria-expanded={open} aria-label="More replay controls" title="Restart, step back, step one bar">
+      <button ref={triggerRef} className={`btn icon${open ? ' active' : ''}`} data-home="more" onClick={toggle} aria-expanded={open} aria-label="More replay controls" title="Restart, step back, step one bar">
         <span aria-hidden="true">⋯</span>
       </button>
       {open && (
@@ -147,7 +162,7 @@ function MoreControls({ now, start, finished, ordered }: { now: number; start: n
           <button className="btn sm" title="Restart (rewind to start)" aria-label="Restart" onClick={() => confirmRewind(start, true) && restart()} disabled={now <= start && !ordered}>
             <span aria-hidden="true">⏮</span> Restart
           </button>
-          <button className="btn sm" data-home="back" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= start}>
+          <button className="btn sm" title="Step back one bar (←)" aria-label="Step back one bar" onClick={confirmStepBack} disabled={now <= start}>
             <span aria-hidden="true">◀</span> Step back one bar <kbd>←</kbd>
           </button>
           <button className="btn sm" title="Step forward one bar of the data (→)" aria-label="Step forward one bar" onClick={stepForward} disabled={finished}>
@@ -156,6 +171,21 @@ function MoreControls({ now, start, finished, ordered }: { now: number; start: n
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A badge of the replay row, in full (`full`) or, where the row is short of room, shortened (`short`):
+ * the full text stays in its title and for screen readers.
+ */
+function Badge({ tone, full, short, title }: { tone: 'warn' | 'neutral'; full: string; short: string; title: string }) {
+  return (
+    <span className={`badge ${tone} replay-badge`} title={title}>
+      <span className="badge-full">{full}</span>
+      <span className="badge-short" aria-hidden="true">
+        {short}
+      </span>
+    </span>
   );
 }
 
@@ -176,11 +206,12 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
   const spaceTaken = useRef(false);
   const isReplay = session?.mode === 'replay';
   // Restart and Step back disable themselves at the start, Play and the steps at the end: focus then
-  // goes to Play, else Step back, else the speed.
+  // goes to Play, else ⋯ (Restart and Step back are behind it), else the speed. Never to a control in
+  // a popover: focus there would keep the panel open behind it, and Enter on it would act unseen.
   const barRef = useFocusRescue<HTMLDivElement>(
     (bar) =>
       bar.querySelector<HTMLElement>('[data-home="play"]:not(:disabled)') ??
-      bar.querySelector<HTMLElement>('[data-home="back"]:not(:disabled)') ??
+      bar.querySelector<HTMLElement>('[data-home="more"]') ??
       bar.querySelector<HTMLElement>('select'),
   );
   // Read when rendering: what the session is, and the browsing chart's bars, decide it.
@@ -262,22 +293,27 @@ export function ReplayControls({ active = true }: { active?: boolean }) {
           {price(quote.last)}
         </span>
       )}
-      {rewinds > 0 && <span className="badge warn" title="You rewound this session; results are not blind.">REWOUND ×{rewinds}</span>}
-      {finished && <span className="badge neutral">END OF REPLAY</span>}
-      <div className="spacer" />
+      {/* Shortened on narrower screens (styles.css), so the row keeps to one line on a laptop. */}
+      {rewinds > 0 && <Badge tone="warn" full={`REWOUND ×${rewinds}`} short={`↺ ×${rewinds}`} title={`REWOUND ×${rewinds}: you rewound this session; results are not blind.`} />}
+      {finished && <Badge tone="neutral" full="END OF REPLAY" short="END" title="END OF REPLAY" />}
+      {/* A line along the bar's top edge, so it takes no room in the row. Placed against the whole row. */}
       {isReplay && (
-        <>
-          <JumpMenu />
-          <MoreControls now={now} start={session.start} finished={finished} ordered={ordered} />
-          {/* A line along the bar's top edge, so it takes no room in the row. */}
-          <div className="progress" title={`${(progress * 100).toFixed(0)}% of the session window`}>
-            <div style={{ width: `${progress * 100}%` }} />
-          </div>
-        </>
+        <div className="progress" title={`${(progress * 100).toFixed(0)}% of the session window`}>
+          <div style={{ width: `${progress * 100}%` }} />
+        </div>
       )}
-      <button className="btn icon" onClick={confirmExit} aria-label={isReplay ? 'Exit replay' : 'Exit the simulated market'} title={isReplay ? 'Exit replay: end it and go back to the chart' : 'Exit the simulated market: end it and go back to the chart'}>
-        <span aria-hidden="true">✕</span>
-      </button>
+      {/* At the right end, together: when the row runs out of room they wrap as one, still on the right. */}
+      <div className="replay-end">
+        {isReplay && (
+          <>
+            <JumpMenu />
+            <MoreControls now={now} start={session.start} finished={finished} ordered={ordered} />
+          </>
+        )}
+        <button className="btn icon" onClick={(e) => confirmExit(e.currentTarget)} aria-label={isReplay ? 'Exit replay' : 'Exit the simulated market'} title={isReplay ? 'Exit replay: end it and go back to the chart' : 'Exit the simulated market: end it and go back to the chart'}>
+          <span aria-hidden="true">✕</span>
+        </button>
+      </div>
     </div>
   );
 }

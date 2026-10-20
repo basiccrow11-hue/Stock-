@@ -170,4 +170,26 @@ describe('the watchlist', () => {
     expect(parseWatchlist(' spy, qqq  aapl,,SPY\nbrk.b ')).toEqual(['SPY', 'QQQ', 'AAPL', 'BRK.B']);
     expect(parseWatchlist(' , ')).toEqual([]);
   });
+
+  it('cleans a hand-edited save or backup the same way, so every row can be found and taken off; an empty list stays empty', async () => {
+    localStorage.setItem(KEY, JSON.stringify({ state: { watchlist: ['aapl', ' MSFT', 'SPY', 'AAPL', 7, '  '] }, version: 1 }));
+    const first = await import('./settingsStore');
+    expect(first.useSettings.getState().watchlist).toEqual(['AAPL', 'MSFT', 'SPY']);
+    first.removeFromWatchlist('MSFT');
+    expect(first.useSettings.getState().watchlist).toEqual(['AAPL', 'SPY']);
+    // A backup's settings are read by the same rule.
+    expect(first.savedSettings({ watchlist: ['brk.b ', 'spy', 'SPY'] }).watchlist).toEqual(['BRK.B', 'SPY']);
+    // An entry written some other way is still found by its ticker.
+    first.useSettings.getState().update({ watchlist: [' msft', 'SPY'] });
+    expect(first.onWatchlist('MSFT')).toBe(true);
+    first.toggleWatchlist('msft');
+    expect(first.useSettings.getState().watchlist).toEqual(['SPY']);
+    first.addToWatchlist('spy');
+    expect(first.useSettings.getState().watchlist).toEqual(['SPY']);
+
+    vi.resetModules();
+    localStorage.setItem(KEY, JSON.stringify({ state: { watchlist: [] }, version: 1 }));
+    const second = await import('./settingsStore');
+    expect(second.useSettings.getState().watchlist).toEqual([]);
+  });
 });

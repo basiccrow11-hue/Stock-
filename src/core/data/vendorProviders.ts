@@ -77,7 +77,36 @@ export function cleanTicker(text: string): string | null {
   return t.length <= 10 && /^[A-Z0-9]+(?:[.-][A-Z0-9]+)*$/.test(t) ? t : null;
 }
 
+/**
+ * What a vendor said, for a message: its JSON `message` or `error` when it answered in JSON, else the
+ * start of what it sent. Query strings are cut from any address in it, so a key sent in one is never shown.
+ */
+function vendorWords(body: string): string {
+  let words = body.trim();
+  try {
+    const json = JSON.parse(words) as { message?: unknown; error?: unknown };
+    const said = [json.message, json.error].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+    if (said) words = said.trim();
+  } catch {
+    // Not JSON: the text as it is.
+  }
+  return words
+    .slice(0, 200)
+    .replace(/(https?:\/\/[^\s?#"'<>]*)[?#][^\s"'<>]*/gi, '$1')
+    .replace(/\b(api_?key|key|token|secret)=[^\s&"'<>),]+/gi, '$1=…');
+}
+
+/**
+ * A refusal because the account's plan does not include the data asked for (Polygon's free plan has two
+ * years of history; Alpaca's free one no recent SIP data), not because the key is wrong: the key works
+ * for other data.
+ */
+function planRefusal(body: string): boolean {
+  return /"status"\s*:\s*"NOT_AUTHORIZED"|plan does(?:n['’]t| not) include|not entitled|upgrade your plan|subscription does not permit/i.test(body);
+}
+
 function httpError(status: number, body: string, vendor: string, contentType: string | null = null): DataProviderError {
+  if ((status === 401 || status === 403) && planRefusal(body)) return new DataProviderError(`Your ${vendor} plan doesn't include this data: ${vendorWords(body)}`, 'plan');
   if (status === 401 || status === 403) return new DataProviderError(`${vendor} rejected the API key (HTTP ${status}). Check it in Data & Settings.`, 'auth');
   if (status === 429) return new DataProviderError(`${vendor} rate limit reached. Wait a minute and try again.`, 'rate_limit');
   if (status === 404 && !/json/i.test(contentType ?? '')) return noProxy(vendor);
@@ -86,7 +115,7 @@ function httpError(status: number, body: string, vendor: string, contentType: st
   if ((status === 400 || status === 422) && /\b(?:invalid|unknown) (?:symbol|ticker)\b/i.test(body)) return new DataProviderError(`${vendor} does not know this ticker.`, 'not_found');
   if (status === 502 || status === 503 || status === 504)
     return new DataProviderError(`Could not reach ${vendor} (HTTP ${status}): ${PROXY_HINT}`, 'network');
-  const detail = body.trim().slice(0, 200);
+  const detail = vendorWords(body);
   return new DataProviderError(`${vendor} request failed (HTTP ${status})${detail ? `: ${detail}` : '.'}`, 'network');
 }
 

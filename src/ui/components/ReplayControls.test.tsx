@@ -149,7 +149,7 @@ describe('the replay controls', () => {
     /** What a control says: its label, or its text without the icons. */
     const label = (e: Element) =>
       e.tagName === 'SELECT' ? 'speed' : (e.getAttribute('aria-label') ?? [...e.childNodes].filter((c) => !(c instanceof Element && c.getAttribute('aria-hidden') === 'true')).map((c) => c.textContent).join('').trim());
-    const row = () => [...bar.querySelectorAll(':scope > button, :scope > select, :scope > div > button')].map(label);
+    const row = () => [...bar.querySelectorAll(':scope > button, :scope > select, :scope > .replay-end > button, :scope > .replay-end > div > button')].map(label);
     expect(row()).toEqual(['Select bar', 'Play', 'Forward one 5m candle', 'speed', 'Jump to…', 'More replay controls', 'Exit replay']);
     expect(bar.querySelector('.clock')!.textContent).toBe('2024-03-12 10:00:00');
     const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => label(b) === text)!;
@@ -194,6 +194,155 @@ describe('the replay controls', () => {
     confirm.mockRestore();
     act(() => root.unmount());
     store.setTimeframe('1m');
+  });
+
+  it('keep Jump to…, ⋯ and Exit together at the right end, and shorten the badges where the row is short of room', async () => {
+    const store = await import('../state/tradingStore');
+    const { ReplayControls } = await import('./ReplayControls');
+    const { readFileSync } = await import('node:fs');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '15:50', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(ReplayControls)));
+    const bar = host.querySelector('.replay-bar')!;
+    // One group, so they wrap together if at all; the progress line stays on the whole row's top edge.
+    const end = bar.querySelector(':scope > .replay-end')!;
+    expect([...end.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Jump to…', 'More replay controls', 'Exit replay']);
+    expect(bar.querySelector(':scope > .progress')).not.toBeNull();
+    const css = readFileSync(`${process.cwd()}/src/styles.css`, 'utf8');
+    expect(css).toMatch(/\n\.replay-end \{[^}]*flex-wrap: nowrap;[^}]*margin-left: auto;/);
+
+    // A rewound replay at its end: both badges, each in full and shortened (CSS shows one), its full text in the title.
+    act(() => store.stepForward());
+    await act(async () => store.stepBack());
+    await act(async () => undefined);
+    act(() => store.jumpTo(store.useTrading.getState().session!.end!));
+    const badges = () => [...bar.querySelectorAll('.replay-badge')].map((b) => [b.querySelector('.badge-full')!.textContent, b.querySelector('.badge-short')!.textContent, b.getAttribute('title')]);
+    expect(badges()).toEqual([
+      ['REWOUND ×1', '↺ ×1', 'REWOUND ×1: you rewound this session; results are not blind.'],
+      ['END OF REPLAY', 'END', 'END OF REPLAY'],
+    ]);
+    expect(bar.querySelector('.badge-short')!.getAttribute('aria-hidden')).toBe('true');
+    // Shortened on laptop screens, and wider ones while both show.
+    expect(css).toMatch(/@media \(max-width: 1366px\) \{\s*\.replay-badge \.badge-full \{[^}]*clip: rect\(0 0 0 0\)[^}]*\}\s*\.replay-badge \.badge-short \{ display: inline; \}/);
+    expect(css).toMatch(/\n\.replay-badge \.badge-short \{ display: none; \}/);
+    act(() => root.unmount());
+    await store.endSession();
+  });
+
+  it('close the ⋯ panel once focus ends up outside it, step with its arrows, and never rescue focus into a closed or hidden panel', async () => {
+    const store = await import('../state/tradingStore');
+    const { ReplayControls } = await import('./ReplayControls');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '15:55', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(ReplayControls)));
+    const find = (label: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`) ?? [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent!.includes(label))!;
+    const panel = () => host.querySelector('.more-pop');
+    const more = find('More replay controls');
+    const start = store.useTrading.getState().now;
+    const now = () => store.useTrading.getState().now;
+    const key = (target: Element, k: string) => act(() => void target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })));
+    const flush = () => act(async () => void (await new Promise((r) => requestAnimationFrame(() => r(undefined)))));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    // The arrows the panel shows beside its steps work with focus in it.
+    act(() => more.click());
+    act(() => find('Step forward one bar').focus());
+    key(find('Step forward one bar'), 'ArrowRight');
+    // The store publishes at most every 90 ms.
+    await vi.waitFor(() => expect(now()).toBe(start + 60));
+    expect(panel()).not.toBeNull();
+    // Focus on an ancestor (a click on the panel's text focuses the terminal around it) is not leaving.
+    host.tabIndex = -1;
+    act(() => host.focus());
+    expect(panel()).not.toBeNull();
+    // Focus anywhere else closes it, and stays where it went.
+    act(() => find('Play').focus());
+    expect(panel()).toBeNull();
+    expect(document.activeElement).toBe(find('Play'));
+
+    // Step back to the start with a click: the button disables itself, which the browser reports as a blur
+    // to nowhere. Nothing is left there to step back over, so the panel closes.
+    act(() => more.click());
+    let back = find('Step back one bar');
+    act(() => back.focus());
+    // A rewind takes effect once the journal has caught up (afterRewind).
+    await act(async () => back.click());
+    await act(async () => undefined);
+    expect(now()).toBe(start);
+    expect(back.disabled).toBe(true);
+    expect(panel()).not.toBeNull();
+    act(() => void back.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null })));
+    expect(panel()).toBeNull();
+
+    // The same by keyboard: focus goes on to Play, outside the panel, which closes. (The row rescues keyboard
+    // focus only, which jsdom cannot tell from a script's: here all of it is.)
+    const matches = Element.prototype.matches;
+    vi.spyOn(Element.prototype, 'matches').mockImplementation(function (this: Element, selector: string) {
+      return selector === ':focus-visible' ? true : matches.call(this, selector);
+    });
+    act(() => store.stepForward());
+    await vi.waitFor(() => expect(now()).toBe(start + 60));
+    act(() => more.click());
+    back = find('Step back one bar');
+    act(() => back.focus());
+    await act(async () => back.click());
+    await act(async () => undefined);
+    await flush();
+    expect(panel()).toBeNull();
+    expect(document.activeElement).toBe(find('Play'));
+
+    // Forward to the end, by keyboard: Play and the steps disable, and focus goes to ⋯, not into its panel.
+    const candle = find('Forward one 1m candle');
+    act(() => candle.focus());
+    for (let i = 0; i < 10 && !candle.disabled; i++) act(() => candle.click());
+    await vi.waitFor(() => expect(candle.disabled).toBe(true));
+    expect(store.useTrading.getState().finished).toBe(true);
+    await flush();
+    expect(document.activeElement).toBe(more);
+    expect(panel()).toBeNull();
+    act(() => root.unmount());
+    vi.restoreAllMocks();
+    await store.endSession();
+  });
+
+  it('give focus to the toolbar’s Replay button after Exit and after the menu’s Select bar, not to the page', async () => {
+    const store = await import('../state/tradingStore');
+    const { ReplayControls } = await import('./ReplayControls');
+    const { ReplayMenu } = await import('./ReplayMenu');
+    const { Fragment } = await import('react');
+    // jsdom lays nothing out: focus goes only to a control on screen.
+    vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList);
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(createElement(Fragment, null, createElement(ReplayMenu, { onNewSession: () => undefined }), createElement(ReplayControls))));
+    const replay = host.querySelector<HTMLButtonElement>('.replay-btn')!;
+
+    // The menu's Select bar: the Replay button, now pressed, has focus.
+    act(() => host.querySelector<HTMLButtonElement>('.replay-more')!.click());
+    const item = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === 'Select bar')!;
+    expect(document.activeElement).toBe(item);
+    act(() => item.click());
+    expect(store.useTrading.getState().selectingBar).toBe(true);
+    expect(document.activeElement).toBe(replay);
+    expect(replay.getAttribute('aria-pressed')).toBe('true');
+    act(() => store.setSelectingBar(false));
+
+    // Exit: the row goes with the session, ✕ included.
+    const exit = host.querySelector<HTMLButtonElement>('button[aria-label="Exit replay"]')!;
+    act(() => exit.focus());
+    await act(async () => exit.click());
+    await vi.waitFor(() => expect(store.useTrading.getState().session).toBeNull());
+    await act(async () => undefined);
+    expect(host.querySelector('.replay-bar')).toBeNull();
+    expect(document.activeElement).toBe(replay);
+    act(() => root.unmount());
+    vi.restoreAllMocks();
   });
 
   it('say why Select bar is not for a blind replay, and give the simulated market Exit but no Select bar', async () => {

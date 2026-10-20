@@ -160,7 +160,8 @@ function sameShape(v: unknown, def: object, path = ''): Record<string, unknown> 
 export function savedSettings(raw: unknown): SavedSettings {
   const s = sameShape(raw, DEFAULT_SETTINGS) as SavedSettings;
   if (!isObj(raw)) return s;
-  if (Array.isArray(raw.watchlist)) s.watchlist = raw.watchlist.filter(isText);
+  // Tickers as the app writes them (parseWatchlist), so every row can be found, charted and taken off.
+  if (Array.isArray(raw.watchlist)) s.watchlist = parseWatchlist(raw.watchlist.filter(isText).join(','));
   // An empty list is a choice (a price-only chart), not a missing value.
   if (Array.isArray(raw.indicators)) s.indicators = raw.indicators.map(readIndicator).filter((i) => i !== null);
   if (isObj(raw.rules) && Array.isArray(raw.rules.custom)) s.rules = { ...s.rules, custom: raw.rules.custom.filter(isText) };
@@ -277,23 +278,26 @@ export function parseWatchlist(text: string): string[] {
   return [...new Set(text.split(/[\s,]+/).map((x) => x.trim().toUpperCase()).filter(Boolean))];
 }
 
+/** A ticker as the watchlist keeps it: trimmed, in capitals. Entries are compared this way. */
+const tickerKey = (symbol: string) => symbol.trim().toUpperCase();
+
 /** Whether `symbol` is on the watchlist. */
 export function onWatchlist(symbol: string): boolean {
-  return getSettings().watchlist.includes(symbol.trim().toUpperCase());
+  const sym = tickerKey(symbol);
+  return getSettings().watchlist.some((x) => tickerKey(x) === sym);
 }
 
 /** Puts `symbol` (in capitals) at the end of the watchlist, unless it is there already. */
 export function addToWatchlist(symbol: string): void {
-  const sym = symbol.trim().toUpperCase();
-  const list = getSettings().watchlist;
-  if (sym && !list.includes(sym)) useSettings.getState().update({ watchlist: [...list, sym] });
+  const sym = tickerKey(symbol);
+  if (sym && !onWatchlist(sym)) useSettings.getState().update({ watchlist: [...getSettings().watchlist, sym] });
 }
 
 /** Takes `symbol` off the watchlist. */
 export function removeFromWatchlist(symbol: string): void {
-  const sym = symbol.trim().toUpperCase();
+  const sym = tickerKey(symbol);
   const list = getSettings().watchlist;
-  if (list.includes(sym)) useSettings.getState().update({ watchlist: list.filter((x) => x !== sym) });
+  if (onWatchlist(sym)) useSettings.getState().update({ watchlist: list.filter((x) => tickerKey(x) !== sym) });
 }
 
 /** Adds `symbol` to the watchlist, or takes it off if it is there (the star in the symbol search). */

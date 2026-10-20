@@ -69,6 +69,18 @@ describe('the watchlist', () => {
     expect(w.add()).toBeNull();
     expect(w.host.querySelector('.watch-x')).toBeNull();
     expect(w.host.textContent).not.toContain('No session');
+    expect(w.host.querySelector('.panel-body p')!.textContent).toBe(
+      'All symbols here replay on the same clock. Click one (or Tab to it and press Enter) to chart and trade it. Your own watchlist can be edited (+, ×) once the replay ends, or in Data & Settings.',
+    );
+    w.unmount();
+  });
+
+  it('says one symbol, and nothing of switching between symbols, in a bar replay of one', async () => {
+    const store = await import('../state/tradingStore');
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'AAPL', date: '2025-03-10', startTime: '09:30', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 60, blind: false })).toBe(true);
+    const w = await mount();
+    expect(w.host.querySelector('.panel-head')!.textContent).toBe('Watchlist1 symbol');
+    expect(w.host.querySelector('.panel-body p')!.textContent).toBe('Your own watchlist can be edited (+, ×) once the replay ends, or in Data & Settings.');
     w.unmount();
   });
 });

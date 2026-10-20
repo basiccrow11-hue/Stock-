@@ -50,7 +50,7 @@ export const isShown = (el: Element) => el.getClientRects().length > 0 && getCom
  * button after a session starts, a position row after its trade closes): the trading terminal if
  * it is showing, otherwise the current page's tab in the top bar.
  */
-function focusHome(): void {
+export function focusHome(): void {
   const first = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)].find(isShown);
   (first('[data-focus-home]') ?? first('[aria-current="page"]'))?.focus({ preventScroll: true });
 }

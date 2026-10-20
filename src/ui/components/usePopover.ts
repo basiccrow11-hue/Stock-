@@ -1,6 +1,6 @@
 /**
  * Shared behaviour for toolbar popovers: one open at a time; close on a press outside, when focus
- * moves elsewhere, or on Escape (returning focus to the button that opened it); and keep the panel
+ * ends up elsewhere, or on Escape (returning focus to the button that opened it); and keep the panel
  * on screen: shifted sideways; when it does not fit below its button, the scrolling layout around
  * it (the phone terminal) moves up to make room, else it opens above when there is more room there;
  * whatever room it gets, it scrolls inside. Room is measured inside whatever clips the panel (the
@@ -69,19 +69,29 @@ export function usePopover() {
         close(true);
       }
     };
-    // Tabbing out of the panel closes it, so two popovers never overlap. Focus that moves to an
-    // ancestor (a click on plain text in the panel focuses the terminal around it) is not leaving.
-    const onFocusOut = (e: FocusEvent) => {
-      const to = e.relatedTarget;
+    // Focus that ends up outside the panel closes it, so two popovers never overlap and a panel never
+    // stays open behind the control the user is on (its keys would stand down: ReplayControls): Tab out
+    // of it, or a control that rescues focus elsewhere (Play, once the panel's Step back has disabled
+    // itself at the start). It closes without taking focus anywhere. Focus that moves to an ancestor (a
+    // click on plain text in the panel focuses the terminal around it) is not leaving.
+    const onFocusIn = (e: FocusEvent) => {
+      const to = e.target;
       if (to instanceof Node && box && !box.contains(to) && !to.contains(box)) close(false);
+    };
+    // A control of the panel that disables itself while focused (Step back at the start) sends focus
+    // nowhere: the panel has nothing left there to act on, so it closes too.
+    const onFocusOut = (e: FocusEvent) => {
+      if (e.relatedTarget === null && e.target instanceof HTMLElement && e.target.isConnected && (e.target as HTMLButtonElement).disabled) close(false);
     };
     window.addEventListener('pointerdown', onDown);
     window.addEventListener('keydown', onKey, true);
+    document.addEventListener('focusin', onFocusIn);
     box?.addEventListener('focusout', onFocusOut);
     return () => {
       if (closeOpen === mine) closeOpen = null;
       window.removeEventListener('pointerdown', onDown);
       window.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('focusin', onFocusIn);
       box?.removeEventListener('focusout', onFocusOut);
     };
   }, [open, close]);

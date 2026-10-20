@@ -129,6 +129,12 @@ export function OrderTicket() {
     setLimit('');
     setStop('');
   }, [symbol, sessionId]);
+  // GTC and extended hours are chosen for an order, not for every session after it: a new session (a new
+  // cut starts one each time) begins with Day and regular hours. The strategy tag stays, always in view.
+  useEffect(() => {
+    setTif('day');
+    setExt(false);
+  }, [sessionId]);
 
   // Estimated fill price for `n` shares, used for risk math: a limit at its limit; a market order or a
   // stop with the spread, slippage and market impact its fill would pay (the broker's own estimate, which
@@ -180,6 +186,7 @@ export function OrderTicket() {
     [opening, q, session, symbol, action, type, limit, stop, sl, tp, tif, ext, last, now, exec, brokerVersion],
   );
   const bracketId = useId();
+  const setId = useId();
   // Screen readers hear a blocking bracket error once typing has settled (a second after the last edit
   // to the ticket), and again only when it changes kind: not while a half-typed price is briefly on the
   // wrong side, however slowly it is typed, nor at each new quote while playing.
@@ -292,9 +299,12 @@ export function OrderTicket() {
   const strict = exec.strictRisk.enabled;
   const overRisk = !!risk?.pctRisk && risk.pctRisk > rules.maxRiskPctPerTrade + 1e-9;
   const tradeOver = !!trade && (trade.unmeasurable || trade.pct > rules.maxRiskPctPerTrade + 1e-9);
-  // What More options holds that changes this order, said on it while it is closed: nothing out of
+  // What More options holds that changes this order, named beside the submit button (and on More options
+  // while it is closed): open, those fields can still be scrolled under the button, so nothing out of
   // sight changes an order unnoticed. Extended hours only counts on a limit order, the only kind it changes.
-  const hiddenSet = [tif === 'gtc' ? 'GTC' : '', ext && type === 'limit' ? 'Ext. hours' : '', tag.trim() ? `Tag: ${tag.trim()}` : ''].filter(Boolean);
+  const optionsSet = [tif === 'gtc' ? 'GTC' : '', ext && type === 'limit' ? 'Ext. hours' : '', tag.trim() ? `Tag: ${tag.trim()}` : ''].filter(Boolean);
+  // Read with the button by screen readers: the options set, then why the order can't be placed.
+  const describedBy = [optionsSet.length ? setId : '', ...bracket.map((_, i) => `${bracketId}-${i}`)].filter(Boolean).join(' ');
   // Quantity has a row of its own, unless one price field (a limit's or a stop's) sits beside it.
   const qtyWide = type === 'market' || type === 'stop_limit';
 
@@ -373,9 +383,9 @@ export function OrderTicket() {
       {/* What fewer orders need, one click away and open again after a reload once opened (useRememberedOpen).
           A summary, so Space opens it as Enter does rather than playing the replay. */}
       <details className="ticket-more" open={moreOpen} onToggle={(e) => setMoreOpen(e.currentTarget.open)}>
-        <summary title={!moreOpen && hiddenSet.length ? `Set here: ${hiddenSet.join(', ')}` : undefined}>
+        <summary title={!moreOpen && optionsSet.length ? `Set here: ${optionsSet.join(', ')}` : undefined}>
           More options
-          {!moreOpen && hiddenSet.length > 0 && <span className="ticket-more-set"> · {hiddenSet.join(' · ')}</span>}
+          {!moreOpen && optionsSet.length > 0 && <span className="ticket-more-set"> · {optionsSet.join(' · ')}</span>}
         </summary>
         <div className="ticket-more-body">
           <div className="grid2">
@@ -496,7 +506,13 @@ export function OrderTicket() {
             {w}
           </div>
         ))}
-        <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={bracket.length > 0 ? bracket.map((_, i) => `${bracketId}-${i}`).join(' ') : undefined}>
+        {/* What More options sets on this order, open or closed, right by the button that places it. */}
+        {optionsSet.length > 0 && (
+          <div id={setId} className="ticket-set" title="Set under More options">
+            {optionsSet.join(' · ')}
+          </div>
+        )}
+        <button className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={describedBy || undefined}>
           {label}
         </button>
         {result && (

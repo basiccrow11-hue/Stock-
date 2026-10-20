@@ -143,29 +143,62 @@ describe('the order ticket', () => {
     expect(tif.closest('label')!.textContent).toContain('Time in force');
     expect(ext.closest('label')!.textContent).toBe('Extended hours');
 
-    // Set to something other than its default, an option shows on the closed summary, so nothing out
-    // of sight changes the order unnoticed. Extended hours counts only on a limit order.
+    // Set to something other than its default, an option shows on the closed summary and just above the
+    // submit button, so nothing out of sight changes the order unnoticed. Extended hours counts only on a
+    // limit order.
+    const set = () => t.q('.ticket-submit .ticket-set')?.textContent ?? null;
+    expect(set()).toBeNull();
     enter(tif, 'gtc');
     expect(summary.textContent).toBe('More options · GTC');
+    expect(set()).toBe('GTC');
     act(() => t.button('Limit')!.click());
     act(() => ext.click());
     expect(summary.textContent).toBe('More options · GTC · Ext. hours');
     enter(tag, ' orb ');
     expect(summary.textContent).toBe('More options · GTC · Ext. hours · Tag: orb');
+    expect(set()).toBe('GTC · Ext. hours · Tag: orb');
     act(() => t.button('Market')!.click());
     expect(summary.textContent).toBe('More options · GTC · Tag: orb');
-    // Open, they are in view, so the summary only names itself.
+    expect(set()).toBe('GTC · Tag: orb');
+    // Open, the fields can still be scrolled under the submit area, which keeps naming them; the summary
+    // names only itself. The button keeps its name, and screen readers hear the options with it.
     await act(async () => {
       summary.click();
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(t.more.open).toBe(true);
     expect(summary.textContent).toBe('More options');
+    expect(set()).toBe('GTC · Tag: orb');
+    const submit = t.button(`BUY 100 ${symbol} MKT`)!;
+    expect(submit.getAttribute('aria-describedby')).toBe(t.q('.ticket-set')!.id);
 
     // A fill never changes what a side means: Sell is still Sell, Cover still Cover, with a position open.
     act(() => void store.submitOrder({ symbol, action: 'buy', type: 'market', quantity: 10 }));
     expect(store.useTrading.getState().positions).toHaveLength(1);
     expect(sides()).toEqual(['Buy', 'Sell', 'Short', 'Cover']);
+    t.unmount();
+    await store.endSession();
+  });
+
+  it('starts each session with Day and regular hours, keeping the strategy tag, which stays named by the button', async () => {
+    const store = await import('../state/tradingStore');
+    const start = () => store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false });
+    expect(await start()).toBe(true);
+    const t = await mountTicket();
+    const tif = () => t.q<HTMLSelectElement>('select')!;
+    const ext = () => t.q<HTMLInputElement>('input[type="checkbox"]')!;
+    const set = () => t.q('.ticket-submit .ticket-set')?.textContent ?? null;
+    enter(tif(), 'gtc');
+    act(() => t.button('Limit')!.click());
+    act(() => ext().click());
+    enter(t.q<HTMLInputElement>('input[aria-label="Strategy / setup tag"]')!, 'orb');
+    expect(set()).toBe('GTC · Ext. hours · Tag: orb');
+
+    // A new session (each cut of the chart starts one), with the ticket still on screen.
+    await act(async () => void (await start()));
+    expect([tif().value, ext().checked]).toEqual(['day', false]);
+    expect(t.q<HTMLInputElement>('input[aria-label="Strategy / setup tag"]')!.value).toBe('orb');
+    expect(set()).toBe('Tag: orb');
     t.unmount();
     await store.endSession();
   });
