@@ -41,7 +41,12 @@ async function mountTicket() {
   const more = q<HTMLDetailsElement>('details.ticket-more')!;
   /** The one-line estimate above the submit button, as "label value" pairs. */
   const estimate = () => Object.fromEntries([...host.querySelectorAll('.ticket-submit .ticket-est > div')].map((d) => [d.querySelector('dt')!.textContent, d.querySelector('dd')!]));
-  return { host, q, button, more, estimate, unmount: () => act(() => root.unmount()) };
+  const qty = () => q<HTMLInputElement>('input[type="number"][min="1"]')!;
+  /** The red boxes by the submit button: the line about buying power, bracket errors and refusals. */
+  const errors = () => [...host.querySelectorAll('.ticket-submit .alert.error')].map((a) => a.textContent);
+  /** What screen readers last heard of an order's result. */
+  const heard = () => [...host.querySelectorAll('.ticket-submit [role="status"]')].at(-1)!.textContent;
+  return { host, q, button, more, estimate, qty, errors, heard, unmount: () => act(() => root.unmount()) };
 }
 
 describe('the order ticket', () => {
@@ -245,17 +250,22 @@ describe('the order ticket', () => {
     expect(over()!.nextElementSibling).toBe(submit);
     expect(submit.getAttribute('aria-describedby')).toBe(over()!.querySelector('span')!.id);
     expect(warnings().some((w) => w!.endsWith('(uses margin).'))).toBe(false);
-    // The broker says the same if pressed anyway.
+    // Pressed anyway, the broker refuses it, naming the price it counts at. Screen readers hear that; on
+    // screen the line stays the one red box saying so, rather than a second one under the button.
     act(() => submit.click());
-    expect(submit.nextElementSibling!.textContent).toMatch(/^Insufficient buying power: 100 shares at about [\d.]+ \(the ask\) need \$[\d,.]+; \$16,000\.00 is available, enough for \d+\.$/);
+    expect(t.heard()).toMatch(/^Insufficient buying power: 100 shares at about [\d.]+ \(the ask\) need \$[\d,.]+; \$16,000\.00 is available, enough for \d+\.$/);
+    expect(t.errors()).toEqual([over()!.textContent]);
+    expect(submit.nextElementSibling!.matches('.alert')).toBe(false);
     expect(store.useTrading.getState().positions).toHaveLength(0);
 
-    // Use takes that size; focus goes on to the order, which fits now.
+    // Use takes that size, and the refusal of the other size goes; focus goes on to the order, which fits now.
     const use = [...over()!.querySelectorAll('button')].find((b) => b.textContent === `Use ${spy.shares}`)!;
     act(() => use.focus());
     act(() => use.click());
     expect(qty().value).toBe(String(spy.shares));
     expect(over()).toBeUndefined();
+    expect(t.errors()).toEqual([]);
+    expect(t.heard()).toBe('');
     expect(document.activeElement).toBe(t.button(`BUY ${spy.shares} SPY MKT`));
 
     // A size given is the user's: neither another symbol nor a new session changes it.
@@ -266,6 +276,137 @@ describe('the order ticket', () => {
     expect(qty().value).toBe('7');
     act(() => t.button('BUY 7 SPY MKT')!.click());
     expect(store.useTrading.getState().positions).toMatchObject([{ symbol: 'SPY', quantity: 7 }]);
+    t.unmount();
+    await store.endSession();
+  });
+
+  it('starts a Sell on a long, or a Cover on a short, with the whole position, whatever symbol was picked before', async () => {
+    const store = await import('../state/tradingStore');
+    Element.prototype.scrollIntoView ??= () => undefined;
+    // $50,000 of buying power: 100 QQQ fit, and once they are held, fewer than 100 more of anything.
+    const start = () => store.startReplay({ providerId: 'demo', symbol: 'SPY', extraSymbols: ['QQQ'], date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false });
+    expect(await start()).toBe(true);
+    const t = await mountTicket();
+    /** The ticket's own size for a new order: what buying power covers, up to 100, in tens. */
+    const fits = (symbol: string, action: 'buy' | 'short' = 'buy') => String(Math.floor(Math.min(100, store.buyingPowerFit({ symbol, action, type: 'market' })!.shares) / 10) * 10);
+    const side = (name: string) => act(() => t.button(name)!.click());
+    const pick = (symbol: string) => act(() => store.setActiveSymbol(symbol));
+    const held = () => store.useTrading.getState().positions.map((p) => [p.symbol, p.quantity]);
+
+    pick('QQQ');
+    expect(t.qty().value).toBe('100');
+    act(() => t.button('BUY 100 QQQ MKT')!.click());
+    expect(held()).toEqual([['QQQ', 100]]);
+    expect(Number(fits('QQQ'))).toBeLessThan(100);
+    // Another symbol, Sell, and back to QQQ: the Sell is for the 100 held, not for what buying power covers.
+    pick('SPY');
+    expect(t.qty().value).toBe(fits('SPY'));
+    side('Sell');
+    pick('QQQ');
+    expect(t.qty().value).toBe('100');
+    expect(t.button('SELL 100 QQQ MKT')).toBeDefined();
+    // Buy adds to it, as many as buying power covers; Sell is the whole position again.
+    side('Buy');
+    expect(t.qty().value).toBe(fits('QQQ'));
+    side('Sell');
+    expect(t.qty().value).toBe('100');
+    act(() => t.button('SELL 100 QQQ MKT')!.click());
+    expect(held()).toEqual([]);
+
+    // The same with a short and Cover.
+    side('Short');
+    const short = fits('QQQ', 'short');
+    act(() => t.button(`SHORT ${short} QQQ MKT`)!.click());
+    expect(held()).toEqual([['QQQ', -Number(short)]]);
+    pick('SPY');
+    side('Cover');
+    pick('QQQ');
+    expect(t.button(`COVER ${short} QQQ MKT`)).toBeDefined();
+
+    // A size given is the user's, on a side that closes too.
+    enter(t.qty(), '7');
+    pick('SPY');
+    pick('QQQ');
+    side('Short');
+    side('Cover');
+    expect(t.button('COVER 7 QQQ MKT')).toBeDefined();
+    t.unmount();
+    await store.endSession();
+  });
+
+  it('works an untouched size out again after each order and fill, so the next order still fits and nothing turns red', async () => {
+    const store = await import('../state/tradingStore');
+    Element.prototype.scrollIntoView ??= () => undefined;
+    // $50,000 of buying power: 100 SPY fit, and once they are held, about 10 more.
+    const start = () => store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false });
+    expect(await start()).toBe(true);
+    const t = await mountTicket();
+    const fits = (req: { type: 'market' } | { type: 'limit'; limitPrice: number } = { type: 'market' }) => store.buyingPowerFit({ symbol: 'SPY', action: 'buy', ...req })!.shares;
+    const result = () => t.q('.ticket-submit > button.btn:not(.sm) + .alert')?.textContent;
+
+    expect(t.qty().value).toBe('100');
+    act(() => t.button('BUY 100 SPY MKT')!.click());
+    expect(store.useTrading.getState().positions).toMatchObject([{ symbol: 'SPY', quantity: 100 }]);
+    const left = fits();
+    expect(left).toBeGreaterThanOrEqual(10);
+    expect(left).toBeLessThan(100);
+    // The next order is as many as are left, under the result of the one before, with nothing in red.
+    const next = String(Math.floor(left / 10) * 10);
+    expect(t.qty().value).toBe(next);
+    expect(t.button(`BUY ${next} SPY MKT`)).toBeDefined();
+    expect(result()).toBe('BUY 100 SPY filled.');
+    expect(t.errors()).toEqual([]);
+
+    // A working order holds buying power back too: placing one does the same.
+    await act(async () => void (await start()));
+    expect(t.qty().value).toBe('100');
+    const last = store.useTrading.getState().quotes.SPY!.last;
+    act(() => t.button('Limit')!.click());
+    enter(t.q<HTMLInputElement>('input[aria-label="Limit price"]')!, (last - 5).toFixed(2));
+    act(() => t.button(`BUY 100 SPY LMT ${(last - 5).toFixed(2)}`)!.click());
+    expect(store.useTrading.getState().orders).toMatchObject([{ status: 'working', quantity: 100 }]);
+    expect(result()).toMatch(/^BUY 100 SPY working\./);
+    expect(Number(t.qty().value)).toBeLessThanOrEqual(fits({ type: 'limit', limitPrice: last - 5 }));
+    expect(Number(t.qty().value)).toBeGreaterThan(0);
+    expect(t.errors()).toEqual([]);
+
+    // A size given stays, and is red once it no longer fits: pressed, it would be refused.
+    enter(t.qty(), '100');
+    expect(t.errors()).toHaveLength(1);
+    expect(t.errors()[0]).toMatch(/^Exceeds buying power/);
+    t.unmount();
+    await store.endSession();
+  });
+
+  it('shows one red box about an order over buying power, and drops the last result when the size changes', async () => {
+    const store = await import('../state/tradingStore');
+    Element.prototype.scrollIntoView ??= () => undefined;
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: '2024-03-12', startTime: '10:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '1m', speed: 1, blind: false })).toBe(true);
+    const t = await mountTicket();
+    const most = store.buyingPowerFit({ symbol: 'SPY', action: 'short', type: 'market' })!.shares;
+    expect(most).toBeLessThan(200);
+
+    // Short 200, over buying power: one red box before the press, and still one after it.
+    act(() => t.button('Short')!.click());
+    enter(t.qty(), '200');
+    const line = `Exceeds buying power ($50,000.00): at most ${most} shares.Use ${most}`;
+    expect(t.errors()).toEqual([line]);
+    act(() => t.button('SHORT 200 SPY MKT')!.click());
+    expect(t.heard()).toMatch(/^Insufficient buying power: 200 shares at about [\d.]+ \(the bid\) need /);
+    expect(t.errors()).toEqual([line]);
+    // Use sets the size that fits, and nothing is left about the 200.
+    act(() => t.button(`Use ${most}`)!.click());
+    expect(t.button(`SHORT ${most} SPY MKT`)).toBeDefined();
+    expect(t.errors()).toEqual([]);
+    expect(t.heard()).toBe('');
+
+    // Any other refusal shows under the button until the size changes.
+    act(() => t.button('Sell')!.click());
+    act(() => t.button(`SELL ${most} SPY MKT`)!.click());
+    expect(t.errors()).toEqual(['No long position in SPY to sell. Use Short to open a short.']);
+    enter(t.qty(), '5');
+    expect(t.errors()).toEqual([]);
+    expect(t.heard()).toBe('');
     t.unmount();
     await store.endSession();
   });

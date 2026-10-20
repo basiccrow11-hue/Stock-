@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { OrderAction, OrderType, TimeInForce } from '../../core/types';
 import { assessRisk, marginWarning, pctAgainst } from '../../core/risk/risk';
 import { commissionFor, halfSpread } from '../../core/broker/config';
+import { BUYING_POWER_REFUSAL } from '../../core/broker/SimBroker';
 import { marketSession } from '../../core/time';
 import { formatTick, roundToTick } from '../../core/util/math';
 import { bracketErrors, buyingPowerFit, closePosition, estimateFill, setPickTarget, sizeByRisk, submitOrder, tradeRisk, useTrading } from '../state/tradingStore';
@@ -77,10 +78,13 @@ export function OrderTicket() {
   const [tag, setTag] = useState('');
   const [riskPct, setRiskPct] = useState(String(rules.maxRiskPctPerTrade));
   const [moreOpen, setMoreOpen] = useRememberedOpen('ticket-more');
-  /** The last submit's outcome, or Size by risk's refusal (`sizing`). */
-  const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; sizing?: boolean; n: number } | null>(null);
+  /**
+   * The last submit's outcome, or Size by risk's refusal (`sizing`). A `quiet` one is only read out: the
+   * red line above the button already shows it.
+   */
+  const [result, setResultState] = useState<{ tone: 'error' | 'success'; text: string; sizing?: boolean; quiet?: boolean; n: number } | null>(null);
   const resultSeq = useRef(0);
-  const setResult = (r: { tone: 'error' | 'success'; text: string; sizing?: boolean } | null) => setResultState(r && { ...r, n: ++resultSeq.current });
+  const setResult = (r: { tone: 'error' | 'success'; text: string; sizing?: boolean; quiet?: boolean } | null) => setResultState(r && { ...r, n: ++resultSeq.current });
 
   const position = positions.find((p) => p.symbol === symbol);
   const last = quote?.last;
@@ -147,23 +151,38 @@ export function OrderTicket() {
     setTif('day');
     setExt(false);
   }, [sessionId]);
-  // Until a size is given (typed, or set with Size or Use), each session and each symbol starts with the
-  // default quantity cut to what buying power covers at the price then, once that price is in, so the first
-  // order fits even where 100 shares cost more than the default balance's buying power (a $584 SPY on
-  // $50,000). A size given is never changed.
+  // Until a size is given (typed, or set with Size or Use), the ticket holds a default. On a side that
+  // closes the position (Sell on a long, Cover on a short) it is the whole position, so picking the symbol
+  // again never turns a close into a partial one; buying power does not limit a close. Otherwise each
+  // session and each symbol starts with the default quantity cut to what buying power covers at the price
+  // then, once that price is in, so the first order fits even where 100 shares cost more than the default
+  // balance's buying power (a $584 SPY on $50,000). Both are worked out again after each order placed and
+  // each fill, which change the position and the buying power left, so an untouched size never turns red
+  // under the result of the order before it. A size given is never changed.
   const sizeGiven = useRef(false);
   const defaultedFor = useRef('');
+  const held = position?.quantity ?? 0;
+  /** The shares this side closes: the position's, on Sell for a long or Cover for a short; else 0. */
+  const closes = (action === 'sell' && held > 0) || (action === 'cover' && held < 0) ? Math.abs(held) : 0;
+  // Orders placed and fills, not every account update (each new price is one).
+  const activity = useTrading((s) => `${s.orders.length}|${s.fills.length}`);
   useEffect(() => {
     if (sizeGiven.current || !sessionId || last === undefined) return;
-    const key = `${sessionId}|${symbol}`;
+    const key = `${sessionId}|${symbol}|${closes ? `close ${closes}` : 'open'}|${activity}`;
     if (defaultedFor.current === key) return;
     defaultedFor.current = key;
+    if (closes) {
+      setQuantity(String(closes));
+      return;
+    }
     const covered = buyingPowerFit({ symbol, action: direction === 'long' ? 'buy' : 'short', type: 'market' });
     if (covered) setQuantity(String(defaultQuantity(covered.shares)));
-  }, [sessionId, symbol, last, direction]);
-  const giveSize = (n: number) => {
+  }, [sessionId, symbol, last, direction, closes, activity]);
+  /** A size the user gives (typed, or set with Size or Use). The last result was about another size, so it goes. */
+  const giveSize = (n: number | string) => {
     sizeGiven.current = true;
     setQuantity(String(n));
+    setResult(null);
   };
 
   // Estimated fill price for `n` shares, used for risk math: a limit at its limit; a market order or a
@@ -260,7 +279,6 @@ export function OrderTicket() {
       setResult({ tone: 'error', text: r.error, sizing: true });
       return;
     }
-    if (result?.sizing) setResult(null);
     const joined = r.risk.held + r.risk.working > 0;
     const peak = r.risk.peak ? `, counted at its largest size of ${r.risk.peak} shares as the trade review counts it` : '';
     const trade = joined ? ` With them the ${symbol} trade risks ${pctAgainst(r.risk.pct, asked)}% from its first stop at ${formatTick(r.risk.stop)}${peak}.` : '';
@@ -283,7 +301,10 @@ export function OrderTicket() {
     if (bracket.length > 0) return;
     const r = submitOrder({ ...request(), quantity: q, tag: tag.trim() || undefined });
     if (!r.ok) {
-      setResult({ tone: 'error', text: r.error ?? 'Rejected' });
+      const error = r.error ?? 'Rejected';
+      // Refused for the buying power the red line above the button already says it exceeds: that line, with
+      // its Use button, stays the one box saying so, and the refusal is only read out.
+      setResult({ tone: 'error', text: error, quiet: overPower && error.startsWith(BUYING_POWER_REFUSAL) });
       return;
     }
     const o = r.order!;
@@ -386,10 +407,7 @@ export function OrderTicket() {
             min={1}
             step={1}
             value={quantity}
-            onChange={(e) => {
-              sizeGiven.current = true;
-              setQuantity(e.target.value);
-            }}
+            onChange={(e) => giveSize(e.target.value)}
           />
         </label>
         {(type === 'stop' || type === 'stop_limit') && (
@@ -585,7 +603,7 @@ export function OrderTicket() {
         <button ref={submitRef} className={`btn ${actCls}`} style={{ padding: '9px 10px', fontWeight: 600 }} onClick={submit} disabled={q <= 0} aria-disabled={bracket.length > 0 || undefined} aria-describedby={describedBy || undefined}>
           {label}
         </button>
-        {result && (
+        {result && !result.quiet && (
           <div ref={resultRef} className={`alert ${result.tone}`} aria-hidden="true">
             {result.text}
           </div>
