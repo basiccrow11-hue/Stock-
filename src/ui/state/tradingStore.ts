@@ -2132,11 +2132,13 @@ function knownBars(replay: ReplaySession | null, symbol: string, timeframe: Time
 
 /**
  * When the data's sessions end (sessionEndMinute) around `day`, in minutes: from the bars `known` that cover
- * those days, else from bars of them asked of the data source.
+ * those days, else from bars of them asked of the data source. Null for a vendor's bars `known` does not
+ * cover: the replay reads it from its own bars once they load (ReplaySetup.endAtDataClose), rather than spend
+ * a request of the few a free plan answers a minute on finding it out first.
  */
-async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars): Promise<number> {
+async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars): Promise<number | null> {
   const close = known.sessionEnd(day);
-  if (close !== null) return close;
+  if (close !== null || VENDOR_NAMES[provider.id]) return close;
   let from = day;
   for (let i = 0; i < HOURS_DAYS; i++) from = prevTradingDay(from);
   const bars = await provider.getBars({ symbol, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(nextTradingDay(day), 0) });
@@ -2203,14 +2205,16 @@ function dayMayBeTheCause(e: unknown): boolean {
  * Starts a replay of `symbol` from `providerId` at `t` with the chart's timeframe (startReplay), the way
  * Bar Replay starts every replay: it plays on for PLAY_ON_DAYS of the candles the chart draws (barReplayPlan),
  * never past the end of the data or across a day an imported file has no bars for (playOnEndDate), and on
- * its last day to the end of the data's sessions (sessionClose), so it never plays empty hours. As many days
- * before the start as a replay of those candles loads (DEFAULT_LOOKBACK), and no fewer than the chart with no
- * session shows; the default balance; that symbol only; not blind; no challenge; about one candle a second
- * (candleSpeed). Once started, saved as the next replay's setup (settings.replay), as the setup form saves
- * it, so Advanced replay setup opens on it; one that did not start leaves the setup as it was. `known`: the
- * chart's bars, for the data's hours. `what` was picked: a bar of the chart (which keeps its view, see
- * ChartEvent) or a moment. `retry`: says whether the caller takes a failure to load (it tries another day,
- * or says why itself): one it takes is not shown but answered 'retry', the loading note left up.
+ * its last day to the end of the data's sessions (sessionClose, or on a vendor's data that the chart does not
+ * show, read from the replay's own bars as they load: one request for each start), so it never plays empty
+ * hours. As many days before the start as a replay of those candles loads (DEFAULT_LOOKBACK), and no fewer
+ * than the chart with no session shows; the default balance; that symbol only; not blind; no challenge;
+ * about one candle a second (candleSpeed). Once started, saved as the next replay's setup (settings.replay),
+ * as the setup form saves it, so Advanced replay setup opens on it; one that did not start leaves the setup
+ * as it was. `known`: the chart's bars, for the data's hours. `what` was picked: a bar of the chart (which
+ * keeps its view, see ChartEvent) or a moment. `retry`: says whether the caller takes a failure to load (it
+ * tries another day, or says why itself): one it takes is not shown but answered 'retry', the loading note
+ * left up.
  */
 async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: string, known: KnownBars, what: 'bar' | 'time', retry?: (e: unknown) => boolean): Promise<boolean | 'retry'> {
   const provider = getProvider(providerId);
@@ -2219,7 +2223,7 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
   const day = exchangeDate(t);
   let days: { last: string; dates: readonly string[] | null };
   let endDate: string;
-  let close: number;
+  let close: number | null;
   try {
     if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
     const reason = provider.unavailableReason() ?? (await notListed(provider, symbol));
@@ -2234,16 +2238,35 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
     if (retry?.(e)) return 'retry';
     return startRefused((e as Error).message);
   }
-  const endTime = hhmm(close);
+  // On a vendor's data whose hours the chart does not show (close null), the replay ends when its own bars'
+  // sessions do: before loading them, only a start after the latest that can be (the after-hours close) is
+  // known to have nothing after it.
+  const endTime = hhmm(close ?? AFTERHOURS_CLOSE);
   if (exchangeTimeToUnix(endDate, parseHHMM(endTime)) <= t) return startRefused(nothingFollows(symbol, endDate, days, what));
   const startTime = hhmm((t - exchangeTimeToUnix(day, 0)) / 60);
   const speed = candleSpeed(plan.candles, REPLAY_SPEEDS);
   let retrying = false;
   const retryOn = retry ? (e: unknown) => (retrying = retry(e)) : undefined;
-  const ok = await startReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, endDate, startingBalance: getSettings().defaultBalance, lookbackDays: plan.lookbackDays, timeframe, speed, blind: false, cut: what === 'bar', retryOn });
+  const ok = await startReplay({
+    providerId: provider.id,
+    symbol,
+    date: day,
+    startTime,
+    endTime,
+    endAtDataClose: close === null || undefined,
+    endDate,
+    startingBalance: getSettings().defaultBalance,
+    lookbackDays: plan.lookbackDays,
+    timeframe,
+    speed,
+    blind: false,
+    cut: what === 'bar',
+    retryOn,
+  });
   if (retrying) return 'retry';
-  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws.
-  if (ok) useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, multiDay: endDate > day, endDate, timeframe, speed });
+  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws; the end
+  // time is the one the replay ends at, read from its bars when it was not known before.
+  if (ok) useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime: eng.replay?.setup.endTime ?? endTime, multiDay: endDate > day, endDate, timeframe, speed });
   const failed = useTrading.getState().error;
   if (!ok && failed) {
     // The replay's own words for an empty window are about start and end times, which were not asked for here.
