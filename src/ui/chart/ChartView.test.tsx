@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { Profiler, act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Bar, Timeframe } from '../../core/types';
-import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, regularCloseMinute } from '../../core/time';
+import { exchangeDate, exchangeMinuteOfDay, exchangeTimeToUnix, prevTradingDay, regularCloseMinute } from '../../core/time';
 
 /**
  * A stand-in for lightweight-charts (jsdom has no canvas). It keeps every series' points and models
@@ -215,8 +215,26 @@ const lw = vi.hoisted(() => {
     timeScale() {
       return this.ts;
     }
-    priceScale() {
-      return lenient({ width: () => 60 });
+    /** Each pane's price scale's `visible` option, as last set (unset: shown). */
+    scaleVisible: Record<number, boolean> = {};
+    /** Panes whose axis, shown again, the library lays out on its next frame. */
+    axisPending = new Set<number>();
+    priceScale(_id?: string, pane = 0) {
+      return lenient({
+        // As the library's: with no axis laid out (hidden, or shown again but not yet drawn), it throws.
+        width: () => {
+          if (this.scaleVisible[pane] === false || this.axisPending.has(pane)) throw new Error('Value is null');
+          return 60;
+        },
+        applyOptions: (o: { visible?: boolean }) => {
+          if (o.visible === undefined) return;
+          if (o.visible && this.scaleVisible[pane] === false) {
+            this.axisPending.add(pane);
+            requestAnimationFrame(() => this.axisPending.delete(pane));
+          }
+          this.scaleVisible[pane] = o.visible;
+        },
+      });
     }
     subscribeCrosshairMove(fn: (p: unknown) => void) {
       this.crosshair.push(fn);
@@ -1772,6 +1790,11 @@ describe('Bar Replay on the chart', () => {
     return { line: line.style.display === 'none' ? null : parseFloat(line.style.left), shade: parseFloat(shade.style.left), shadeEnd: parseFloat(shade.style.left) + parseFloat(shade.style.width), refused: line.classList.contains('refused') };
   };
   const hint = (host: HTMLElement) => host.querySelector('.bar-cut-hint')?.textContent ?? null;
+  /** Scrolls the view of `n` candles to the newest, as » does (an intraday chart opens a day back). */
+  const toNewest = (chart: InstanceType<typeof lw.Chart>, n: number, frame: () => void, span = chart.ts.span) => {
+    act(() => chart.ts.scrollTo({ from: n + 7 - span, to: n + 7 }));
+    frame();
+  };
 
   it('shows the chosen symbol with no session, up to the end of its data, named with its data source', async () => {
     const store = await import('../state/tradingStore');
@@ -1840,6 +1863,7 @@ describe('Bar Replay on the chart', () => {
     const a = await browse('SPY', '1m', frame);
     const ts = a.chart.ts;
     const n = a.chart.series[0].points.length;
+    toNewest(a.chart, n, frame, 400);
     act(() => store.setSelectingBar(true));
     pointer(a.chart, 'pointermove', ts.logicalToCoordinate(n - 1)!);
     frame();
@@ -1848,11 +1872,17 @@ describe('Bar Replay on the chart', () => {
     click(a.chart, ts.logicalToCoordinate(n - 1)!);
     await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
     expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false, selectingBar: true });
-    // One before it is fine.
+    // One before it can be picked, but on the data's last day only after-hours trading follows it (19:58).
     pointer(a.chart, 'pointermove', ts.logicalToCoordinate(n - 2)!);
     frame();
     expect(cutAt(a.host).refused).toBe(false);
+    expect(hint(a.host)).toBe("Only after-hours trading follows this bar: market orders won't fill. Pick an earlier bar.");
+    expect(a.host.querySelector('.bar-cut-hint')!.className).toBe('bar-cut-hint warned');
+    // One in that day's regular session (15:00) is fine.
+    pointer(a.chart, 'pointermove', ts.logicalToCoordinate(n - 300)!);
+    frame();
     expect(hint(a.host)).toBe('Click a bar to start the replay there · Esc to cancel');
+    expect(a.host.querySelector('.bar-cut-hint')!.className).toBe('bar-cut-hint');
 
     act(() => void window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     expect(store.useTrading.getState().selectingBar).toBe(false);
@@ -1868,8 +1898,11 @@ describe('Bar Replay on the chart', () => {
     const ts = a.chart.ts;
     const n = main.points.length;
     act(() => store.setSelectingBar(true));
-    const first = ts.logicalToCoordinate(n - 30)!;
-    const other = ts.logicalToCoordinate(n - 20)!;
+    // Bars of the day before the data's last one, at the right edge of the view the chart opens on.
+    const edge = Math.floor(ts.getVisibleLogicalRange()!.to);
+    expect(edge).toBeLessThan(n - 1);
+    const first = ts.logicalToCoordinate(edge - 30)!;
+    const other = ts.logicalToCoordinate(edge - 20)!;
     click(a.chart, first, 'touch');
     expect(cutAt(a.host).line).toBeCloseTo(first, 6);
     expect(hint(a.host)).toBe('Tap this bar again to start the replay there · Esc to cancel');
@@ -1878,11 +1911,86 @@ describe('Bar Replay on the chart', () => {
     expect(cutAt(a.host).line).toBeCloseTo(other, 6);
     await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
     expect(store.useTrading.getState().session).toBeNull();
-    const cut = main.points[n - 20].time;
+    const cut = main.points[edge - 20].time;
     click(a.chart, other, 'touch');
     await vi.waitFor(() => expect(store.useTrading.getState().session).not.toBeNull(), { timeout: 20_000 });
     frame();
     expect(main.points.at(-1)!.time).toBe(cut);
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it("opens an intraday chart with no session on the regular session of the day before the data's last, so a bar in view has regular hours after it, and a daily one on its newest candle", async () => {
+    const { demoProvider } = await import('../state/dataRegistry');
+    const { toChartTime } = await import('./ChartView');
+    const frame = controlFrames();
+    const day = prevTradingDay(demoProvider.lastDate);
+    const et = (hhmm: string) => toChartTime(exchangeTimeToUnix(day, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3))));
+    for (const [tf, last] of [['1m', '15:59'], ['5m', '15:55'], ['1h', '15:30']] as const) {
+      const a = await browse('SPY', tf, frame);
+      const main = a.chart.series[0];
+      const right = Math.floor(a.chart.ts.getVisibleLogicalRange()!.to);
+      expect(right, tf).toBeLessThan(main.points.length - 1);
+      expect(main.points[right].time, tf).toBe(et(last));
+      // The after-hours of that day and the last day are off to the right.
+      expect(main.points[right + 1].time, tf).toBeGreaterThanOrEqual(et('16:00'));
+      act(() => a.root.unmount());
+    }
+
+    const b = await browse('SPY', '1D', frame);
+    expect(b.chart.ts.getVisibleLogicalRange()!.to).toBeGreaterThan(b.chart.series[0].points.length - 1);
+    act(() => b.root.unmount());
+  }, 30_000);
+
+  it('hides the price scales while the chart has no candles, so none goes on showing the last symbol\'s prices', async () => {
+    const store = await import('../state/tradingStore');
+    const frame = controlFrames();
+    const a = await browse('SPY', '1m', frame);
+    const shown = () => a.chart.panesList.map((_, i) => a.chart.scaleVisible[i] ?? true);
+    expect(shown().every(Boolean)).toBe(true);
+    // The same chart, as the chart panel shows it, of `symbol`.
+    const { ChartView } = await import('./ChartView');
+    const show = (symbol: string) => {
+      act(() => store.setActiveSymbol(symbol));
+      act(() => a.root.render(createElement(Profiler, { id: 'chart', onRender: () => undefined }, createElement(ChartView, { symbol, timeframe: '1m' }))));
+    };
+    // A ticker the demo data does not have: no candles, and no price scale.
+    show('ZZZZ');
+    await vi.waitFor(() => expect(store.useTrading.getState().browse.error).toMatch(/no ZZZZ/), { timeout: 20_000 });
+    frame();
+    expect(lw.charts.at(-1)).toBe(a.chart);
+    expect(a.chart.series[0].points).toEqual([]);
+    expect(shown().length).toBeGreaterThan(0);
+    expect(shown().some(Boolean)).toBe(false);
+    // Back on SPY, they are shown again.
+    show('SPY');
+    await vi.waitFor(() => expect(a.chart.series[0].points.length).toBeGreaterThan(0), { timeout: 20_000 });
+    expect(shown().every(Boolean)).toBe(true);
+    act(() => a.root.unmount());
+  }, 30_000);
+
+  it('picks no bar with a press that only closes a menu, a popover or a dialog over the chart', async () => {
+    const store = await import('../state/tradingStore');
+    const frame = controlFrames();
+    const a = await browse('SPY', '1m', frame);
+    const ts = a.chart.ts;
+    const edge = Math.floor(ts.getVisibleLogicalRange()!.to);
+    const x = ts.logicalToCoordinate(edge - 20)!;
+    act(() => store.setSelectingBar(true));
+    // A toolbar menu is open (usePopover closes it on the window's pointerdown, after the chart's own).
+    const menu = document.createElement('div');
+    menu.className = 'popover';
+    document.body.appendChild(menu);
+    click(a.chart, x);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+    expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false, selectingBar: true });
+    // A finger's first tap does not put the line on a bar either: the next one would start there.
+    pointer(a.chart, 'pointermove', 0);
+    click(a.chart, x, 'touch');
+    expect(hint(a.host)).not.toMatch(/again/);
+    menu.remove();
+    // With nothing open, the same click starts the replay there.
+    click(a.chart, x);
+    await vi.waitFor(() => expect(store.useTrading.getState().session).not.toBeNull(), { timeout: 20_000 });
     act(() => a.root.unmount());
   }, 30_000);
 
@@ -1893,6 +2001,7 @@ describe('Bar Replay on the chart', () => {
     const a = await browse('SPY', '1m', frame);
     const ts = a.chart.ts;
     const n = a.chart.series[0].points.length;
+    toNewest(a.chart, n, frame);
     act(() => useDrawings.getState().clear());
     act(() => useDrawings.getState().setTool('hline'));
     act(() => store.setSelectingBar(true));

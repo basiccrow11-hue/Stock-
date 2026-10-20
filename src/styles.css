@@ -620,12 +620,13 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 .bar-cut-line { position: absolute; top: 0; width: 0; margin-left: -1px; border-left: 2px solid var(--accent); }
 .bar-cut-line.refused { border-left-color: var(--warn); }
 .bar-cut-hint { position: absolute; top: 34px; left: 50%; transform: translateX(-50%); z-index: 4; width: max-content; max-width: calc(100% - 24px); padding: 4px 10px; border-radius: 999px; background: var(--accent-2); color: var(--on-accent); font-size: 12px; text-align: center; pointer-events: none; }
-.bar-cut-hint.refused { background: var(--panel); color: var(--warn); border: 1px solid var(--warn); }
+.bar-cut-hint.refused, .bar-cut-hint.warned { background: var(--panel); color: var(--warn); border: 1px solid var(--warn); }
 /* A replay loading over the chart it starts from: the chart stays in sight, dimmed. */
 .chart-empty.chart-veil { background: color-mix(in srgb, var(--panel) 72%, transparent); }
-/* The chart with no session: notes over its top right (clear of the legend and the price axis), its
-   bars loading at the bottom, and why it cannot be shown in its middle. */
-.browse-notes { position: absolute; top: 8px; right: 72px; z-index: 6; width: min(440px, calc(100% - 96px)); display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; }
+/* The chart with no session: notes over its top right (under the legend's first row, which ChartPanel
+   measures into --clear-of-legend, and clear of the price axis), its bars loading at the bottom, and why
+   it cannot be shown in its middle. */
+.browse-notes { position: absolute; top: var(--clear-of-legend, 30px); right: 72px; z-index: 6; width: min(440px, calc(100% - 96px)); display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; }
 .browse-notes > * { pointer-events: auto; box-shadow: 0 6px 20px var(--shadow); }
 .browse-notes > .alert { width: 100%; align-items: flex-start; background: var(--panel); }
 .browse-tip { display: flex; align-items: center; gap: 6px; padding: 2px 3px 2px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); font-size: 12px; }
@@ -633,6 +634,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 .browse-unfinished:not(:has(.unfinished-list)) { display: none; }
 .browse-unfinished .unfinished-list { max-height: min(46vh, 320px); overflow: auto; padding: 10px 12px; padding-right: 36px; box-shadow: 0 6px 20px var(--shadow); }
 .browse-hide { position: absolute; top: 6px; right: 6px; }
+.browse-cap { max-width: 100%; padding: 3px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; }
 .browse-loading { position: absolute; bottom: 36px; left: 50%; transform: translateX(-50%); z-index: 6; padding: 3px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; pointer-events: none; }
 .browse-empty { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; padding: 16px; pointer-events: none; }
 .browse-empty .card { max-width: 440px; pointer-events: auto; box-shadow: 0 10px 30px var(--shadow); }
@@ -640,7 +642,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 @media (max-width: 820px), (max-width: 1180px) and (max-height: 640px), (max-height: 560px) {
   .browse-notes { position: static; order: -1; width: auto; align-items: stretch; gap: 0; }
   .browse-notes > * { box-shadow: none; margin: 8px 8px 0; }
-  .browse-notes > .browse-tip { align-self: flex-start; }
+  .browse-notes > .browse-tip, .browse-notes > .browse-cap { align-self: flex-start; }
 }
 
 /* Symbol search */

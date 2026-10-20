@@ -37,7 +37,7 @@ import { lastIndexAtOrBefore, roundToTick } from '../../core/util/math';
 import { aggregateBars, candleFor, mergeBars, ownCandles } from '../../core/data/aggregate';
 import { indicatorStream, type IndicatorStream } from '../../core/indicators/indicators';
 import type { ChartHistory } from '../../core/replay/ReplaySession';
-import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, withoutDates } from '../../core/time';
+import { REGULAR_OPEN, exchangeDate, exchangeOffsetSeconds, exchangeTimeToUnix, regularCloseMinute, withoutDates } from '../../core/time';
 import { describe as describeOrder, isOpen } from '../../core/broker/SimBroker';
 import { useSettings, type IndicatorConfig } from '../state/settingsStore';
 import { candleStarts, getBaseBars, getBaseTimeframe, getChartHistory, getSimEventsFor, onChartEvent, pickPrice, registerSnapshotProvider, useTrading, blindDayLabel } from '../state/tradingStore';
@@ -186,6 +186,8 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   /** How many of candlesRef's candles, at its start, were built from that history. */
   const historyCountRef = useRef(0);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  /** Whether the price scales are shown (syncScales). */
+  const scalesShownRef = useRef(true);
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null);
   const [geometryVersion, setGeometryVersion] = useState(0);
   /** Bumped when the main series is replaced (chart style change) so dependants re-attach. */
@@ -566,6 +568,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       indicatorsRef.current.push({ cfg, series, pane, bands, decimals: 2, maxAbs: 0, stream: spec ? indicatorStream(spec) : null });
     }
     for (const ind of indicatorsRef.current) if (ind.pane > 0) chart.panes()[ind.pane]?.setStretchFactor(heights.get(ind.cfg.id) ?? 0.35);
+    syncScales(true);
     // The price pane's dragged height only means something next to the panes it was dragged
     // against. If none of them survived, new oscillator panes start from the default layout.
     const kept = indicatorsRef.current.some((ind) => ind.pane > 0 && heights.has(ind.cfg.id));
@@ -673,7 +676,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
       panes,
       note,
       compact: priceHeightRef.current > 0 && rows * LEGEND_ROW > priceHeightRef.current * LEGEND_SHARE,
-      right: (chartRef.current?.priceScale('right', 0).width() ?? 0) + (indicatorsRef.current.length ? LABEL_TITLE_ROOM : 0) + 8,
+      right: priceAxisWidth() + (indicatorsRef.current.length ? LABEL_TITLE_ROOM : 0) + 8,
     };
   };
 
@@ -688,6 +691,35 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
   }
 
   // ---------------------------------------------------------------- price scale
+  /**
+   * The price scales show only while the chart has candles: a chart with none (one that could not be loaded,
+   * or is kept hidden) would go on showing the last symbol's prices on them. `force`: set them again, on
+   * panes just made.
+   */
+  /**
+   * The price pane's axis width. None while the scales are hidden (syncScales), nor until the library has
+   * laid the axis out again once shown (on its next frame): it has no axis to measure then, and says so by
+   * throwing.
+   */
+  function priceAxisWidth(): number {
+    const chart = chartRef.current;
+    if (!chart || !scalesShownRef.current) return 0;
+    try {
+      return chart.priceScale('right', 0).width();
+    } catch {
+      return 0;
+    }
+  }
+
+  function syncScales(force = false): void {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const shown = candlesRef.current.length > 0;
+    if (!force && shown === scalesShownRef.current) return;
+    scalesShownRef.current = shown;
+    chart.panes().forEach((_, i) => chart.priceScale('right', i).applyOptions({ visible: shown }));
+  }
+
   /**
    * Log or linear on the price pane. Oscillator panes always stay linear: applying a mode to pane 0
    * also changes the chart-wide default new panes copy, so the others are pinned explicitly.
@@ -994,6 +1026,25 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     return j >= 0 && j < next.length - 1 ? j : undefined;
   }
 
+  /**
+   * Where the right edge of the chart with no session goes when it opens with no view to keep, as an index in
+   * `candles`: on an intraday chart, the last candle of the regular session of the day before the data's last
+   * one (that day's last candle when it has none). The candles in view are then that session's (and on a
+   * coarser chart the days before it), and a bar replay cut at any of them has regular hours right after it
+   * for a market order to fill in, and the data's last day to play on into; the newest candles are often
+   * after-hours ones, after which it has neither. Null on a daily chart, which opens on its newest candle, and
+   * when the data has only one day.
+   */
+  function browseOpening(candles: Bar[]): number | null {
+    if (timeframe === '1D' || !candles.length) return null;
+    const lastDay = exchangeDate(candles[candles.length - 1].time);
+    const k = lastIndexAtOrBefore(candles, exchangeTimeToUnix(lastDay, 0) - 1, (c) => c.time);
+    if (k < 0) return null;
+    const day = exchangeDate(candles[k].time);
+    const close = lastIndexAtOrBefore(candles, exchangeTimeToUnix(day, regularCloseMinute(day)) - 1, (c) => c.time);
+    return close >= 0 && exchangeDate(candles[close].time) === day ? close : k;
+  }
+
   /** Index in `candles`, this chart's, of the candle holding real time `t`; -1 when it is before the first. */
   function candleAt(candles: Bar[], t: number): number {
     return lastIndexAtOrBefore(candles, candleFor(t, timeframe, baseTfRef.current).start, (c) => c.time);
@@ -1024,8 +1075,10 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     // Where the view's right edge goes (null: on the newest candle) when it is put in place: on another chart
     // (rightEdgeOn), and on this one once the history it waited for is in (pendingEdgeOn). Its window reaches
     // back to a margin before the view, which keeps its width in candles. The first chart drawn opens on the
-    // newest candle by itself.
-    const edge = !drawn ? undefined : same ? pendingEdgeOn(merged.candles, chart, history) : rightEdgeOn(merged.candles, drawn, chart, range, history);
+    // newest candle by itself, but the chart with no session with no view to keep (the first chart in the tab,
+    // another symbol or data source, back from a session) on the day before its last (browseOpening).
+    let edge = !drawn ? undefined : same ? pendingEdgeOn(merged.candles, chart, history) : rightEdgeOn(merged.candles, drawn, chart, range, history);
+    if ((edge === undefined || edge === null) && !chart.session && (old.length === 0 || (!!drawn && drawn.session !== chart.session))) edge = browseOpening(merged.candles) ?? edge;
     let onScreen = 0;
     let oldest = Infinity;
     if (range && edge !== undefined) onScreen = merged.candles.length - (edge ?? merged.candles.length - 1) + Math.ceil(range.to - range.from);
@@ -1047,6 +1100,7 @@ export function ChartView({ symbol, timeframe }: ChartViewProps) {
     hoverRef.current = null;
     computeIndicators(0);
     setWindowData();
+    syncScales();
     const api = chartRef.current;
     if (edge !== undefined && api) {
       // A position counted from the newest candle, which the library applies on its next frame. After a cut,

@@ -215,6 +215,15 @@ export async function readSession(id: string): Promise<SavedSession | null> {
   return { ...s, replay: { providerId: s.replay.providerId, state: { ...s.replay.state, config, checkpoints } } };
 }
 
+/**
+ * The data source (a HISTORICAL_PROVIDERS id) the replay saved under `id` loads its bars from, or null for
+ * the simulated market or a session that cannot be read. Reads only its record, not its checkpoints.
+ */
+export async function savedSource(id: string): Promise<string | null> {
+  const s = await idb.get<StoredSession>('kv', RECORD + id);
+  return s && s.summary?.id === id && typeof s.replay?.providerId === 'string' ? s.replay.providerId : null;
+}
+
 /** Forgets a session: its record, its summary, its checkpoints and where its clock had got to. */
 export async function deleteSession(id: string): Promise<void> {
   try {
@@ -256,6 +265,19 @@ export function notePosition(id: string, p: SessionPosition): void {
   } catch {
     /* storage blocked: carrying on starts from the last whole save */
   }
+}
+
+/**
+ * Calls `fn` when another tab notes where its session's clock has got to, or forgets a session (in
+ * localStorage, which tells the other tabs): it started, played, saved or ended one. Returns what stops
+ * listening.
+ */
+export function onPositionsNotedElsewhere(fn: () => void): () => void {
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === null || e.key.startsWith(POSITION)) fn();
+  };
+  window.addEventListener('storage', onStorage);
+  return () => window.removeEventListener('storage', onStorage);
 }
 
 export function readPosition(id: string): SessionPosition | null {

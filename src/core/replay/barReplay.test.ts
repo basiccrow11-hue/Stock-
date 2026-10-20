@@ -6,7 +6,7 @@ import { DemoDataProvider } from '../data/demoProvider';
 import type { HistoricalDataProvider } from '../data/provider';
 import { ReplayEngine, barEnds } from './ReplayEngine';
 import { DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays } from './ReplaySession';
-import { PLAY_ON_DAYS, candleSpeed, cutTime, hhmm, playOnEndDate, randomDay, sessionEndMinute } from './barReplay';
+import { PLAY_ON_DAYS, VENDOR_RANDOM_DAYS, candleSpeed, cutTime, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from './barReplay';
 
 const at = (date: string, time: string) => exchangeTimeToUnix(date, parseHHMM(time));
 const bar = (time: number): Bar => ({ time, open: 10, high: 11, low: 9, close: 10.5, volume: 100 });
@@ -98,6 +98,18 @@ describe('how long a bar replay plays on', () => {
     expect(playOnEndDate(D, '1h', '2030-01-02', [D, day2, nextTradingDay(day3)])).toBe(day2);
   });
 
+  it('on a vendor, no further than one page of 1-minute bars reaches with the days loaded before it', () => {
+    // 52 days of 04:00-20:00 minutes fit in Polygon's 50,000: 15 before the start, its day, and 36 on.
+    expect(vendorPlayOnDays(loadedDays('1m', DEFAULT_LOOKBACK['1D']))).toBe(36);
+    expect((loadedDays('1m', 200) + 1 + vendorPlayOnDays(loadedDays('1m', 200))) * 16 * 60).toBeLessThanOrEqual(50_000);
+    expect(vendorPlayOnDays(60)).toBe(1);
+    let d = D;
+    for (let i = 0; i < 36; i++) d = nextTradingDay(d);
+    expect(playOnEndDate(D, '1D', '2030-01-02', null, 36)).toBe(d);
+    // Fewer days than that are not stretched.
+    expect(playOnEndDate(D, '1m', '2030-01-02', null, 36)).toBe(playOnEndDate(D, '1m', '2030-01-02'));
+  });
+
   it('to the end of the data’s sessions on its last day, read from the bars around it', () => {
     expect(sessionEndMinute(extended, barEnds(extended, '1m'), D)).toBe(20 * 60);
     expect(sessionEndMinute(regular, barEnds(regular, '1m'), D)).toBe(16 * 60);
@@ -129,6 +141,38 @@ describe('a random day to replay', () => {
     expect(randomDay('2024-03-28', '2024-04-01', null, () => 0.99)).toBe('2024-04-01');
     expect(randomDay('2024-03-11', '2024-03-15', ['2024-03-08', '2024-03-13', '2024-03-20'], () => 0.5)).toBe('2024-03-13');
     expect(randomDay('2024-03-11', '2024-03-15', ['2024-03-20'])).toBeNull();
+  });
+
+  it('is not a day tried already', () => {
+    const tried = new Set(['2024-03-11', '2024-03-12']);
+    expect(randomDay('2024-03-11', '2024-03-15', null, () => 0, tried)).toBe('2024-03-13');
+    expect(randomDay('2024-03-11', '2024-03-12', null, () => 0, tried)).toBeNull();
+    expect(randomDay('2024-03-11', '2024-03-15', ['2024-03-11', '2024-03-14'], () => 0, tried)).toBe('2024-03-14');
+  });
+
+  it('on a vendor, whose data has no known start, is one of the last two years or so of trading days', () => {
+    const from = vendorRandomFrom('2026-10-19');
+    let d = from;
+    let n = 0;
+    while (d < '2026-10-19') {
+      d = nextTradingDay(d);
+      n++;
+    }
+    expect(n).toBe(VENDOR_RANDOM_DAYS);
+    expect(from > '2024-10-18').toBe(true);
+  });
+});
+
+describe('whether only after-hours trading follows a bar replay’s start', () => {
+  it('when it starts at or after the regular close of its last day', () => {
+    expect(onlyAfterHoursFollow(at(D, '16:00'), D)).toBe(true);
+    expect(onlyAfterHoursFollow(at(D, '19:30'), D)).toBe(true);
+    expect(onlyAfterHoursFollow(at(D, '15:59'), D)).toBe(false);
+    // A day it plays on into has a regular session.
+    expect(onlyAfterHoursFollow(at(D, '19:30'), nextTradingDay(D))).toBe(false);
+    // An early close: 13:00 the day after Thanksgiving.
+    expect(onlyAfterHoursFollow(at('2024-11-29', '13:00'), '2024-11-29')).toBe(true);
+    expect(onlyAfterHoursFollow(at('2024-11-29', '12:59'), '2024-11-29')).toBe(false);
   });
 });
 

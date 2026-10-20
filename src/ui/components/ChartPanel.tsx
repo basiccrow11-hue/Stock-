@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type RefObject } from 'react';
 import { TIMEFRAMES } from '../../core/types';
 import { ChartView } from '../chart/ChartView';
 import { TOOL_LABELS, useDrawings, type DrawingTool } from '../chart/drawings';
-import { dismissError, retryBrowse, setBrowseSource, setSelectingBar, setTimeframe, useTrading } from '../state/tradingStore';
-import { getProvider } from '../state/dataRegistry';
+import { browseHiddenReason, browseHoldOn, browseSymbol, dismissError, retryBrowse, setSelectingBar, setTimeframe, useTrading } from '../state/tradingStore';
+import { csvProvider, getProvider } from '../state/dataRegistry';
+import { DEMO_TICKERS } from '../../core/data/demoProvider';
+import { exchangeDate, formatExchangeTime } from '../../core/time';
 import { IndicatorMenu } from './IndicatorMenu';
 import { ChartSettingsMenu } from './Appearance';
 import { ReplayControls } from './ReplayControls';
@@ -132,7 +134,7 @@ export function ChartPanel({
             <EmptyState title="Picking up where you left off…">If the session this tab was running can be carried on, it comes back as it was, paused.</EmptyState>
           </div>
         ) : (
-          !session && <BrowseNotes selecting={selecting} />
+          !session && <BrowseNotes selecting={selecting} onOpenSettingsAt={onOpenSettingsAt} />
         )}
       </div>
       <ReplayControls active={active} />
@@ -143,15 +145,26 @@ export function ChartPanel({
 
 /**
  * What the chart with no session says over its top: why the last start failed, the sessions left
- * unfinished to resume or discard, and, until dismissed, how to start a replay; why its bars cannot be
- * shown, in its middle; and that they are loading. Picking a bar, only the error stays.
+ * unfinished to resume or discard, where its bars stop when a saved session on its symbol has not got
+ * further (browseHoldOn), and, until dismissed, how to start a replay; why its bars cannot be shown, in its
+ * middle; and that they are loading. Picking a bar, none of the notes over its top: the hint the chart
+ * shows then (BarCutLayer) is in their place.
  */
-function BrowseNotes({ selecting }: { selecting: boolean }) {
+function BrowseNotes({ selecting, onOpenSettingsAt }: { selecting: boolean; onOpenSettingsAt?: (card: SettingsCard) => void }) {
   const error = useTrading((s) => s.error);
   const browse = useTrading((s) => s.browse);
   const symbol = useTrading((s) => s.activeSymbol);
+  // Why a blind replay of the symbol keeps its chart from being drawn (its dates would show), or null.
+  const hidden = useTrading(() => browseHiddenReason());
+  // Where the chart stops for an unfinished (or elsewhere running) replay of the symbol, as `time|elsewhere`.
+  const capKey = useTrading((s) => {
+    const h = browseHoldOn(getProvider(s.browse.providerId).id, s.activeSymbol, s.browse.holds);
+    return h && !h.blind ? `${h.until}|${h.elsewhere ? 1 : 0}` : null;
+  });
   const [tip, setTip] = useState(() => !tipDismissed());
   const [unfinishedHidden, setUnfinishedHidden] = useState(false);
+  const notesRef = useRef<HTMLDivElement>(null);
+  useClearOfLegend(notesRef);
   // Pressing Replay is what the tip teaches: once done, it is not needed again.
   useEffect(() => {
     if (!selecting || !tip) return;
@@ -159,10 +172,19 @@ function BrowseNotes({ selecting }: { selecting: boolean }) {
     setTip(false);
   }, [selecting, tip]);
   const provider = getProvider(browse.providerId);
+  const sym = symbol.toUpperCase();
+  const cap = capKey ? { until: Number(capKey.split('|')[0]), elsewhere: capKey.endsWith('|1') } : null;
+  // The cards of Data & Settings that bring in what the chart lacks: a key for Polygon or Alpaca, imported bars.
+  const vendorKey = provider.id === 'polygon' || provider.id === 'alpaca' ? (provider.unavailableReason() ? provider.id : null) : null;
+  const needsImport = provider === csvProvider && (!!provider.unavailableReason() || !csvProvider.list().some((d) => d.symbol.toUpperCase() === sym));
+  const searchSymbols = (e: MouseEvent<HTMLButtonElement>) => {
+    e.currentTarget.focus();
+    openSymbolSearch();
+  };
   return (
     <>
-      <div className="browse-notes">
-        {error && (
+      <div className="browse-notes" ref={notesRef}>
+        {error && !selecting && (
           <div className="alert error row" role="alert">
             <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
             <button className="btn sm ghost" onClick={dismissError} aria-label="Dismiss this message" title="Dismiss">
@@ -178,7 +200,12 @@ function BrowseNotes({ selecting }: { selecting: boolean }) {
             </button>
           </div>
         )}
-        {!selecting && tip && !browse.error && (
+        {!selecting && cap && !hidden && (
+          <div className="browse-cap" role="status">
+            Bars shown up to {exchangeDate(cap.until)} {formatExchangeTime(cap.until)} ET, where {cap.elsewhere ? `the ${sym} replay running in another tab was last saved` : `your unfinished ${sym} replay is`}.
+          </div>
+        )}
+        {!selecting && tip && !browse.error && !hidden && (
           <div className="browse-tip">
             <span>
               Press <b>Replay</b>, then click the bar to start from.
@@ -197,38 +224,113 @@ function BrowseNotes({ selecting }: { selecting: boolean }) {
           </div>
         )}
       </div>
-      {browse.loading && (
+      {browse.loading && !hidden && (
         <div className="browse-loading" role="status">
           Loading {symbol}…
         </div>
       )}
-      {browse.error && !browse.loading && (
-        <div className="browse-empty" role="alert">
+      {hidden ? (
+        // Hiding the unfinished sessions' card leaves the chart hidden: it is the replay that hides it.
+        <div className="browse-empty" role="status">
           <div className="card stack">
-            <strong>
-              No chart of {symbol} from {provider.name}
-            </strong>
-            <span>{browse.error}</span>
+            <strong>{sym} is not charted here for now</strong>
+            <span>{hidden}</span>
             <div className="row wrap">
-              <button className="btn sm" onClick={retryBrowse}>
-                Try again
-              </button>
-              {/* A mistyped ticker is the usual reason. */}
-              <button className="btn sm" onClick={(e) => {
-                e.currentTarget.focus();
-                openSymbolSearch();
-              }}>
+              <button className="btn sm" onClick={searchSymbols}>
                 Search symbols
               </button>
-              {provider.id !== 'demo' && (
-                <button className="btn sm" onClick={() => setBrowseSource('demo')}>
-                  Use the demo data
+              {unfinishedHidden && (
+                <button className="btn sm" onClick={() => setUnfinishedHidden(false)}>
+                  Show unfinished sessions
                 </button>
               )}
             </div>
           </div>
         </div>
+      ) : (
+        browse.error &&
+        !browse.loading && (
+          <div className="browse-empty" role="alert">
+            <div className="card stack">
+              <strong>
+                No chart of {symbol} from {provider.name}
+              </strong>
+              <span>{browse.error}</span>
+              <div className="row wrap">
+                <button className="btn sm" onClick={retryBrowse}>
+                  Try again
+                </button>
+                {/* A mistyped ticker is the usual reason. */}
+                <button className="btn sm" onClick={searchSymbols}>
+                  Search symbols
+                </button>
+                {vendorKey && onOpenSettingsAt && (
+                  <button className="btn sm" onClick={() => onOpenSettingsAt('api-keys')}>
+                    Add {vendorKey === 'alpaca' ? 'an Alpaca' : 'a Polygon'} API key
+                  </button>
+                )}
+                {needsImport && onOpenSettingsAt && (
+                  <button className="btn sm" onClick={() => onOpenSettingsAt('csv-import')}>
+                    Import a CSV file
+                  </button>
+                )}
+                {provider.id !== 'demo' && (
+                  <button
+                    className="btn sm"
+                    onClick={(e) => {
+                      // The demo's own copy of the ticker when it has one, else SPY: one change, so no load
+                      // starts for a ticker the demo lacks. The card goes; focus goes on to the ticker button.
+                      const symBtn = e.currentTarget.closest('.area-chart')?.querySelector<HTMLElement>('.chart-toolbar .sym-btn');
+                      browseSymbol('demo', DEMO_TICKERS.some((t) => t.symbol === sym) ? sym : 'SPY');
+                      symBtn?.focus({ preventScroll: true });
+                    }}
+                  >
+                    Use the demo data
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )
       )}
     </>
   );
+}
+
+/**
+ * Keeps the notes over the chart clear of the legend's first row (the candle's prices), however many
+ * lines that wraps to on a narrow chart: their top (--clear-of-legend) follows its bottom. In the one
+ * scrolling column they are in the flow above the chart instead (styles.css), and this changes nothing.
+ */
+function useClearOfLegend(ref: RefObject<HTMLDivElement | null>): void {
+  useEffect(() => {
+    const notes = ref.current;
+    const host = notes?.closest<HTMLElement>('.chart-host');
+    const wrap = host?.querySelector<HTMLElement>('.chart-wrap');
+    if (!notes || !host || !wrap || typeof ResizeObserver === 'undefined') return;
+    let row: HTMLElement | null = null;
+    const place = () => {
+      const below = row?.isConnected ? row.getBoundingClientRect().bottom - host.getBoundingClientRect().top + 8 : 8;
+      notes.style.setProperty('--clear-of-legend', `${Math.max(8, Math.ceil(below))}px`);
+    };
+    const ro = new ResizeObserver(place);
+    // The legend comes and goes with the chart's bars: the row watched is the one there now.
+    const watch = () => {
+      const next = wrap.querySelector<HTMLElement>(':scope > .chart-legend:not(.pane-legend) > .legend-row');
+      if (next !== row) {
+        if (row) ro.unobserve(row);
+        row = next;
+        if (row) ro.observe(row);
+      }
+      place();
+    };
+    const mo = new MutationObserver(watch);
+    mo.observe(wrap, { childList: true });
+    ro.observe(host);
+    watch();
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [ref]);
 }
