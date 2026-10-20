@@ -791,6 +791,49 @@ describe('unfinished sessions and other tabs', () => {
     await act(async () => void (await b.store.endSession()));
     panel.unmount();
   });
+
+  it('takes focus back to the card once a session resumed from the keyboard fails to load, never leaving it on the page', async () => {
+    const leave = async (start: (store: Awaited<ReturnType<typeof page>>['store']) => Promise<boolean>) => {
+      const a = await page();
+      expect(await start(a.store)).toBe(true);
+      await settle();
+      a.store.pause();
+      await settle();
+      rememberNothing();
+      return a.store.useTrading.getState().session!.id;
+    };
+    const spyId = await leave((store) => store.startReplay(replay));
+    await leave((store) => store.startReplay({ ...replay, symbol: 'QQQ' }));
+    const b = await page();
+    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(function (this: Element) {
+      return (this.closest('[hidden]') ? [] : [new DOMRect(0, 0, 10, 10)]) as unknown as DOMRectList;
+    });
+    const { ChartPanel } = await import('../components/ChartPanel');
+    const panel = render(createElement(ChartPanel, { onNewSession: () => undefined }));
+    const resume = (sym: string) => [...panel.el.querySelectorAll<HTMLElement>('.unfinished-list li')].find((li) => li.querySelector('strong')!.textContent!.startsWith(sym))?.querySelector<HTMLButtonElement>('.btn.primary');
+    const listed = () => [...panel.el.querySelectorAll('.unfinished-list li strong')].map((e) => e.textContent);
+    const press = async (sym: string) => {
+      await vi.waitFor(() => expect(resume(sym)).toBeTruthy());
+      act(() => resume(sym)!.focus());
+      await act(async () => resume(sym)!.click());
+    };
+    // Its saved record cannot be read: it is listed again, and its Resume has focus again.
+    const record = db.stores.get('kv')!.get(`session:${spyId}`);
+    db.stores.get('kv')!.delete(`session:${spyId}`);
+    await press('SPY');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().error).toBe('This saved session could not be read.'));
+    await vi.waitFor(() => expect(document.activeElement).toBe(resume('SPY')));
+    expect(b.store.useTrading.getState().session).toBeNull();
+    // Another tab carries it on as Resume is pressed here: no longer offered, so the next row's Resume.
+    db.stores.get('kv')!.set(`session:${spyId}`, record);
+    await vi.waitFor(() => expect(resume('SPY')).toBeTruthy());
+    locks.elsewhere = new Set([`stock-replay-session:${spyId}`]);
+    await press('SPY');
+    await vi.waitFor(() => expect(b.store.useTrading.getState().error).toBe('This session is open in another tab: carry it on there.'));
+    await vi.waitFor(() => expect(listed()).toEqual(['QQQ · 2024-03-12']));
+    await vi.waitFor(() => expect(document.activeElement).toBe(resume('QQQ')));
+    panel.unmount();
+  });
 });
 
 describe('the Trade screen as a reload carries its session on', () => {

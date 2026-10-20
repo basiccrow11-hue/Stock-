@@ -26,8 +26,15 @@ function where(s: SessionSummary): string {
   return `${m.blind ? blindDayLabel(s.now, m.startDate) : exchangeDate(s.now)} ${time}${s.finished ? ' (end reached)' : ''}`;
 }
 
+/**
+ * A Resume pressed with focus on it whose session then failed to load: the card goes as the load starts (the
+ * chart shows its loading veil), Resume and its focus with it, so the card shown once the load has failed takes
+ * focus back to that row's Resume (listed again), or to the one now in its place, once its list is in.
+ */
+let refocusOnReturn: { id: string; index: number } | null = null;
+
 /** `onGone`: the session may no longer be listed; `focused`, whether focus was in its row (on its buttons). */
-function Row({ s, onGone }: { s: SessionSummary; onGone: (focused: boolean) => void }) {
+function Row({ s, index, onGone }: { s: SessionSummary; index: number; onGone: (focused: boolean) => void }) {
   const [busy, setBusy] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
   const gone = () => onGone(!!rowRef.current?.contains(document.activeElement));
@@ -41,10 +48,12 @@ function Row({ s, onGone }: { s: SessionSummary; onGone: (focused: boolean) => v
   const resume = () => {
     const active = document.activeElement;
     const focused = !active || active === document.body || !!rowRef.current?.contains(active);
+    refocusOnReturn = null;
     if (focused) focusPlayOnceIn(s.id);
     void resumeSession(s.id).then((ok) => {
       if (ok) return;
       if (focused) focusPlayOnceIn(null);
+      if (focused && !rowRef.current) refocusOnReturn = { id: s.id, index };
       gone();
     });
   };
@@ -94,11 +103,18 @@ export function UnfinishedSessions({ onList }: { onList?: (count: number) => voi
   const [list, setList] = useState<SessionSummary[]>([]);
   // Looks overlap (a change in another tab as this one comes into view): only the newest one's answer is used.
   const asked = useRef(0);
+  // Whether a list has come in yet: before that, the empty one it starts with is not the sessions there are.
+  const loaded = useRef(false);
   const refresh = useCallback(() => {
     const seq = ++asked.current;
+    const got = (l: SessionSummary[]) => {
+      if (seq !== asked.current) return;
+      loaded.current = true;
+      setList(l);
+    };
     unfinishedSessions()
-      .then((l) => seq === asked.current && setList(l))
-      .catch(() => seq === asked.current && setList([]));
+      .then(got)
+      .catch(() => got([]));
   }, []);
   // Looked at again once a reload has carried its session on, or found that it cannot (then it is listed),
   // and as what keeps a chart from being drawn changes: a session another tab started is listed once that
@@ -121,20 +137,23 @@ export function UnfinishedSessions({ onList }: { onList?: (count: number) => voi
   useEffect(() => onList?.(list.length), [list.length, onList]);
   // A row discarded (or whose session failed to resume) while focus was on its buttons takes them with it:
   // once the list without it is in, focus goes on to the Resume of the row now in its place (or the one
-  // before it, at the end), else, with none left, the toolbar's Replay button, never to the page. Only then:
-  // the list looked at again in the background (coming back to the tab) moves nothing.
+  // before it, at the end), else, with none left, the toolbar's Replay button, never to the page. A session
+  // that failed to resume after this card went with the load (refocusOnReturn) and is listed again gets its
+  // own Resume back. Only then: the list looked at again in the background (coming back to the tab) moves nothing.
   const refocus = useRef<{ id: string; index: number } | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   useLayoutEffect(() => {
-    const was = refocus.current;
+    if (!loaded.current) return;
+    const was = refocus.current ?? refocusOnReturn;
     if (!was) return;
     refocus.current = null;
-    // Still listed (another tab runs it, so it was not discarded): its button still has focus.
-    if (list.some((s) => s.id === was.id)) return;
-    // Focus moved on meanwhile (a click elsewhere) is left where it is.
+    refocusOnReturn = null;
+    // Focus moved on meanwhile (a click elsewhere) is left where it is, as it is on the button of a row
+    // still listed in this card (another tab runs it, so it was not discarded).
     if (document.activeElement && document.activeElement !== document.body) return;
     const resumes = [...(listRef.current?.querySelectorAll<HTMLElement>(':scope > li .btn.primary') ?? [])];
-    const target = resumes[Math.min(was.index, resumes.length - 1)] ?? [...document.querySelectorAll<HTMLElement>('.replay-btn')].find(isShown);
+    const at = list.findIndex((s) => s.id === was.id);
+    const target = resumes[at >= 0 ? at : Math.min(was.index, resumes.length - 1)] ?? [...document.querySelectorAll<HTMLElement>('.replay-btn')].find(isShown);
     if (target) target.focus({ preventScroll: true });
     else focusHome();
   }, [list]);
@@ -148,6 +167,7 @@ export function UnfinishedSessions({ onList }: { onList?: (count: number) => voi
           <Row
             key={s.id}
             s={s}
+            index={index}
             onGone={(focused) => {
               if (focused) refocus.current = { id: s.id, index };
               refresh();
