@@ -4,7 +4,7 @@
  * at a random day's open, the full setup form, or the simulated market.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { barReplaySource, selectBarBlocked, sessionEndNotice, setSelectingBar, startRandomBar, startReplayAt, useTrading } from '../state/tradingStore';
+import { barReplaySource, browseHiddenReason, selectBarBlocked, sessionEndNotice, setSelectingBar, startRandomBar, startReplayAt, useTrading } from '../state/tradingStore';
 import { getProvider, onCsvDatasetsChanged } from '../state/dataRegistry';
 import { useSettings } from '../state/settingsStore';
 import { useLiveBlind } from '../state/liveBlind';
@@ -39,11 +39,15 @@ export function toggleSelectBar(): void {
 
 export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | 'sim') => void }) {
   const selecting = useTrading((s) => s.selectingBar);
-  // What selectBarBlocked reads: the session, and the browsing chart's bars arriving.
+  // What selectBarBlocked and browseHiddenReason read: the session, the browsing chart's bars arriving and the
+  // saved sessions it stops at (browse.holds), its symbol and timeframe.
   useTrading((s) => s.session);
   useTrading((s) => s.browse);
   useTrading((s) => s.activeSymbol);
+  useTrading((s) => s.timeframe);
   const blocked = selectBarBlocked();
+  // A blind replay of the symbol keeps its chart hidden: a replay from a date, random or not, would show its days with their dates.
+  const hidden = browseHiddenReason();
   const { open, toggle, close, boxRef, triggerRef, popRef } = usePopover();
   const [panel, setPanel] = useState<'menu' | 'date'>('menu');
   const replayRef = useRef<HTMLButtonElement>(null);
@@ -116,14 +120,14 @@ export function ReplayMenu({ onNewSession }: { onNewSession: (mode: 'replay' | '
             },
             { disabled: !!blocked, title: blocked ?? 'Click a bar on the chart to start the replay there' },
           )}
-          {item('Select date…', () => setPanel('date'), { title: 'Start the replay at a date and time' })}
+          {item('Select date…', () => setPanel('date'), { disabled: !!hidden, title: hidden ?? 'Start the replay at a date and time' })}
           {item(
             'Random bar',
             () => {
               close();
               if (startConfirmed()) void startRandomBar();
             },
-            { title: 'Start at the open of a day picked at random' },
+            { disabled: !!hidden, title: hidden ?? 'Start at the open of a day picked at random' },
           )}
           {item('Advanced replay setup…', () => {
             close(false);

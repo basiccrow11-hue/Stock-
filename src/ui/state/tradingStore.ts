@@ -9,9 +9,9 @@ import { create } from 'zustand';
 import { bucketFor, candleTimeframe, ownCandles } from '../../core/data/aggregate';
 import { lastIndexAtOrBefore } from '../../core/util/math';
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type DataSourceKind, type EquityPoint, type Fill, type Order, type OrderRequest, type Position, type RoundTrip, type Timeframe, type UnixSeconds } from '../../core/types';
-import { BASE_LOOKBACK_LIMIT, DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
+import { BASE_LOOKBACK_LIMIT, DEFAULT_LOOKBACK, HISTORY_DAYS, ReplaySession, historyTimeframe, lastDataDay, loadedDays, type ChartHistory, type ReplaySetup } from '../../core/replay/ReplaySession';
 import { barEndTime, barEnds } from '../../core/replay/ReplayEngine';
-import { HOURS_DAYS, candleSpeed, cutTime, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from '../../core/replay/barReplay';
+import { HOURS_DAYS, PLAY_ON_DAYS, candleSpeed, cutTime, daysReaching, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from '../../core/replay/barReplay';
 import { DataProviderError, type HistoricalDataProvider } from '../../core/data/provider';
 import { DEMO_FIRST_DATE } from '../../core/data/demoProvider';
 import { SimBroker, describe as describeOrder, type BrokerEvent, type SubmitResult, type TradeRisk } from '../../core/broker/SimBroker';
@@ -106,6 +106,8 @@ export interface BrowseHold {
    * needed, never less.
    */
   until: UnixSeconds;
+  /** Where it ends (its end time), when known: what Random bar keeps clear of, with its clock (startRandomBar). */
+  end?: UnixSeconds;
   blind: boolean;
   /** Whether another tab runs it (else it is left unfinished, to resume). */
   elsewhere: boolean;
@@ -347,14 +349,44 @@ const BROWSE_DAYS = BASE_LOOKBACK_LIMIT;
 
 /**
  * What the chart with no session shows: the data source and the symbol (and, for imported data, which
- * version of it), with BROWSE_DAYS of their bars.
+ * version of it), with BROWSE_DAYS of their bars, up to the end of the data or of the day it ends on for a
+ * saved session on it (browseEndDay).
  */
-function browseTarget(): { key: string; prefix: string; provider: HistoricalDataProvider; symbol: string; days: number } {
+function browseTarget(): { key: string; prefix: string; provider: HistoricalDataProvider; symbol: string; days: number; endDay: string | null } {
   const s = useTrading.getState();
   const provider = getProvider(s.browse.providerId);
   const symbol = s.activeSymbol.toUpperCase();
   const prefix = `${provider.id}|${symbol}|`;
-  return { key: `${prefix}${provider === csvProvider ? browseEng.csvVersion : ''}`, prefix, provider, symbol, days: BROWSE_DAYS };
+  const endDay = browseEndDay(provider.id, symbol);
+  return { key: `${prefix}${provider === csvProvider ? browseEng.csvVersion : ''}|${endDay ?? ''}`, prefix, provider, symbol, days: BROWSE_DAYS, endDay };
+}
+
+/**
+ * The day the chart with no session of `symbol` from `providerId` ends on when a saved session on it that is
+ * not blind (browseHoldOn) is at a day before the last of the data: that session's day, so its BROWSE_DAYS of
+ * bars, and its history, are the days before the session's clock, every timeframe has bars to show up to it,
+ * and a bar can be picked there. Null otherwise: the chart ends with the data, and stops at the clock of a
+ * session on its last day inside it. Only the day counts, not the clock, so a session played on in another
+ * tab moves the chart to another day once a day at most (on Polygon or Alpaca every new day is a request).
+ * The data's last day is the one last noted (noteDataDays); before it is known, a session's day counts.
+ */
+function browseEndDay(providerId: string, symbol: string): string | null {
+  const hold = browseHoldOn(providerId, symbol);
+  if (!hold || hold.blind) return null;
+  const day = exchangeDate(hold.until);
+  const last = dataDays.get(`${providerId}|${symbol}`)?.last;
+  return last !== undefined && day >= last ? null : day;
+}
+
+/**
+ * Whether the chart with no session shows `symbol` ending on the day of a saved session on it, before the
+ * end of its data (browseEndDay): it opens on its newest candle then (ChartView), not on the day before the
+ * data's last as it otherwise does.
+ */
+export function browseEndsEarly(symbol: string): boolean {
+  const p = shownPreview(symbol);
+  const last = p ? dataDays.get(`${browseTarget().provider.id}|${p.symbol}`)?.last : undefined;
+  return !!p && last !== undefined && p.setup.date < last;
 }
 
 /** Whether nothing runs, so the chart shows the browsing chart. A reload carrying its session on shows nothing meanwhile. */
@@ -442,20 +474,31 @@ async function loadBrowse(t: ReturnType<typeof browseTarget>): Promise<void> {
     if (!current()) return;
     const reason = t.provider.unavailableReason() ?? (await notListed(t.provider, t.symbol));
     if (reason) throw new Error(reason);
-    // The saved sessions it must stop at are known before any bar is loaded (a blind one's symbol is not
-    // loaded at all: browsePreview), and looked at again on every load, alongside the bars, as they may
-    // have changed in another tab.
-    if (!holdsKnown) await refreshHolds();
+    // The saved sessions it must stop at, and the data's last day, are known before any bar is loaded: they
+    // say which days it shows (browseTarget), and a blind one's symbol is not loaded at all (browsePreview).
+    // They are looked at again on every load, as they may have changed in another tab, and a load is started
+    // afresh for the days they say (no bar is asked of the data source before).
+    const [last] = await Promise.all([lastDataDay(t.provider, t.symbol), refreshHolds()]);
     if (!current()) return;
+    // The data's real last day, whatever day the chart ends on: what a cut plays on to reads it (cutWarning).
+    noteDataDays(t.provider, t.symbol, last);
+    const now = browseTarget();
+    if (now.key !== t.key) {
+      // The bars already shown are those wanted after all (a saved session that moved and came back): kept.
+      if (now.key !== browseEng.key || !browseEng.preview) return void loadBrowse(now);
+      browseEng.loading = null;
+      setBrowse({ loading: false });
+      if (browsing()) emitChart({ type: 'reset' });
+      return;
+    }
     if (browseHoldOn(t.provider.id, t.symbol)?.blind) {
       browseEng.loading = null;
       setBrowse({ loading: false });
       if (browsing()) emitChart({ type: 'reset' });
       return;
     }
-    const [preview] = await Promise.all([ReplaySession.preview(t.provider, { symbol: t.symbol, lookbackDays: t.days }, mine.abort.signal), refreshHolds()]);
+    const preview = await ReplaySession.preview(t.provider, { symbol: t.symbol, lookbackDays: t.days, endDay: t.endDay ?? undefined }, mine.abort.signal);
     if (!current()) return;
-    noteDataDays(t.provider, t.symbol, preview.setup.date);
     browseEng.loading = null;
     browseEng.preview = preview;
     browseEng.key = t.key;
@@ -510,13 +553,18 @@ const sessionSources = new Map<string, string | null>();
  * session, nor one it has ended.
  */
 export function browseHoldOn(providerId: string, symbol: string, holds = useTrading.getState().browse.holds): { blind: boolean; until: UnixSeconds; elsewhere: boolean } | null {
-  const own = useTrading.getState().session?.id;
-  const sym = symbol.toUpperCase();
-  const on = holds.filter((h) => h.providerId === providerId && h.symbols.includes(sym) && h.id !== own && !endedHere.has(h.id));
+  const on = holdsOn(providerId, symbol, holds);
   if (!on.length) return null;
   const blind = on.filter((h) => h.blind);
   const shown = blind.length ? blind : on;
   return { blind: blind.length > 0, until: Math.min(...on.map((h) => h.until)), elsewhere: shown.some((h) => h.elsewhere) };
+}
+
+/** The saved sessions held to on `symbol` from data source `providerId` (browseHoldOn), each on its own. */
+function holdsOn(providerId: string, symbol: string, holds = useTrading.getState().browse.holds): BrowseHold[] {
+  const own = useTrading.getState().session?.id;
+  const sym = symbol.toUpperCase();
+  return holds.filter((h) => h.providerId === providerId && h.symbols.includes(sym) && h.id !== own && !endedHere.has(h.id));
 }
 
 /** The saved sessions held to (BrowseHold): every replay kept that has not finished, read from storage. */
@@ -531,7 +579,8 @@ async function readHolds(): Promise<BrowseHold[]> {
     const source = sessionSources.get(k.id);
     // One whose record cannot be read cannot be carried on either.
     if (!source) continue;
-    out.push({ id: k.id, providerId: getProvider(source).id, symbols: m.symbols.map((x) => String(x).toUpperCase()), until: k.now, blind: !!m.blind, elsewhere: !freeIds.has(k.id) });
+    const end = Number.isFinite(m.end) ? { end: m.end! } : {};
+    out.push({ id: k.id, providerId: getProvider(source).id, symbols: m.symbols.map((x) => String(x).toUpperCase()), until: k.now, ...end, blind: !!m.blind, elsewhere: !freeIds.has(k.id) });
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
@@ -1953,14 +2002,36 @@ export function jumpTo(time: UnixSeconds): void {
 /**
  * Why a bar cannot be picked on the chart to replay from now, or null when it can: a blind replay would
  * show its dates (a bar replay is not blind), the simulated market's made-up stocks have no data to
- * replay, and with no session the chart needs its bars first.
+ * replay, and with no session the chart needs bars to pick from first.
  */
 export function selectBarBlocked(): string | null {
   const s = useTrading.getState();
   if (s.session?.blind) return 'A blind replay hides its dates, and picking a bar would show them. Exit the replay first.';
   if (s.session?.mode === 'sim') return 'The simulated market has no past data to replay. Exit it first.';
-  if (!s.session && !shownPreview(s.activeSymbol)) return browseHiddenReason() ?? s.browse.error ?? 'The chart is still loading.';
-  return null;
+  if (s.session) return null;
+  const p = shownPreview(s.activeSymbol);
+  if (!p) return browseHiddenReason() ?? s.browse.error ?? 'The chart is still loading.';
+  return browseShowsNone(p, s.activeSymbol, s.timeframe);
+}
+
+/**
+ * Why the chart with no session, `p`'s, has no bar of `symbol` to pick on a `timeframe` chart, or null when
+ * it has one: none of its loaded bars, nor of its history, ends by where it stops for a saved session on it
+ * (browseCap). Its bars end on that session's day (browseEndDay), so only data with none before it shows none.
+ */
+function browseShowsNone(p: ReplaySession, symbol: string, timeframe: Timeframe): string | null {
+  const e = p.engineFor(symbol);
+  const cap = browseCap(symbol);
+  if (e && (cap === null ? e.revealedCount : e.revealedEndedBy(cap)) > 0) return null;
+  const h = p.chartHistory(symbol, timeframe);
+  if (h?.bars.length && (cap === null || barEndTime(h.bars[0], h.timeframe) <= cap)) return null;
+  if (h?.wanted && (h.status === 'idle' || h.status === 'loading')) return 'The chart is still loading.';
+  const sym = symbol.toUpperCase();
+  const hold = browseHoldOn(browseTarget().provider.id, sym);
+  if (!hold) return `There is no ${sym} bar on this chart to pick.`;
+  return hold.elsewhere
+    ? `There is no ${sym} bar before the ${sym} replay running in another tab to pick. Chart another ticker, or end that replay.`
+    : `There is no ${sym} bar before your unfinished ${sym} replay to pick. Resume or discard it, or chart another ticker.`;
 }
 
 /**
@@ -2008,33 +2079,64 @@ function chartData(providerId: string, symbol: string): ReplaySession | null {
   return p && browseEng.key?.startsWith(`${providerId}|`) ? p : null;
 }
 
-type KnownBars = { bars: readonly Bar[]; ends: readonly UnixSeconds[]; timeframe: Timeframe };
+/**
+ * What a replay's (or the browsing chart's) bars of a symbol tell, as the chart shows them on a timeframe
+ * (knownBars): its loaded bars first, then the history before them.
+ */
+interface KnownBars {
+  /** When the replay cut at the chart's candle that starts at `start` begins (cutTime); null when no bar shown is in it. */
+  cutTime(start: UnixSeconds): UnixSeconds | null;
+  /** When the data's sessions end around `day` (sessionEndMinute); null when no bar shown is in those days. */
+  sessionEnd(day: string): number | null;
+}
+
+/** When each bar of a history ends (barEnds), worked out once for each history loaded. */
+const historyEnds = new WeakMap<readonly Bar[], UnixSeconds[]>();
 
 /**
- * `replay`'s bars of `symbol` the chart can show, each with when it ends: the loaded ones, then the history
- * before them; of the browsing chart, only up to where it stops (browseCap), so no bar it does not show can
- * be cut at.
+ * What `replay`'s bars of `symbol` the chart can show on a `timeframe` chart tell (KnownBars): the loaded ones,
+ * then the history before them; of the browsing chart, only up to where it stops (browseCap), so no bar it
+ * does not show can be cut at or tell the hours. Worked out on the bars where they are, none of them copied:
+ * select-bar mode asks about every candle the pointer crosses (cutWarning), in replays of tens of thousands
+ * of bars. The history is looked at only when the loaded bars say nothing.
  */
-function knownBars(replay: ReplaySession | null, symbol: string, timeframe: Timeframe): KnownBars[] {
+function knownBars(replay: ReplaySession | null, symbol: string, timeframe: Timeframe): KnownBars {
   const e = replay?.engineFor(symbol);
-  if (!replay || !e) return [];
+  if (!replay || !e) return { cutTime: () => null, sessionEnd: () => null };
   const cap = replay === eng.replay ? null : browseCap(symbol);
   const n = cap === null ? e.revealedCount : e.revealedEndedBy(cap);
-  const out: KnownBars[] = [{ bars: e.revealedBars(0, n), ends: e.revealedEnds(0, n), timeframe: e.baseTimeframe }];
-  const h = capHistory(replay.chartHistory(symbol, timeframe), cap);
-  if (h?.bars.length) out.push({ bars: h.bars, ends: barEnds(h.bars, h.timeframe), timeframe: h.timeframe });
-  return out;
+  let past: { bars: readonly Bar[]; ends: readonly UnixSeconds[]; timeframe: Timeframe; count: number } | null | undefined;
+  const history = () => {
+    if (past !== undefined) return past;
+    const h = replay.chartHistory(symbol, timeframe);
+    if (!h?.bars.length) return (past = null);
+    let ends = historyEnds.get(h.bars);
+    if (!ends) historyEnds.set(h.bars, (ends = barEnds(h.bars, h.timeframe)));
+    // Those that had ended by where the chart stops (capHistory): the first so many, as they end in order.
+    const count = cap === null ? h.bars.length : lastIndexAtOrBefore(h.bars, cap, (b) => barEndTime(b, h.timeframe)) + 1;
+    return (past = { bars: h.bars, ends, timeframe: h.timeframe, count });
+  };
+  return {
+    cutTime: (start) => {
+      const t = e.cutTime(start, timeframe, n);
+      const h = t === null ? history() : null;
+      return h ? cutTime(start, timeframe, h.bars, h.ends, h.timeframe, h.count) : t;
+    },
+    sessionEnd: (day) => {
+      const close = e.sessionEndMinute(day, n);
+      const h = close === null ? history() : null;
+      return h ? sessionEndMinute(h.bars, h.ends, day, h.count) : close;
+    },
+  };
 }
 
 /**
- * When the data's sessions end (sessionEndMinute) around `day`, in minutes: from `known` bars that cover
+ * When the data's sessions end (sessionEndMinute) around `day`, in minutes: from the bars `known` that cover
  * those days, else from bars of them asked of the data source.
  */
-async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars[]): Promise<number> {
-  for (const k of known) {
-    const close = sessionEndMinute(k.bars, k.ends, day);
-    if (close !== null) return close;
-  }
+async function sessionClose(provider: HistoricalDataProvider, symbol: string, day: string, known: KnownBars): Promise<number> {
+  const close = known.sessionEnd(day);
+  if (close !== null) return close;
   let from = day;
   for (let i = 0; i < HOURS_DAYS; i++) from = prevTradingDay(from);
   const bars = await provider.getBars({ symbol, from: exchangeTimeToUnix(from, PREMARKET_OPEN), to: exchangeTimeToUnix(nextTradingDay(day), 0) });
@@ -2057,14 +2159,16 @@ const NOTHING_FOLLOWS = {
  * How a bar replay of `symbol` from `provider` on a `timeframe` chart plays: the size of the candles the chart
  * draws (the timeframe, or the data's own bars when those are coarser: a daily file on a 1-minute chart),
  * by which it plays on and picks its speed; the trading days it loads before its start, at least as many as
- * the chart with no session shows (BROWSE_DAYS), so the cut shows no less on the left; and, on a vendor's
- * data, the most days it plays on (vendorPlayOnDays).
+ * the chart with no session shows (BROWSE_DAYS), so the cut shows no less on the left; on a vendor's data,
+ * the most days it plays on (vendorPlayOnDays); and whether its chart also loads the longer history before
+ * those days (HISTORY_DAYS of it: on charts of 30-minute candles and more, see ReplaySession.chartHistory).
  */
-function barReplayPlan(provider: HistoricalDataProvider, symbol: string, timeframe: Timeframe): { candles: Timeframe; lookbackDays: number; maxDays: number } {
+function barReplayPlan(provider: HistoricalDataProvider, symbol: string, timeframe: Timeframe): { candles: Timeframe; lookbackDays: number; maxDays: number; history: boolean } {
   const base = provider.baseTimeframe(symbol);
   const candles = candleTimeframe(timeframe, base);
   const lookbackDays = Math.max(DEFAULT_LOOKBACK[candles], BROWSE_DAYS);
-  return { candles, lookbackDays, maxDays: VENDOR_NAMES[provider.id] ? vendorPlayOnDays(loadedDays(base, lookbackDays)) : Infinity };
+  const history = TIMEFRAMES.indexOf(candles) >= TIMEFRAMES.indexOf(historyTimeframe(base)) && DEFAULT_LOOKBACK[candles] > loadedDays(base, lookbackDays);
+  return { candles, lookbackDays, maxDays: VENDOR_NAMES[provider.id] ? vendorPlayOnDays(loadedDays(base, lookbackDays)) : Infinity, history };
 }
 
 /**
@@ -2082,13 +2186,13 @@ function dayMayBeTheCause(e: unknown): boolean {
  * its last day to the end of the data's sessions (sessionClose), so it never plays empty hours. As many days
  * before the start as a replay of those candles loads (DEFAULT_LOOKBACK), and no fewer than the chart with no
  * session shows; the default balance; that symbol only; not blind; no challenge; about one candle a second
- * (candleSpeed). Saved as the next replay's setup (settings.replay), as the setup form saves it, so Advanced
- * replay setup opens on it. `known`: the chart's bars, for the data's hours. `what` was picked: a bar of the
- * chart (which keeps its view, see ChartEvent) or a moment. `retry`: a vendor's refusal that may be about the
- * day alone (dayMayBeTheCause) is not shown but answered 'retry', the loading note left up, for the caller
- * to try another day.
+ * (candleSpeed). Once started, saved as the next replay's setup (settings.replay), as the setup form saves
+ * it, so Advanced replay setup opens on it; one that did not start leaves the setup as it was. `known`: the
+ * chart's bars, for the data's hours. `what` was picked: a bar of the chart (which keeps its view, see
+ * ChartEvent) or a moment. `retry`: says whether the caller takes a failure to load (it tries another day,
+ * or says why itself): one it takes is not shown but answered 'retry', the loading note left up.
  */
-async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: string, known: KnownBars[], what: 'bar' | 'time', retry = false): Promise<boolean | 'retry'> {
+async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: string, known: KnownBars, what: 'bar' | 'time', retry?: (e: unknown) => boolean): Promise<boolean | 'retry'> {
   const provider = getProvider(providerId);
   const timeframe = useTrading.getState().timeframe;
   const plan = barReplayPlan(provider, symbol, timeframe);
@@ -2105,7 +2209,7 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
     endDate = playOnEndDate(day, plan.candles, last, dates, plan.maxDays);
     close = await sessionClose(provider, symbol, day, known);
   } catch (e) {
-    if (retry && dayMayBeTheCause(e)) return 'retry';
+    if (retry?.(e)) return 'retry';
     return startRefused((e as Error).message);
   }
   const endTime = hhmm(close);
@@ -2113,11 +2217,11 @@ async function startReplayFrom(t: UnixSeconds, providerId: string, symbol: strin
   const startTime = hhmm((t - exchangeTimeToUnix(day, 0)) / 60);
   const speed = candleSpeed(plan.candles, REPLAY_SPEEDS);
   let retrying = false;
-  const retryOn = retry ? (e: unknown) => (retrying = dayMayBeTheCause(e)) : undefined;
-  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws.
-  useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, multiDay: endDate > day, endDate, timeframe, speed });
+  const retryOn = retry ? (e: unknown) => (retrying = retry(e)) : undefined;
   const ok = await startReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, endDate, startingBalance: getSettings().defaultBalance, lookbackDays: plan.lookbackDays, timeframe, speed, blind: false, cut: what === 'bar', retryOn });
   if (retrying) return 'retry';
+  // The chart's timeframe is the setup's (the full form opens on it), whatever the candles it draws.
+  if (ok) useSettings.getState().updateReplay({ providerId: provider.id, symbol, date: day, startTime, endTime, multiDay: endDate > day, endDate, timeframe, speed });
   const failed = useTrading.getState().error;
   if (!ok && failed) {
     // The replay's own words for an empty window are about start and end times, which were not asked for here.
@@ -2140,33 +2244,42 @@ export async function startBarReplay(candleStart: UnixSeconds): Promise<boolean>
   useTrading.setState({ selectingBar: false });
   if (blocked) return startRefused(blocked);
   const { providerId, symbol } = barReplaySource();
-  const timeframe = useTrading.getState().timeframe;
-  const known = knownBars(chartData(providerId, symbol), symbol, timeframe);
-  let t: UnixSeconds | null = null;
-  for (const k of known) t ??= cutTime(candleStart, timeframe, k.bars, k.ends, k.timeframe);
+  const known = knownBars(chartData(providerId, symbol), symbol, useTrading.getState().timeframe);
+  const t = known.cutTime(candleStart);
   if (t === null) return startRefused('That bar is not on the chart.');
   return (await startReplayFrom(t, providerId, symbol, known, 'bar')) === true;
 }
 
+/** What select-bar mode says about a candle before it is clicked (cutWarning): its words, and whether a click there is refused. */
+export interface CutNote {
+  text: string;
+  refused: boolean;
+}
+
 /**
  * What select-bar mode says about the chart's candle that starts at `candleStart` before it is clicked, or
- * null when there is nothing to say: that the replay cut there would have only after-hours trading left
- * before it ends (onlyAfterHoursFollow), in which an order that waits for the regular session (any but a
- * Limit with Extended hours) never fills. Worked out from the chart's bars and the calendar, as the cut
- * would be, and from the data's last day once known (noteDataDays).
+ * null when there is nothing to say: that nothing follows it before the replay cut there would end (data
+ * that stops for a day it has no bars on, after that day's last bar), which refuses it as startBarReplay
+ * would; or that only after-hours trading follows it before it ends (onlyAfterHoursFollow), in which an
+ * order that waits for the regular session (any but a Limit with Extended hours) never fills. Worked out as
+ * the cut would be, from the chart's bars (for the data's hours, as sessionClose does: the after-hours close
+ * when they do not tell), the calendar and the data's last day once known (noteDataDays), at once: no bar
+ * is asked of the data source, nor copied.
  */
-export function cutWarning(candleStart: UnixSeconds): string | null {
+export function cutWarning(candleStart: UnixSeconds): CutNote | null {
   const { providerId, symbol } = barReplaySource();
   const provider = getProvider(providerId);
   const days = dataDays.get(`${provider.id}|${symbol}`);
   if (!days) return null;
   const timeframe = useTrading.getState().timeframe;
-  let t: UnixSeconds | null = null;
-  for (const k of knownBars(chartData(providerId, symbol), symbol, timeframe)) t ??= cutTime(candleStart, timeframe, k.bars, k.ends, k.timeframe);
+  const known = knownBars(chartData(providerId, symbol), symbol, timeframe);
+  const t = known.cutTime(candleStart);
   if (t === null) return null;
   const plan = barReplayPlan(provider, symbol, timeframe);
-  const endDate = playOnEndDate(exchangeDate(t), plan.candles, days.last, days.dates, plan.maxDays);
-  return onlyAfterHoursFollow(t, endDate) ? CUT_AFTER_HOURS : null;
+  const day = exchangeDate(t);
+  const endDate = playOnEndDate(day, plan.candles, days.last, days.dates, plan.maxDays);
+  if (exchangeTimeToUnix(endDate, parseHHMM(hhmm(known.sessionEnd(day) ?? AFTERHOURS_CLOSE))) <= t) return { text: NOTHING_FOLLOWS.bar, refused: true };
+  return onlyAfterHoursFollow(t, endDate) ? { text: CUT_AFTER_HOURS, refused: false } : null;
 }
 
 /**
@@ -2182,29 +2295,59 @@ export function newestBarRefusal(): string {
   return `This is the last bar shown: the chart stops where ${hold.elsewhere ? `the ${sym} replay in another tab was last saved` : `your unfinished ${sym} replay is`}. Pick an earlier one.`;
 }
 
-/** cutWarning's words. */
+/** cutWarning's words for a cut with only after-hours trading after it. */
 export const CUT_AFTER_HOURS = "Only after-hours trading follows this bar: market orders won't fill. Pick an earlier bar.";
 
-/** Select date: starts a replay of the chart's symbol at `time` (HH:MM, exchange time) on `date`, as a bar replay starts. */
+/**
+ * Select date: starts a replay of the chart's symbol at `time` (HH:MM, exchange time) on `date`, as a bar
+ * replay starts. Not with no session while a blind replay of the symbol keeps its chart hidden
+ * (browseHiddenReason): the replay would show its days with their dates.
+ */
 export async function startReplayAt(date: string, time: string): Promise<boolean> {
   useTrading.setState({ selectingBar: false });
+  const hidden = browseHiddenReason();
+  if (hidden) return startRefused(hidden);
   const { providerId, symbol } = barReplaySource();
   const known = knownBars(chartData(providerId, symbol), symbol, useTrading.getState().timeframe);
   return (await startReplayFrom(exchangeTimeToUnix(date, parseHHMM(time)), providerId, symbol, known, 'time')) === true;
 }
 
 /**
+ * The days Random bar does not pick for a replay of `symbol` from `providerId` played as `plan` says: those
+ * whose replay would show any day of a saved session on it not finished (BrowseHold), from where its clock
+ * has got to through its end, with the days loaded before the day picked (its history too, on a chart of
+ * 30-minute candles or more) and those it plays on into. Counted in trading days, from the calendar alone.
+ */
+function heldDays(providerId: string, symbol: string, plan: ReturnType<typeof barReplayPlan>): { from: string; to: string }[] {
+  const back = plan.history ? Math.max(HISTORY_DAYS, plan.lookbackDays) : plan.lookbackDays;
+  const ahead = Math.min(PLAY_ON_DAYS[plan.candles], plan.maxDays);
+  return holdsOn(providerId, symbol).map((h) => {
+    const from = exchangeDate(h.until);
+    const to = h.end !== undefined && exchangeDate(h.end) > from ? exchangeDate(h.end) : from;
+    return daysReaching(from, to, back, ahead);
+  });
+}
+
+/**
  * Random bar: starts a replay of the chart's symbol at the 09:30 open of a trading day picked at random
  * from its data (one with bars, for imported data), as a bar replay starts. Picked without looking at
- * the bars, so nothing about the day is known before it plays. A vendor does not say how far back its
- * data goes: the day is one of the last VENDOR_RANDOM_DAYS (about two years, as far as Polygon's free plan
- * goes), and when the vendor has no bars that day or will not serve it (a ticker listed since, a plan that
- * does not reach back so far), one other day is tried before giving up.
+ * the bars, so nothing about the day is known before it plays; and never a day whose replay would show
+ * some of a replay of the symbol not finished, from its clock on (heldDays). With no session, not while a
+ * blind replay of the symbol keeps its chart hidden (browseHiddenReason). A vendor does not say how far back
+ * its data goes: the day is one of the last VENDOR_RANDOM_DAYS (about two years, as far as Polygon's free
+ * plan goes; HISTORY_DAYS fewer on a chart that loads that much history before it), and when the vendor has
+ * no bars that day or will not serve it (a ticker listed since, a plan that does not reach back so far), one
+ * other day is tried before giving up: after the day it had no bars for, as it has none before a listing.
  */
 export async function startRandomBar(rand: () => number = Math.random): Promise<boolean> {
   useTrading.setState({ selectingBar: false });
+  const hidden = browseHiddenReason();
+  if (hidden) return startRefused(hidden);
   const { providerId, symbol } = barReplaySource();
   const provider = getProvider(providerId);
+  const vendor = VENDOR_NAMES[provider.id];
+  const timeframe = useTrading.getState().timeframe;
+  const plan = barReplayPlan(provider, symbol, timeframe);
   let pool: { from: string; to: string; days: string[] | null | undefined; known: boolean };
   try {
     if (provider === csvProvider && provider.unavailableReason()) await csvDatasetsLoaded();
@@ -2212,31 +2355,79 @@ export async function startRandomBar(rand: () => number = Math.random): Promise<
     if (reason) return startRefused(reason);
     const range = await provider.availableRange(symbol);
     const to = await lastDataDay(provider, symbol);
-    pool = { from: range ? exchangeDate(range.from) : VENDOR_NAMES[provider.id] ? vendorRandomFrom(to) : DEMO_FIRST_DATE, to, days: await provider.sessionDates?.(symbol), known: !!range };
+    pool = { from: range ? exchangeDate(range.from) : vendor ? vendorRandomFrom(to, plan.history ? HISTORY_DAYS : 0) : DEMO_FIRST_DATE, to, days: await provider.sessionDates?.(symbol), known: !!range };
   } catch (e) {
     return startRefused((e as Error).message);
   }
+  const held = heldDays(provider.id, symbol, plan);
+  const isHeld = (d: string) => held.some((h) => d >= h.from && d <= h.to);
+  // The chart shows the ticker from this vendor: one day it has no bars for is not a wrong ticker.
+  const charted = !!chartData(provider.id, symbol);
   const tried = new Set<string>();
   const tries = pool.known ? 1 : 2;
-  /** loadSeq once a try was left to try another day, its loading note still up. */
+  let from = pool.from;
+  /** loadSeq once a try was left to try another day (its loading note still up), and why it did not load. */
   let leftLoading: number | null = null;
+  // Set from the callback below, which the compiler does not follow.
+  let failure = null as { day: string; e: unknown } | null;
   for (let n = 0; n < tries; n++) {
-    const day = randomDay(pool.from, pool.to, pool.days, rand, tried);
+    const day = randomDay(from, pool.to, pool.days, rand, (d) => tried.has(d) || isHeld(d));
     if (!day) {
       if (leftLoading === loadSeq) useTrading.setState({ loading: false });
+      if (failure) return startRefused(randomFailure(provider, symbol, failure.day, failure.e));
+      if (held.length && randomDay(pool.from, pool.to, pool.days, rand)) return startRefused(heldEverywhere(provider.id, symbol));
       return startRefused(`There is no ${symbol} data to replay.`);
     }
     tried.add(day);
-    const known = knownBars(chartData(providerId, symbol), symbol, useTrading.getState().timeframe);
-    const r = await startReplayFrom(exchangeTimeToUnix(day, REGULAR_OPEN), providerId, symbol, known, 'time', n + 1 < tries);
+    const last = n + 1 === tries;
+    const known = knownBars(chartData(providerId, symbol), symbol, timeframe);
+    // Taken here, and not shown: a refusal another day may not get, before the last try; on the last, that
+    // the vendor has no bars that day for a ticker the chart shows, said here in its own words.
+    const take = vendor
+      ? (e: unknown) => {
+          if (!dayMayBeTheCause(e) || (last && !(charted && noBars(e)))) return false;
+          failure = { day, e };
+          return true;
+        }
+      : undefined;
+    const r = await startReplayFrom(exchangeTimeToUnix(day, REGULAR_OPEN), providerId, symbol, known, 'time', take);
     if (r !== 'retry') {
       // A try that stopped before loading (a refusal is shown) leaves the loading note of the one before it.
       if (!r && leftLoading === loadSeq) useTrading.setState({ loading: false });
       return r;
     }
     leftLoading = loadSeq;
+    // A vendor has no bars for a ticker before it was listed, on any day: the next day tried is after this one.
+    if (noBars(failure?.e)) from = nextTradingDay(day);
   }
-  return false;
+  // The last try's failure, taken: no bars that day.
+  if (leftLoading !== loadSeq || !failure) return false;
+  useTrading.setState({ loading: false });
+  return startRefused(randomFailure(provider, symbol, failure.day, failure.e));
+}
+
+/** Whether `e` is a data source's answer that it has no bars for what was asked (DataProviderError's 'not_found'). */
+function noBars(e: unknown): boolean {
+  return e instanceof DataProviderError && e.kind === 'not_found';
+}
+
+/**
+ * Why Random bar's replay of `symbol` from `provider` on `day` did not load: for a vendor that has no bars that
+ * day for a ticker the chart shows, most likely a day before it was listed, said so (not loadFailure's "check
+ * the ticker", which is for a ticker typed in); else as loadFailure says it.
+ */
+function randomFailure(provider: HistoricalDataProvider, symbol: string, day: string, e: unknown): string {
+  const vendor = VENDOR_NAMES[provider.id];
+  if (vendor && noBars(e) && chartData(provider.id, symbol)) return `${vendor} has no ${symbol} bars around ${day}; it may not have traded then. Press Random bar again, or use Select date… for a later day.`;
+  return loadFailure(provider, symbol, e, day);
+}
+
+/** Why Random bar has no day to pick: every one would show some of a replay of `symbol` not finished (heldDays). */
+function heldEverywhere(providerId: string, symbol: string): string {
+  const elsewhere = holdsOn(providerId, symbol).every((h) => h.elsewhere);
+  return elsewhere
+    ? `Every day Random bar could pick would show some of the ${symbol} replay running in another tab. Use Select date… instead, or end that replay.`
+    : `Every day Random bar could pick would show some of your unfinished ${symbol} replay. Resume or discard it, or use Select date… instead.`;
 }
 
 /** Clears the start error shown over the chart. */

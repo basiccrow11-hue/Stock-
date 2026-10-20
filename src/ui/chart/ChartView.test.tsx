@@ -275,12 +275,15 @@ vi.mock('./offscreenSnapshot', () => ({
   offscreenSnapshot: async (scene: { symbol: string }) => (offscreen.drawn.push(scene.symbol), 'data:image/jpeg;base64,BB=='),
 }));
 
+/** What a test puts in storage, by key, as another tab would have left it there; nothing the app writes is kept. */
+const stored = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('../services/idb', () => ({
   idb: {
     all: async () => [],
     set: async () => undefined,
     delete: async () => undefined,
-    get: async () => undefined,
+    get: async (_s: string, k: string) => structuredClone(stored.get(k)),
+    withPrefix: async (_s: string, prefix: string) => [...stored].filter(([k]) => k.startsWith(prefix)).map(([, v]) => structuredClone(v)),
     modify: async (_s: string, _k: string, fn: (v: unknown) => unknown) => fn(undefined),
   },
 }));
@@ -1890,6 +1893,53 @@ describe('Bar Replay on the chart', () => {
     act(() => a.root.unmount());
   }, 30_000);
 
+  it('refuses a bar nothing follows before a day the data has no bars on, before the click, and starts nothing there', async () => {
+    const store = await import('../state/tradingStore');
+    const { csvProvider } = await import('../state/dataRegistry');
+    // Regular hours only, and no bars on the 6th.
+    const bars: Bar[] = [];
+    for (const d of ['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-07']) for (let m = 570; m < 960; m++) bars.push({ time: exchangeTimeToUnix(d, m), open: 10, high: 10.1, low: 9.9, close: 10, volume: 100 });
+    csvProvider.upsert({ symbol: 'HOLE', name: 'HOLE', baseTimeframe: '1m', bars, importedAt: 0, fileName: 'HOLE.csv' });
+    try {
+      store.setBrowseSource('csv');
+      const frame = controlFrames();
+      const a = await browse('HOLE', '1m', frame);
+      const ts = a.chart.ts;
+      // The 5th's last candle (15:59): the replay cut there would play to the end of the 5th, and none follows it.
+      const k = 3 * 390 - 1;
+      act(() => store.setSelectingBar(true));
+      pointer(a.chart, 'pointermove', ts.logicalToCoordinate(k)!);
+      frame();
+      const nothing = 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.';
+      expect(hint(a.host)).toBe(nothing);
+      expect(cutAt(a.host).refused).toBe(true);
+      expect(a.host.querySelector('.bar-cut-hint')!.className).toBe('bar-cut-hint refused');
+      click(a.chart, ts.logicalToCoordinate(k)!);
+      await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+      expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false, selectingBar: true, error: null });
+      // A minute before it can be picked.
+      pointer(a.chart, 'pointermove', ts.logicalToCoordinate(k - 1)!);
+      frame();
+      expect(hint(a.host)).toBe('Click a bar to start the replay there · Esc to cancel');
+      expect(cutAt(a.host).refused).toBe(false);
+      pointer(a.chart, 'pointerleave', 0);
+      frame();
+      // A finger is told the same once it picks that bar, never to tap it again to start anyway, and a second tap starts nothing.
+      click(a.chart, ts.logicalToCoordinate(k)!, 'touch');
+      expect(hint(a.host)).toBe(nothing);
+      expect(cutAt(a.host).refused).toBe(true);
+      click(a.chart, ts.logicalToCoordinate(k)!, 'touch');
+      await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+      expect(hint(a.host)).toBe(nothing);
+      expect(store.useTrading.getState()).toMatchObject({ session: null, loading: false, selectingBar: true, error: null });
+      act(() => a.root.unmount());
+    } finally {
+      store.setBrowseSource('demo');
+      store.setActiveSymbol('SPY');
+      csvProvider.remove('HOLE');
+    }
+  }, 30_000);
+
   it('on a touch screen, puts the line on the bar tapped and starts there on a second tap on it', async () => {
     const store = await import('../state/tradingStore');
     const frame = controlFrames();
@@ -1941,6 +1991,35 @@ describe('Bar Replay on the chart', () => {
     act(() => b.root.unmount());
   }, 30_000);
 
+  it('opens on its newest candle when it ends on the day of an unfinished replay, there being no later day to keep off screen', async () => {
+    const store = await import('../state/tradingStore');
+    const { demoProvider } = await import('../state/dataRegistry');
+    const { toChartTime } = await import('./ChartView');
+    // A replay of SPY left unfinished at 10:00 sixty trading days before the data's last.
+    let day = demoProvider.lastDate;
+    for (let i = 0; i < 60; i++) day = prevTradingDay(day);
+    const until = exchangeTimeToUnix(day, 600);
+    const summary = { id: 'old', savedAt: 1, meta: { mode: 'replay', symbols: ['SPY'], blind: false }, now: until, closedTrades: 0, openPositions: 0, equity: 25_000, startingBalance: 25_000, finished: false };
+    stored.set('session-summary:old', summary);
+    stored.set('session:old', { summary, replay: { providerId: 'demo' } });
+    try {
+      // This tab comes into view, and looks at the saved sessions again.
+      act(() => void window.dispatchEvent(new Event('focus')));
+      await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toMatchObject({ until, blind: false }), { timeout: 5000 });
+      const frame = controlFrames();
+      const a = await browse('SPY', '5m', frame);
+      const main = a.chart.series[0];
+      expect(main.points.at(-1)!.time).toBe(toChartTime(until - 300));
+      // Its newest candle in view, where it stops: not the day before its last, as a chart to the end of the data opens.
+      expect(a.chart.ts.getVisibleLogicalRange()!.to).toBeGreaterThan(main.points.length - 1);
+      act(() => a.root.unmount());
+    } finally {
+      stored.clear();
+      act(() => void window.dispatchEvent(new Event('focus')));
+      await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toBeNull(), { timeout: 5000 });
+    }
+  }, 30_000);
+
   it('hides the price scales while the chart has no candles, so none goes on showing the last symbol\'s prices', async () => {
     const store = await import('../state/tradingStore');
     const frame = controlFrames();
@@ -1966,6 +2045,35 @@ describe('Bar Replay on the chart', () => {
     await vi.waitFor(() => expect(a.chart.series[0].points.length).toBeGreaterThan(0), { timeout: 20_000 });
     expect(shown().every(Boolean)).toBe(true);
     act(() => a.root.unmount());
+  }, 30_000);
+
+  it('shows the price scales once a replay that started with no candles, at the first bar of its data, plays its first ones', async () => {
+    const store = await import('../state/tradingStore');
+    const { ChartView } = await import('./ChartView');
+    const { DEMO_FIRST_DATE } = await import('../../core/data/demoProvider');
+    const { useSettings } = await import('../state/settingsStore');
+    useSettings.getState().update({ learningMode: false, autoSnapshot: false });
+    const frame = controlFrames();
+    // Nothing before its start: the demo data begins that morning.
+    expect(await store.startReplay({ providerId: 'demo', symbol: 'SPY', date: DEMO_FIRST_DATE, startTime: '04:00', endTime: '16:00', startingBalance: 25_000, lookbackDays: 1, timeframe: '5m', speed: 60, blind: false })).toBe(true);
+    expect(store.getBaseBars('SPY')).toEqual([]);
+    const host = document.body.appendChild(document.createElement('div'));
+    const r = createRoot(host);
+    await act(async () => r.render(createElement(ChartView, { symbol: 'SPY', timeframe: '5m' })));
+    frame();
+    const chart = lw.charts.at(-1)!;
+    const shown = () => chart.panesList.map((_, i) => chart.scaleVisible[i] ?? true);
+    expect(chart.series[0].points).toEqual([]);
+    expect(shown().some(Boolean)).toBe(false);
+    // Its first candles come one step at a time (appended, not a redraw): with them, the scales.
+    act(() => {
+      for (let i = 0; i < 6; i++) store.stepForward();
+    });
+    await vi.waitFor(() => expect(chart.series[0].points.length).toBeGreaterThan(0));
+    frame();
+    expect(shown().every(Boolean)).toBe(true);
+    act(() => r.unmount());
+    host.remove();
   }, 30_000);
 
   it('picks no bar with a press that only closes a menu, a popover or a dialog over the chart', async () => {

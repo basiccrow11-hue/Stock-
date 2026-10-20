@@ -316,12 +316,12 @@ describe('Bar Replay: a replay cut at a candle of the chart', () => {
     const last = demoProvider.lastDate;
     const prev = prevTradingDay(last);
     await chartCandles('SPY', '1m');
-    const warned = "Only after-hours trading follows this bar: market orders won't fill. Pick an earlier bar.";
+    const warned = { text: "Only after-hours trading follows this bar: market orders won't fill. Pick an earlier bar.", refused: false };
     // What select-bar mode says of a candle before it is clicked: once the data's last day is known.
     store.setSelectingBar(true);
-    await vi.waitFor(() => expect(store.cutWarning(at(last, '16:30'))).toBe(warned));
+    await vi.waitFor(() => expect(store.cutWarning(at(last, '16:30'))).toEqual(warned));
     // The last regular minute's candle ends at the close: the replay cut there starts after hours.
-    expect(store.cutWarning(at(last, '15:59'))).toBe(warned);
+    expect(store.cutWarning(at(last, '15:59'))).toEqual(warned);
     expect(store.cutWarning(at(last, '15:58'))).toBeNull();
     // The day before plays on into the last day's regular session.
     expect(store.cutWarning(at(prev, '19:00'))).toBeNull();
@@ -363,6 +363,33 @@ describe('Bar Replay: a replay cut at a candle of the chart', () => {
     expect(s.error).toBe('Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.');
     // The one before it can be.
     expect(await store.startBarReplay(candles.at(-2)!.time)).toBe(true);
+  });
+
+  it('says before the click that nothing follows a day’s last candle when the data has no bars the next day, and will not cut there', async () => {
+    const store = await import('./tradingStore');
+    const { csvProvider } = await import('./dataRegistry');
+    // Regular hours only, and no bars on the 6th: the 5th's 15:59 candle is the last before a gap.
+    const days = ['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-07'];
+    const bars: Bar[] = [];
+    for (const d of days) for (let m = 570; m < 960; m++) bars.push({ time: exchangeTimeToUnix(d, m), open: 10, high: 10.1, low: 9.9, close: 10, volume: 100 });
+    csvProvider.upsert({ symbol: 'HOLE', name: 'HOLE', baseTimeframe: '1m', bars, importedAt: 0, fileName: 'HOLE.csv' });
+    try {
+      store.setBrowseSource('csv');
+      store.setActiveSymbol('HOLE');
+      await chartCandles('HOLE', '1m');
+      const refused = { text: 'Nothing follows this bar in the data yet, so there is nothing to replay. Pick an earlier bar.', refused: true };
+      store.setSelectingBar(true);
+      await vi.waitFor(() => expect(store.cutWarning(at('2025-03-05', '15:59'))).toEqual(refused));
+      // A minute earlier, one minute of the 5th follows; a day earlier, the 5th does.
+      expect(store.cutWarning(at('2025-03-05', '15:58'))).toBeNull();
+      expect(store.cutWarning(at('2025-03-04', '15:59'))).toBeNull();
+      // A click there is refused with the same words.
+      expect(await store.startBarReplay(at('2025-03-05', '15:59'))).toBe(false);
+      expect(store.useTrading.getState().session).toBeNull();
+      expect(store.useTrading.getState().error).toBe(refused.text);
+    } finally {
+      csvProvider.remove('HOLE');
+    }
   });
 
   it('stops picking a bar on a switch of symbol or timeframe, or once a price is to be picked from the chart; picking one pauses play', async () => {

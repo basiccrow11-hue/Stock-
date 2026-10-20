@@ -3,10 +3,11 @@ import type { Bar, Timeframe } from '../types';
 import { exchangeDate, exchangeTimeToUnix, nextTradingDay, parseHHMM, prevTradingDay } from '../time';
 import { aggregateBars } from '../data/aggregate';
 import { DemoDataProvider } from '../data/demoProvider';
+import { CsvDataProvider } from '../data/csvProvider';
 import type { HistoricalDataProvider } from '../data/provider';
 import { ReplayEngine, barEnds } from './ReplayEngine';
 import { DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays } from './ReplaySession';
-import { PLAY_ON_DAYS, VENDOR_RANDOM_DAYS, candleSpeed, cutTime, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from './barReplay';
+import { PLAY_ON_DAYS, VENDOR_RANDOM_DAYS, candleSpeed, cutTime, daysReaching, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from './barReplay';
 
 const at = (date: string, time: string) => exchangeTimeToUnix(date, parseHHMM(time));
 const bar = (time: number): Bar => ({ time, open: 10, high: 11, low: 9, close: 10.5, volume: 100 });
@@ -116,6 +117,26 @@ describe('how long a bar replay plays on', () => {
     const daily = [D].map((d) => bar(at(d, '09:30')));
     expect(sessionEndMinute(daily, barEnds(daily, '1D'), D)).toBe(16 * 60);
     expect(sessionEndMinute(regular, barEnds(regular, '1m'), '2024-06-03')).toBeNull();
+    // The latest any bar of those days ends, as every bar is looked at: after-hours on an earlier day, hourly
+    // bars, a day with none after 12:00, and bars after the day asked about (not looked at).
+    const mixed = [
+      ...bars(prevTradingDay(prevTradingDay(D)), '09:30', '18:30', 60),
+      ...bars(prevTradingDay(D), '04:00', '12:00', 5),
+      ...bars(D, '09:30', '16:00', 30),
+      ...bars(nextTradingDay(D), '04:00', '20:00', 60),
+    ];
+    const ends = barEnds(mixed, '1m');
+    const every = (day: string, count = mixed.length) => {
+      let from = day;
+      for (let i = 0; i < 5; i++) from = prevTradingDay(from);
+      let close: number | null = null;
+      for (let i = 0; i < count; i++) {
+        const t = mixed[i].time;
+        if (t >= at(from, '00:00') && t < at(nextTradingDay(day), '00:00')) close = Math.max(close ?? 0, Math.min(24 * 60, (ends[i] - at(exchangeDate(t), '00:00')) / 60));
+      }
+      return close;
+    };
+    for (const day of [prevTradingDay(D), D, nextTradingDay(D)]) for (const count of [mixed.length, 40, 3]) expect(sessionEndMinute(mixed, ends, day, count), `${day} ${count}`).toBe(every(day, count));
     expect(hhmm(20 * 60)).toBe('20:00');
     expect(hhmm(24 * 60)).toBe('23:59');
   });
@@ -160,6 +181,20 @@ describe('a random day to replay', () => {
     }
     expect(n).toBe(VENDOR_RANDOM_DAYS);
     expect(from > '2024-10-18').toBe(true);
+    // Fewer for a chart that loads its longer past before the day picked too: that past is within reach as well.
+    let h = vendorRandomFrom('2026-10-19', 200);
+    for (let i = 0; i < 200; i++) h = prevTradingDay(h);
+    expect(h).toBe(from);
+  });
+
+  it('is told apart from the days whose replay would show some of others: those loaded before it, and played on into', () => {
+    const except = daysReaching('2024-03-13', '2024-03-14', 3, 2);
+    // Two days before the 13th play on into it; three after the 14th load it among the days before them.
+    expect(except).toEqual({ from: '2024-03-11', to: '2024-03-19' });
+    const out = (d: string) => d >= except.from && d <= except.to;
+    expect(randomDay('2024-03-04', '2024-03-22', null, () => 0.999, out)).toBe('2024-03-22');
+    expect(randomDay('2024-03-11', '2024-03-19', null, () => 0.5, out)).toBeNull();
+    expect(randomDay('2024-03-04', '2024-03-22', null, () => 0.5, out)! < '2024-03-11').toBe(true);
   });
 });
 
@@ -173,6 +208,30 @@ describe('whether only after-hours trading follows a bar replay’s start', () =
     // An early close: 13:00 the day after Thanksgiving.
     expect(onlyAfterHoursFollow(at('2024-11-29', '13:00'), '2024-11-29')).toBe(true);
     expect(onlyAfterHoursFollow(at('2024-11-29', '12:59'), '2024-11-29')).toBe(false);
+  });
+});
+
+describe('a cut worked out on a replay’s own bars (ReplayEngine.cutTime, sessionEndMinute)', () => {
+  it('looks at no bar it has not revealed, nor past the count asked for', () => {
+    const data = bars(D, '09:30', '16:00');
+    const e = new ReplayEngine({ symbol: 'X', start: at(D, '10:00'), end: at(D, '16:00'), baseTimeframe: '1m' }, data);
+    expect(e.revealedCount).toBe(30);
+    // The last bar revealed (09:59) is cut at its end; the next one, there in its bars, is not shown yet.
+    expect(e.cutTime(at(D, '09:59'), '1m')).toBe(at(D, '10:00'));
+    expect(e.cutTime(at(D, '10:00'), '1m')).toBeNull();
+    expect(e.cutTime(at(D, '10:30'), '1m', data.length)).toBeNull();
+    // The 5-minute candle from 09:55 holds revealed bars only: it ends with them.
+    expect(e.cutTime(at(D, '09:55'), '5m')).toBe(at(D, '10:00'));
+    // Asked of fewer (a chart that stops earlier): as if only those were there.
+    expect(e.cutTime(at(D, '09:59'), '1m', 10)).toBeNull();
+    expect(e.cutTime(at(D, '09:39'), '1m', 10)).toBe(at(D, '09:40'));
+    // Its sessions end, as far as it has shown, at its clock.
+    expect(e.sessionEndMinute(D)).toBe(10 * 60);
+    expect(e.sessionEndMinute(D, 10)).toBe(9 * 60 + 40);
+    // The same as on a copy of the bars shown.
+    const shown = e.revealedBars(0, e.revealedCount);
+    expect(e.cutTime(at(D, '09:45'), '15m')).toBe(cut(at(D, '09:45'), '15m', shown));
+    expect(e.sessionEndMinute(D)).toBe(sessionEndMinute(shown, barEnds(shown, '1m'), D));
   });
 });
 
@@ -205,6 +264,31 @@ describe('a chart to look at before any replay (ReplaySession.preview)', () => {
     const daily = aggregateBars(h.bars, '1D', h.timeframe);
     expect(daily.length + new Set(own.map((b) => exchangeDate(b.time))).size).toBe(DEFAULT_LOOKBACK['1D'] + 1);
     expect(Math.max(...h.bars.map((b) => b.time + 30 * 60))).toBeLessThanOrEqual(own[0].time);
+  });
+
+  it('ends at the end of a day before its last when asked, with the days a replay loads before it; on data with gaps, the last day before it with bars', async () => {
+    let day = p.lastDate;
+    for (let i = 0; i < 60; i++) day = prevTradingDay(day);
+    const s = await ReplaySession.preview(p, { symbol: 'SPY', lookbackDays: 15, endDay: day }, undefined, now);
+    expect(s.setup.date).toBe(day);
+    const shown = s.engine.visibleBaseBars();
+    let first = day;
+    for (let i = 0; i < 15; i++) first = prevTradingDay(first);
+    expect(exchangeDate(shown[0].time)).toBe(first);
+    expect(shown.at(-1)!.time).toBe(at(day, '19:59'));
+    // A day at or after its last: to the end of the data, as with none.
+    const late = await ReplaySession.preview(p, { symbol: 'SPY', lookbackDays: 1, endDay: nextTradingDay(p.lastDate) }, undefined, now);
+    expect(late.setup.date).toBe(p.lastDate);
+    expect(late.engine.visibleBaseBars().at(-1)!.time).toBe(at(p.lastDate, '19:59'));
+
+    // Imported bars with none on the 13th: a chart to end that day ends on the 12th.
+    const csv = new CsvDataProvider();
+    csv.upsert({ symbol: 'GAPS', name: 'GAPS', baseTimeframe: '1m', importedAt: 0, fileName: 'g.csv', bars: [...bars('2024-03-11', '09:30', '16:00'), ...bars('2024-03-12', '09:30', '16:00'), ...bars('2024-03-14', '09:30', '16:00')] });
+    const g = await ReplaySession.preview(csv, { symbol: 'GAPS', lookbackDays: 1, endDay: '2024-03-13' }, undefined, now);
+    expect(g.setup.date).toBe('2024-03-12');
+    const gs = g.engine.visibleBaseBars();
+    expect(exchangeDate(gs[0].time)).toBe('2024-03-11');
+    expect(gs.at(-1)!.time).toBe(at('2024-03-12', '15:59'));
   });
 
   it('ends a data source that does not say where its data ends at the last trading day that has ended', async () => {
