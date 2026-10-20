@@ -35,10 +35,10 @@ function sourceHas(id: string, symbol: string): boolean {
 
 /**
  * useLastCloses: each local row's last close (the demo's or imported data; Polygon and Alpaca are never
- * asked, as each would spend the visitor's rate limit), once worked out by browseLastClose. That stops at
- * the clock of a replay of the symbol not finished yet, and gives none for a blind one, so a row never
- * shows a close the chart beside it hides. Each is kept under that clock, so a close worked out before a
- * replay was left unfinished is never shown once it is.
+ * asked, as each would spend the visitor's rate limit), once worked out by browseLastClose. That gives none
+ * for a symbol a replay not finished yet keeps the chart from (blind or not), so a row never shows a close
+ * the chart beside it hides. Each is kept apart while one does, so a close worked out before a replay was
+ * left unfinished is never shown once it is.
  */
 function useLastCloses(rows: { symbol: string; source: string }[], csvVersion: number): Record<string, LastClose | null> {
   const holds = useTrading((s) => s.browse.holds);
@@ -58,10 +58,9 @@ function useLastCloses(rows: { symbol: string; source: string }[], csvVersion: n
   return known;
 }
 
-/** Where useLastCloses keeps `symbol`'s close from `source`: by the clock of any unfinished replay of it there. */
+/** Where useLastCloses keeps `symbol`'s close from `source`: apart while an unfinished replay of it there keeps its chart from being drawn. */
 function closeKey(source: string, symbol: string, holds: ReturnType<typeof useTrading.getState>['browse']['holds']): string {
-  const hold = browseHoldOn(source, symbol, holds);
-  return `${source}|${symbol}|${hold ? (hold.blind ? 'blind' : hold.until) : ''}`;
+  return `${source}|${symbol}|${browseHoldOn(source, symbol, holds) ? 'held' : ''}`;
 }
 
 export function Watchlist() {

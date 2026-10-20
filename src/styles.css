@@ -624,6 +624,8 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 .menu-item:hover:not([aria-disabled='true']), .menu-item:focus-visible { background: var(--hover); outline: none; }
 .menu-item[aria-disabled='true'] { opacity: 0.45; cursor: not-allowed; }
 .menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+/* Why the Replay menu's items above it are off: a line, not an item, in words a touch screen shows too. */
+.menu-note { margin: 2px 0 4px; padding: 2px 10px; font-size: 12px; line-height: 1.4; }
 /* The replay row: icons sit on the text line; the less used controls open from ⋯. */
 .replay-bar .btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
 .more-pop { width: max-content; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
@@ -655,7 +657,6 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
 /* Why the chart is not drawn, under the card of unfinished sessions while that shows (it would cover the
    middle of a short chart, where the reason goes otherwise). */
 .browse-notes > .browse-why { width: 100%; padding: 10px 12px; }
-.browse-cap { max-width: 100%; padding: 3px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; }
 .browse-loading { position: absolute; bottom: 36px; left: 50%; transform: translateX(-50%); z-index: 6; padding: 3px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; pointer-events: none; }
 .browse-empty { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; padding: 16px; pointer-events: none; }
 .browse-empty .card { max-width: 440px; pointer-events: auto; box-shadow: 0 10px 30px var(--shadow); }
@@ -665,7 +666,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--accent); }
   .browse-notes > * { box-shadow: none; margin: 8px 8px 0; }
   /* As wide as the column, inside its margins. */
   .browse-notes > .alert, .browse-notes > .browse-unfinished, .browse-notes > .browse-why { width: auto; }
-  .browse-notes > .browse-tip, .browse-notes > .browse-cap { align-self: flex-start; }
+  .browse-notes > .browse-tip, .browse-notes > .browse-show-unfinished { align-self: flex-start; }
 }
 
 /* Symbol search */

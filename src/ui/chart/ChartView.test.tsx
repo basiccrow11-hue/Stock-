@@ -1991,32 +1991,85 @@ describe('Bar Replay on the chart', () => {
     act(() => b.root.unmount());
   }, 30_000);
 
-  it('opens on its newest candle when it ends on the day of an unfinished replay, there being no later day to keep off screen', async () => {
+  it('draws none of a ticker a replay you have not finished keeps from the chart, and once that goes, opens as a fresh open does wherever the view was', async () => {
     const store = await import('../state/tradingStore');
     const { demoProvider } = await import('../state/dataRegistry');
     const { toChartTime } = await import('./ChartView');
+    const frame = controlFrames();
+    const a = await browse('SPY', '5m', frame);
+    const main = a.chart.series[0];
+    const n = main.points.length;
+    // The view scrolled back a few days.
+    act(() => a.chart.ts.scrollTo({ from: n - 400, to: n - 280 }));
+    frame();
+    expect(a.chart.ts.getVisibleLogicalRange()!.to).toBe(n - 280);
     // A replay of SPY left unfinished at 10:00 sixty trading days before the data's last.
     let day = demoProvider.lastDate;
     for (let i = 0; i < 60; i++) day = prevTradingDay(day);
-    const until = exchangeTimeToUnix(day, 600);
-    const summary = { id: 'old', savedAt: 1, meta: { mode: 'replay', symbols: ['SPY'], blind: false }, now: until, closedTrades: 0, openPositions: 0, equity: 25_000, startingBalance: 25_000, finished: false };
+    const summary = { id: 'old', savedAt: 1, meta: { mode: 'replay', symbols: ['SPY'], blind: false, startDate: day }, now: exchangeTimeToUnix(day, 600), closedTrades: 0, openPositions: 0, equity: 25_000, startingBalance: 25_000, finished: false };
     stored.set('session-summary:old', summary);
     stored.set('session:old', { summary, replay: { providerId: 'demo' } });
     try {
-      // This tab comes into view, and looks at the saved sessions again.
+      // This tab comes into view, and looks at the saved sessions again: SPY is not charted, not even up to that replay's clock.
       act(() => void window.dispatchEvent(new Event('focus')));
-      await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toMatchObject({ until, blind: false }), { timeout: 5000 });
-      const frame = controlFrames();
-      const a = await browse('SPY', '5m', frame);
-      const main = a.chart.series[0];
-      expect(main.points.at(-1)!.time).toBe(toChartTime(until - 300));
-      // Its newest candle in view, where it stops: not the day before its last, as a chart to the end of the data opens.
-      expect(a.chart.ts.getVisibleLogicalRange()!.to).toBeGreaterThan(main.points.length - 1);
+      await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toMatchObject({ blind: false, elsewhere: false }), { timeout: 5000 });
+      await vi.waitFor(() => expect(main.points).toEqual([]), { timeout: 5000 });
+      frame();
+      // It goes (discarded, say): the chart is drawn to the data's end, its right edge at the regular close of the day before the last.
+      stored.clear();
+      act(() => void window.dispatchEvent(new Event('focus')));
+      await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toBeNull(), { timeout: 5000 });
+      await vi.waitFor(() => expect(main.points.length).toBe(n), { timeout: 20_000 });
+      frame();
+      const before = prevTradingDay(demoProvider.lastDate);
+      const right = Math.floor(a.chart.ts.getVisibleLogicalRange()!.to);
+      expect(main.points[right].time).toBe(toChartTime(exchangeTimeToUnix(before, 955)));
+      expect(main.points[right + 1].time).toBeGreaterThanOrEqual(toChartTime(exchangeTimeToUnix(before, 960)));
       act(() => a.root.unmount());
     } finally {
       stored.clear();
       act(() => void window.dispatchEvent(new Event('focus')));
       await vi.waitFor(() => expect(store.browseHoldOn('demo', 'SPY')).toBeNull(), { timeout: 5000 });
+    }
+  }, 30_000);
+
+  it('opens as a fresh open does once imported data ends on a later day, and keeps the view where it was when it ends on the same one', async () => {
+    const store = await import('../state/tradingStore');
+    const { saveCsvDataset, deleteCsvDataset } = await import('../state/dataRegistry');
+    const { toChartTime } = await import('./ChartView');
+    const dataset = (days: string[], close = 10) => {
+      const bars: Bar[] = [];
+      for (const d of days) for (let m = 570; m < 960; m++) bars.push({ time: exchangeTimeToUnix(d, m), open: 10, high: 10.2, low: 9.8, close, volume: 100 });
+      return { symbol: 'GROW', name: 'GROW', baseTimeframe: '1m' as const, bars, importedAt: 0, fileName: 'GROW.csv' };
+    };
+    const at = (d: string, m: number) => toChartTime(exchangeTimeToUnix(d, m));
+    await saveCsvDataset(dataset(['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-06']));
+    try {
+      store.setBrowseSource('csv');
+      const frame = controlFrames();
+      const a = await browse('GROW', '5m', frame);
+      const main = a.chart.series[0];
+      const right = () => Math.floor(a.chart.ts.getVisibleLogicalRange()!.to);
+      expect(main.points[right()].time).toBe(at('2025-03-05', 955));
+      // Scrolled back, then the file is imported again with one more day: the view opens on the day before its new last.
+      act(() => a.chart.ts.scrollTo({ from: 0, to: 40 }));
+      frame();
+      await act(async () => saveCsvDataset(dataset(['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-06', '2025-03-07'])));
+      await vi.waitFor(() => expect(main.points.length).toBe(5 * 78), { timeout: 20_000 });
+      frame();
+      expect(main.points[right()].time).toBe(at('2025-03-06', 955));
+      // Scrolled back, then imported again ending on the same day: the view stays where it was.
+      act(() => a.chart.ts.scrollTo({ from: 0, to: 40 }));
+      frame();
+      await act(async () => saveCsvDataset(dataset(['2025-03-03', '2025-03-04', '2025-03-05', '2025-03-06', '2025-03-07'], 10.1)));
+      await vi.waitFor(() => expect((main.points.at(-1) as unknown as { close: number }).close).toBe(10.1), { timeout: 20_000 });
+      frame();
+      expect(right()).toBe(40);
+      act(() => a.root.unmount());
+    } finally {
+      store.setBrowseSource('demo');
+      store.setActiveSymbol('SPY');
+      await deleteCsvDataset('GROW');
     }
   }, 30_000);
 

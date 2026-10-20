@@ -130,15 +130,14 @@ export function candleSpeed(timeframe: Timeframe, speeds: readonly number[]): nu
 /**
  * A trading day from `from` to `to` (both included), each as likely as the next, for Random bar: from
  * `days` when the data has gaps (an imported file's days with bars), and not one of `except` (days tried
- * already, or those it says no to). Null when there is none.
+ * already). Null when there is none.
  */
-export function randomDay(from: string, to: string, days?: readonly string[] | null, rand: () => number = Math.random, except?: ReadonlySet<string> | ((day: string) => boolean)): string | null {
-  const out = typeof except === 'function' ? except : (d: string) => !!except?.has(d);
+export function randomDay(from: string, to: string, days?: readonly string[] | null, rand: () => number = Math.random, except?: ReadonlySet<string>): string | null {
   const pool: string[] = [];
   if (days) {
-    for (const d of days) if (d >= from && d <= to && !out(d)) pool.push(d);
+    for (const d of days) if (d >= from && d <= to && !except?.has(d)) pool.push(d);
   } else {
-    for (let d = tradingDayOnOrAfter(from); d <= to; d = nextTradingDay(d)) if (!out(d)) pool.push(d);
+    for (let d = tradingDayOnOrAfter(from); d <= to; d = nextTradingDay(d)) if (!except?.has(d)) pool.push(d);
   }
   return pool.length ? pool[Math.min(pool.length - 1, Math.floor(rand() * pool.length))] : null;
 }
@@ -159,19 +158,6 @@ export function vendorRandomFrom(lastDay: string, historyDays = 0): string {
   let d = lastDay;
   for (let i = 0; i < VENDOR_RANDOM_DAYS - historyDays; i++) d = prevTradingDay(d);
   return d;
-}
-
-/**
- * The days a replay that loads `back` trading days of bars before the day it starts and plays on for at most
- * `ahead` after it would show some of the days `from` to `to` from: `ahead` trading days before `from` to `back`
- * after `to`, both included.
- */
-export function daysReaching(from: string, to: string, back: number, ahead: number): { from: string; to: string } {
-  let lo = from;
-  for (let i = 0; i < ahead; i++) lo = prevTradingDay(lo);
-  let hi = to;
-  for (let i = 0; i < back; i++) hi = nextTradingDay(hi);
-  return { from: lo, to: hi };
 }
 
 /**

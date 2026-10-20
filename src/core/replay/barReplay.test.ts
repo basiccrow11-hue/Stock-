@@ -3,11 +3,10 @@ import type { Bar, Timeframe } from '../types';
 import { exchangeDate, exchangeTimeToUnix, nextTradingDay, parseHHMM, prevTradingDay } from '../time';
 import { aggregateBars } from '../data/aggregate';
 import { DemoDataProvider } from '../data/demoProvider';
-import { CsvDataProvider } from '../data/csvProvider';
 import type { HistoricalDataProvider } from '../data/provider';
 import { ReplayEngine, barEnds } from './ReplayEngine';
 import { DEFAULT_LOOKBACK, ReplaySession, lastDataDay, loadedDays } from './ReplaySession';
-import { PLAY_ON_DAYS, VENDOR_RANDOM_DAYS, candleSpeed, cutTime, daysReaching, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from './barReplay';
+import { PLAY_ON_DAYS, VENDOR_RANDOM_DAYS, candleSpeed, cutTime, hhmm, onlyAfterHoursFollow, playOnEndDate, randomDay, sessionEndMinute, vendorPlayOnDays, vendorRandomFrom } from './barReplay';
 
 const at = (date: string, time: string) => exchangeTimeToUnix(date, parseHHMM(time));
 const bar = (time: number): Bar => ({ time, open: 10, high: 11, low: 9, close: 10.5, volume: 100 });
@@ -186,16 +185,6 @@ describe('a random day to replay', () => {
     for (let i = 0; i < 200; i++) h = prevTradingDay(h);
     expect(h).toBe(from);
   });
-
-  it('is told apart from the days whose replay would show some of others: those loaded before it, and played on into', () => {
-    const except = daysReaching('2024-03-13', '2024-03-14', 3, 2);
-    // Two days before the 13th play on into it; three after the 14th load it among the days before them.
-    expect(except).toEqual({ from: '2024-03-11', to: '2024-03-19' });
-    const out = (d: string) => d >= except.from && d <= except.to;
-    expect(randomDay('2024-03-04', '2024-03-22', null, () => 0.999, out)).toBe('2024-03-22');
-    expect(randomDay('2024-03-11', '2024-03-19', null, () => 0.5, out)).toBeNull();
-    expect(randomDay('2024-03-04', '2024-03-22', null, () => 0.5, out)! < '2024-03-11').toBe(true);
-  });
 });
 
 describe('whether only after-hours trading follows a bar replay’s start', () => {
@@ -264,31 +253,6 @@ describe('a chart to look at before any replay (ReplaySession.preview)', () => {
     const daily = aggregateBars(h.bars, '1D', h.timeframe);
     expect(daily.length + new Set(own.map((b) => exchangeDate(b.time))).size).toBe(DEFAULT_LOOKBACK['1D'] + 1);
     expect(Math.max(...h.bars.map((b) => b.time + 30 * 60))).toBeLessThanOrEqual(own[0].time);
-  });
-
-  it('ends at the end of a day before its last when asked, with the days a replay loads before it; on data with gaps, the last day before it with bars', async () => {
-    let day = p.lastDate;
-    for (let i = 0; i < 60; i++) day = prevTradingDay(day);
-    const s = await ReplaySession.preview(p, { symbol: 'SPY', lookbackDays: 15, endDay: day }, undefined, now);
-    expect(s.setup.date).toBe(day);
-    const shown = s.engine.visibleBaseBars();
-    let first = day;
-    for (let i = 0; i < 15; i++) first = prevTradingDay(first);
-    expect(exchangeDate(shown[0].time)).toBe(first);
-    expect(shown.at(-1)!.time).toBe(at(day, '19:59'));
-    // A day at or after its last: to the end of the data, as with none.
-    const late = await ReplaySession.preview(p, { symbol: 'SPY', lookbackDays: 1, endDay: nextTradingDay(p.lastDate) }, undefined, now);
-    expect(late.setup.date).toBe(p.lastDate);
-    expect(late.engine.visibleBaseBars().at(-1)!.time).toBe(at(p.lastDate, '19:59'));
-
-    // Imported bars with none on the 13th: a chart to end that day ends on the 12th.
-    const csv = new CsvDataProvider();
-    csv.upsert({ symbol: 'GAPS', name: 'GAPS', baseTimeframe: '1m', importedAt: 0, fileName: 'g.csv', bars: [...bars('2024-03-11', '09:30', '16:00'), ...bars('2024-03-12', '09:30', '16:00'), ...bars('2024-03-14', '09:30', '16:00')] });
-    const g = await ReplaySession.preview(csv, { symbol: 'GAPS', lookbackDays: 1, endDay: '2024-03-13' }, undefined, now);
-    expect(g.setup.date).toBe('2024-03-12');
-    const gs = g.engine.visibleBaseBars();
-    expect(exchangeDate(gs[0].time)).toBe('2024-03-11');
-    expect(gs.at(-1)!.time).toBe(at('2024-03-12', '15:59'));
   });
 
   it('ends a data source that does not say where its data ends at the last trading day that has ended', async () => {
