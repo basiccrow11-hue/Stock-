@@ -203,7 +203,7 @@ describe('the Replay button in the chart toolbar', () => {
       act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, holds: [hold] } })));
     };
     await held();
-    const random = "Random bar is off while a SPY replay is unfinished: it could pick one of that replay's days, after its clock.";
+    const random = "Random bar is off while a replay of SPY is unfinished: it could pick one of that replay's days, after its clock.";
     expect(reads()).toEqual({ out: ['Select bar', 'Select date…', '[off] Random bar', `> ${random}`], why: { 'Random bar': random } });
 
     // With no session, that replay keeps SPY's chart hidden: all three are off for it, said once, after Random bar.
@@ -447,7 +447,7 @@ describe('the chart with no session', () => {
     for (const label of ['Select bar', 'Select date…', 'Random bar']) expect(p.item(label)!.getAttribute('aria-disabled'), label).toBe('true');
     act(() => p.arrow().click());
     holds([{ ...hold, blind: false, elsewhere: true }]);
-    expect(card()!.textContent).toContain('A SPY replay is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.');
+    expect(card()!.textContent).toContain('A replay of SPY is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.');
     // Its words take the place of a load that failed before it came, never beside them.
     act(() => p.store.useTrading.setState((s) => ({ browse: { ...s.browse, error: 'Add a Polygon API key in Data & Settings.', loading: false } })));
     expect(p.host.querySelectorAll('.browse-empty, .browse-why')).toHaveLength(1);

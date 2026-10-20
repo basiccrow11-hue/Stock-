@@ -687,7 +687,7 @@ describe('unfinished sessions and other tabs', () => {
   /** Another tab's save or deletion of a session, as the browser tells this one. */
   const told = () => window.dispatchEvent(new StorageEvent('storage', { key: 'stock-replay-sessions-changed' }));
   const yours = /^Your SPY replay of 2024-03-12 is unfinished/;
-  const elsewhere = /^A SPY replay is running in another tab/;
+  const elsewhere = /^A replay of SPY is running in another tab/;
 
   it('offers a replay another tab started after this one opened once that tab closes, as the note on its chart says it is yours to resume', async () => {
     const b = await page();
@@ -951,7 +951,7 @@ describe('the Trade screen as a reload carries its session on', () => {
     // The tab running it was duplicated: the copy remembers the session too, but the other tab holds it.
     locks.elsewhere = new Set([`stock-replay-session:${id}`]);
     const app = await openApp();
-    await vi.waitFor(() => expect(app.start()).toContain('A SPY replay is running in another tab, and charting SPY here'), { timeout: 5000 });
+    await vi.waitFor(() => expect(app.start()).toContain('A replay of SPY is running in another tab, and charting SPY here'), { timeout: 5000 });
     await settle();
     const waiting = app.screens.filter((s) => s.includes('Picking up where you left off'));
     expect(waiting.length).toBeGreaterThan(0);
@@ -1444,7 +1444,7 @@ describe('the chart with no session beside a replay not finished', () => {
     const requests = () => vi.mocked(polygonProvider.getBars).mock.calls.length + vi.mocked(polygonProvider.getCoarseBars).mock.calls.length;
     b.store.setTimeframe('1h');
     b.store.browseSymbol('polygon', 'SPY');
-    const why = 'A SPY replay is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.';
+    const why = 'A replay of SPY is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.';
     await vi.waitFor(() => {
       b.store.getBaseBars('SPY');
       expect(b.store.browseHiddenReason()).toBe(why);
@@ -1515,7 +1515,7 @@ describe('the chart with no session beside a replay not finished', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: `stock-replay-session-position:${a.store.useTrading.getState().session!.id}` }));
     await vi.waitFor(() => expect(b.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: true }), { timeout: 3000 });
     expect(b.store.getBaseBars('SPY')).toEqual([]);
-    expect(b.store.browseHiddenReason()).toBe('A SPY replay is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.');
+    expect(b.store.browseHiddenReason()).toBe('A replay of SPY is running in another tab, and charting SPY here would show what comes next in it. It is charted here again once that replay ends.');
     // It ends there: the chart has all its bars again.
     await a.store.endSession();
     window.dispatchEvent(new StorageEvent('storage', { key: null }));
@@ -1645,7 +1645,7 @@ describe('the chart with no session beside a replay not finished', () => {
     const { demoProvider } = await import('./dataRegistry');
     expect(await b.store.startReplay({ ...replay, date: prevTradingDay(prevTradingDay(day)) })).toBe(true);
     const running = b.store.useTrading.getState().session!.id;
-    const off = "Random bar is off while a SPY replay is unfinished: it could pick one of that replay's days, after its clock.";
+    const off = "Random bar is off while a replay of SPY is unfinished: it could pick one of that replay's days, after its clock.";
     expect(b.store.randomBarBlocked()).toBe(off);
     expect(await b.store.startRandomBar(() => 0.999999)).toBe(false);
     expect(b.store.useTrading.getState().session!.id).toBe(running);

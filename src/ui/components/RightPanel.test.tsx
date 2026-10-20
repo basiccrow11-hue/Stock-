@@ -78,7 +78,7 @@ describe('the right column', () => {
     holds([hold, other]);
     expect(line()).toBe(`Resume one of your unfinished replays on the chart, or discard them or pick another ticker, then press Replay.${after}`);
     holds([{ ...hold, elsewhere: true, date: undefined } as unknown as typeof hold]);
-    expect(store.browseHiddenReason()).toMatch(/^A SPY replay is running in another tab/);
+    expect(store.browseHiddenReason()).toMatch(/^A replay of SPY is running in another tab/);
     expect(line()).toBe(elsewhere);
     // One of yours beside one in another tab: yours, as the note on the chart says.
     holds([hold, { ...other, elsewhere: true, date: undefined } as unknown as typeof hold]);
