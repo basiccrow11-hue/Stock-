@@ -1537,6 +1537,82 @@ describe('the chart with no session beside a replay not finished', () => {
     expect(await b.store.startRandomBar(() => 0.999999)).toBe(true);
     expect(b.store.useTrading.getState().now).toBe(exchangeTimeToUnix(demoProvider.lastDate, 9 * 60 + 30));
   });
+
+  /**
+   * Makes carrying a replay on load its data for a while, until what this returns is called, and then fail as
+   * a vendor's rate limit does. `called`: once the load has begun (the session is this tab's by then).
+   */
+  async function slowFailingResume() {
+    let fail!: () => void;
+    const failing = new Promise<void>((r) => (fail = r));
+    const { ReplaySession } = await import('../../core/replay/ReplaySession');
+    const load = vi.spyOn(ReplaySession, 'resume').mockImplementation(async () => {
+      await failing;
+      throw new Error('Polygon rate limit reached. Wait a minute and try again.');
+    });
+    return { fail, called: () => vi.waitFor(() => expect(load).toHaveBeenCalled()) };
+  }
+
+  it('still says a replay you have not finished is yours to resume or discard when carrying it on fails, though the saved sessions were read meanwhile', async () => {
+    const { id, day } = await leftUnfinished();
+    const b = await page();
+    b.store.setActiveSymbol('SPY');
+    await vi.waitFor(() => {
+      b.store.getBaseBars('SPY');
+      expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    });
+    const resume = await slowFailingResume();
+    const resumed = b.store.resumeSession(id);
+    await resume.called();
+    // The window comes back into view as it loads: the saved sessions are read again. It is not free, as this
+    // tab holds it, but no other tab runs it.
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+    await settle();
+    expect(b.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: false });
+    resume.fail();
+    expect(await resumed).toBe(false);
+    expect(b.store.useTrading.getState()).toMatchObject({ session: null, loading: false, error: 'Polygon rate limit reached. Wait a minute and try again.' });
+    await settle();
+    expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    expect(b.store.randomBarBlocked()).toBe(unfinishedWhy('SPY', day));
+    // And stays so, as its card offers it.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(b.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+    expect((await b.store.unfinishedSessions()).map((s) => s.id)).toEqual([id]);
+  });
+
+  it('reads the saved sessions again once carrying a replay on fails, so a read that found it this tab’s and ends after that does not leave it said to run in another tab', async () => {
+    const { id, day } = await leftUnfinished();
+    // A tab that has not read them yet (its chart has not asked for bars).
+    const c = await page();
+    await settle();
+    expect(c.store.useTrading.getState().browse.holds).toEqual([]);
+    const resume = await slowFailingResume();
+    const resumed = c.store.resumeSession(id);
+    await resume.called();
+    // A read starts as it loads (the window comes back into view). It finds the session not free, as this tab
+    // holds it; what data source it is on (read once) comes in only after carrying it on has failed.
+    const gate = () => {
+      let open!: () => void;
+      return { held: new Promise<void>((r) => (open = r)), open: () => open() };
+    };
+    const summaries = gate();
+    const record = gate();
+    db.readMs = { kv: 1 };
+    db.readHeld = { kv: summaries.held };
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(db.reading.size).toBeGreaterThan(0));
+    db.readHeld = { kv: record.held };
+    summaries.open();
+    await settle();
+    resume.fail();
+    expect(await resumed).toBe(false);
+    record.open();
+    await settle();
+    expect(c.store.browseHoldOn('demo', 'SPY')).toEqual({ blind: false, elsewhere: false });
+    expect(c.store.browseHiddenReason()).toBe(unfinishedWhy('SPY', day));
+  });
 });
 
 describe('a blind session left unfinished', () => {

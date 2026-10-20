@@ -27,6 +27,7 @@ import {
   MAX_SAVED_SESSIONS,
   claimSession,
   deleteSession,
+  heldHere,
   keptSessions,
   listSessions,
   notePosition,
@@ -535,8 +536,9 @@ async function readHolds(): Promise<BrowseHold[]> {
     if (!source) continue;
     // Where its clock is plays no part in what is hidden: the chart is not drawn whatever it is, so another tab
     // playing it on asks nothing of this one (on Polygon or Alpaca, no request). Only one left to resume, not
-    // blind, is named by its day, which does not move.
-    const elsewhere = !freeIds.has(k.id);
+    // blind, is named by its day, which does not move. One this tab holds (being carried on, say) is not
+    // free either, but no other tab runs it: it is still yours to resume or discard, as its card says.
+    const elsewhere = !freeIds.has(k.id) && !heldHere(k.id);
     const date = !m.blind && !elsewhere ? { date: exchangeDate(k.now) } : {};
     out.push({ id: k.id, providerId: getProvider(source).id, symbols: m.symbols.map((x) => String(x).toUpperCase()), ...date, blind: !!m.blind, elsewhere });
   }
@@ -1718,6 +1720,9 @@ export async function resumeSession(id: string): Promise<boolean> {
   const stop = (message?: string): false => {
     if (resuming === id) resuming = null;
     releaseSession(id);
+    // What is held to is read again now it is let go: a read made meanwhile (on coming back to the window,
+    // say) may have found it neither free nor this tab's, as if another tab ran it, and nothing else would.
+    void refreshHolds();
     if (message && seq === loadSeq) useTrading.setState({ loading: false, error: message });
     return false;
   };
